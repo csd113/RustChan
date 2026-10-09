@@ -1,10 +1,10 @@
 use super::{
     admin_panel_error_redirect_anchor_open, admin_panel_redirect_anchor_open, banner,
-    check_admin_csrf_jar, checkbox_is_on, db, format_banner_upload_error, read_checkbox_field,
-    read_limited_upload_bytes, read_text_field, require_admin_post_origin_and_csrf,
-    require_admin_session_sid, require_same_origin_request, AppError, AppState, BannerScope,
-    BannerTargetType, CookieJar, Form, HeaderMap, Multipart, Response, Result, State,
-    MAX_BANNER_UPLOAD_BYTES, SESSION_COOKIE,
+    check_admin_csrf_jar, checkbox_is_on, db, format_banner_upload_error, preflight_asset_upload,
+    read_checkbox_field, read_limited_upload_bytes, read_text_field,
+    require_admin_post_origin_and_csrf, require_admin_session_sid, require_same_origin_request,
+    AppError, AppState, AssetMultipartBudget, BannerScope, BannerTargetType, CookieJar, Form,
+    HeaderMap, Multipart, Response, Result, State, MAX_BANNER_UPLOAD_BYTES, SESSION_COOKIE,
 };
 use anyhow::Context as _;
 use axum::response::IntoResponse as _;
@@ -25,6 +25,7 @@ struct ParsedBannerUpload {
 }
 
 async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpload> {
+    let mut budget = AssetMultipartBudget::default();
     let mut csrf = None;
     let mut board_id = None;
     let mut target_type = String::from("none");
@@ -45,6 +46,7 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
         let Some(field) = next_field else {
             break;
         };
+        budget.note(&field)?;
         match field.name() {
             Some("_csrf") => csrf = Some(read_text_field(field).await?),
             Some("board_id") => board_id = read_text_field(field).await?.trim().parse::<i64>().ok(),
@@ -66,7 +68,7 @@ async fn parse_banner_upload(mut multipart: Multipart) -> Result<ParsedBannerUpl
                     banner_bytes = Some(bytes);
                 }
             }
-            _ => {}
+            _ => crate::handlers::discard_unknown_multipart_field(field).await?,
         }
     }
 
@@ -269,8 +271,10 @@ async fn upload_banner_for_scope(
     scope: BannerScope,
     board_id: Option<i64>,
     parsed: ParsedBannerUpload,
+    media_permit: crate::middleware::MediaUploadGuard,
 ) -> Result<String> {
     tokio::task::spawn_blocking(move || -> Result<String> {
+        let _media_permit = media_permit;
         let mut conn = state.db.get()?;
         require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
         let (target_type, target_value) = resolve_banner_target_selection(
@@ -386,9 +390,20 @@ pub(in crate::server) async fn upload_global_banner(
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_same_origin_request(&headers, Some(peer))?;
+    preflight_asset_upload(&state, session_id.clone()).await?;
+    let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
     check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
-    match upload_banner_for_scope(state, session_id, BannerScope::Global, None, parsed).await {
+    match upload_banner_for_scope(
+        state,
+        session_id,
+        BannerScope::Global,
+        None,
+        parsed,
+        media_permit,
+    )
+    .await
+    {
         Ok(anchor) => Ok(admin_panel_redirect_anchor_open(
             "Global banner uploaded.",
             &anchor,
@@ -422,9 +437,20 @@ pub(in crate::server) async fn upload_home_banner(
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_same_origin_request(&headers, Some(peer))?;
+    preflight_asset_upload(&state, session_id.clone()).await?;
+    let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
     check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
-    match upload_banner_for_scope(state, session_id, BannerScope::Home, None, parsed).await {
+    match upload_banner_for_scope(
+        state,
+        session_id,
+        BannerScope::Home,
+        None,
+        parsed,
+        media_permit,
+    )
+    .await
+    {
         Ok(anchor) => Ok(admin_panel_redirect_anchor_open(
             "Home page banner uploaded.",
             &anchor,
@@ -458,6 +484,8 @@ pub(in crate::server) async fn upload_board_banner(
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_same_origin_request(&headers, Some(peer))?;
+    preflight_asset_upload(&state, session_id.clone()).await?;
+    let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
     check_admin_csrf_jar(&jar, parsed.csrf.as_deref())?;
     let board_id = parsed
@@ -470,6 +498,7 @@ pub(in crate::server) async fn upload_board_banner(
         BannerScope::Board,
         Some(board_id),
         parsed,
+        media_permit,
     )
     .await
     {
@@ -613,7 +642,7 @@ pub(in crate::server) async fn move_banner(
         _ => {
             return Err(AppError::BadRequest(
                 "Invalid banner move direction.".into(),
-            ))
+            ));
         }
     };
     let anchor = tokio::task::spawn_blocking({

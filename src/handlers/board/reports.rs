@@ -15,31 +15,35 @@ pub(in crate::server) struct ReportForm {
     pub csrf: Option<String>,
 }
 
+/// Bound optional Unicode report text while rejecting hidden control characters.
+fn report_reason(raw: Option<&str>) -> Result<String> {
+    let raw = raw.unwrap_or("");
+    if raw.chars().any(char::is_control) {
+        return Err(AppError::BadRequest(
+            "Report reason contains control characters.".into(),
+        ));
+    }
+    Ok(raw.trim().chars().take(256).collect())
+}
+
 pub(in crate::server) async fn file_report(
     State(state): State<AppState>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
+    req_headers: axum::http::HeaderMap,
+    peer: crate::middleware::SecureCookieContext,
     Form(form): Form<ReportForm>,
 ) -> Result<Response> {
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::check_menu_action_csrf(&jar, &req_headers, peer, form.csrf.as_deref())?;
 
     let ip_hash = hash_ip(&identity_key(&client_ip, &jar), &CONFIG.cookie_secret);
-    let reason = form
-        .reason
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(256)
-        .collect::<String>();
+    let reason = report_reason(form.reason.as_deref())?;
 
     let post_id = form.post_id;
-    let board_raw = form
-        .board
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect::<String>();
+    if post_id <= 0 || form.thread_id <= 0 || !super::valid_action_board(&form.board) {
+        return Err(AppError::BadRequest("Invalid report target.".into()));
+    }
+    let board_raw = form.board.clone();
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
@@ -50,12 +54,13 @@ pub(in crate::server) async fn file_report(
         .get("csrf_token")
         .map(|cookie| cookie.value().to_owned())
         .unwrap_or_default();
-    let db_thread_id = tokio::task::spawn_blocking({
+    let outcome = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<i64> {
+        move || -> Result<Option<(i64, db::ReportSubmission)>> {
             let conn = pool.get()?;
+            let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
             let access_context = load_board_access_context(
-                &conn,
+                &tx,
                 &board_raw_closure,
                 admin_session_id.as_deref(),
                 access_cookie.as_deref(),
@@ -67,10 +72,10 @@ pub(in crate::server) async fn file_report(
             }
             // Banned identities must not file reports. CSRF has already been
             // validated above, so the ban notice can render its appeal form.
-            super::ensure_actor_not_banned(&conn, &ip_hash, csrf_cookie)?;
+            super::ensure_actor_not_banned(&tx, &ip_hash, csrf_cookie)?;
             let board = access_context.board;
             // Verify post exists and belongs to this board to prevent spoofed reports.
-            let post = db::get_post(&conn, post_id)?
+            let post = db::get_post(&tx, post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
             if post.board_id != board.id {
                 return Err(AppError::BadRequest(
@@ -85,17 +90,46 @@ pub(in crate::server) async fn file_report(
             // Use the DB's thread_id for the redirect — not the user-submitted value.
             let authoritative_thread_id = post.thread_id;
             // The report ID does not affect the authoritative thread redirect.
-            db::file_report(&conn, post_id, &reason, &ip_hash).map(|_report_id| ())?;
-            Ok(authoritative_thread_id)
+            // Serialize the abuse budget and insertion. Duplicates remain
+            // idempotent even when the reporter has exhausted the budget.
+            let (recent, duplicate): (i64, bool) = tx.query_row(
+                "SELECT (SELECT COUNT(*) FROM reports WHERE reporter_hash = ?1 AND created_at > unixepoch() - 3600),
+                        EXISTS(SELECT 1 FROM reports WHERE post_id = ?2 AND reporter_hash = ?1 AND status = 'open')",
+                rusqlite::params![ip_hash, post_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if recent >= 20 && !duplicate {
+                return Ok(None);
+            }
+            let submission = db::file_report(&tx, post_id, &reason, &ip_hash)?;
+            tx.commit()?;
+            Ok(Some((authoritative_thread_id, submission)))
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Redirect back to the thread using the DB-resolved IDs.
-    // `board_raw` is already sanitised to alphanumeric earlier in this handler.
+    let Some((db_thread_id, submission)) = outcome else {
+        let message = "Too many reports. Please try again in an hour.";
+        let mut response = (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            axum::Extension(crate::error::ErrorPage::Message(message.to_owned())),
+            axum::response::Html(templates::error_page(429, message)),
+        )
+            .into_response();
+        drop(response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("3600"),
+        ));
+        return Ok(response);
+    };
+    let reported = match submission {
+        db::ReportSubmission::Filed => "1",
+        db::ReportSubmission::AlreadyFiled => "duplicate",
+    };
+    // Target and board were checked together under the write lock.
     Ok(Redirect::to(&format!(
-        "/{board_raw}/thread/{db_thread_id}?reported=1#p{}",
+        "/{board_raw}/thread/{db_thread_id}?reported={reported}#p{}",
         form.post_id
     ))
     .into_response())

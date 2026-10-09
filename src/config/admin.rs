@@ -1161,11 +1161,24 @@ mod tests {
     }
 }
 
+/// Owns the settings lock until the configuration operation completes.
+pub(crate) struct SettingsLease(std::fs::File);
+
+impl Drop for SettingsLease {
+    fn drop(&mut self) {
+        // Closing only this descriptor can leave a Unix lock held by a duplicate
+        // inherited during concurrent process creation. Release it explicitly.
+        if let Err(error) = self.0.unlock() {
+            tracing::error!(%error, "failed to release settings lease");
+        }
+    }
+}
+
 /// Lock the fixed configuration resource across web saves and supervisor transactions.
 ///
 /// # Errors
 /// Rejects unsafe lock paths and concurrent saves, restarts or configuration recovery.
-pub(crate) fn settings_lease(path: &Path) -> anyhow::Result<std::fs::File> {
+pub(crate) fn settings_lease(path: &Path) -> anyhow::Result<SettingsLease> {
     let parent = path
         .parent()
         .context("settings path needs a parent")?
@@ -1219,7 +1232,7 @@ pub(crate) fn settings_lease(path: &Path) -> anyhow::Result<std::fs::File> {
     file.try_lock().context(
         "Another configuration save, update or restart is in progress. Retry after it completes.",
     )?;
-    Ok(file)
+    Ok(SettingsLease(file))
 }
 
 /// Compare effective startup controls against the running process, excluding live controls.
@@ -1363,6 +1376,20 @@ mod restart_tests {
         );
         Ok(())
     }
+    /// A retained descriptor must not extend the owning settings operation's lock.
+    #[test]
+    fn settings_lease_release_is_not_delayed_by_a_retained_descriptor() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("settings.toml");
+        let lease = settings_lease(&path)?;
+        let retained_descriptor = lease.0.try_clone()?;
+        drop(lease);
+        let next_lease = settings_lease(&path)?;
+        drop(next_lease);
+        drop(retained_descriptor);
+        Ok(())
+    }
+
     /// A supervisor's lease rejects all configuration writers until it releases the resource.
     #[test]
     fn supervisor_lease_rejects_config_save_without_partial_mutation() -> anyhow::Result<()> {

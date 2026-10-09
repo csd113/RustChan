@@ -268,11 +268,17 @@ fn admin_board_routes() -> Router<AppState> {
         .route(
             "/admin/site/favicon",
             post(crate::handlers::admin::update_site_favicon)
+                .layer::<_, std::convert::Infallible>(axum::middleware::from_fn(
+                    crate::handlers::enforce_public_multipart_envelope,
+                ))
                 .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
         )
         .route(
             "/admin/board/favicon",
             post(crate::handlers::admin::update_board_favicon)
+                .layer::<_, std::convert::Infallible>(axum::middleware::from_fn(
+                    crate::handlers::enforce_public_multipart_envelope,
+                ))
                 .layer(DefaultBodyLimit::max(5 * 1024 * 1024)),
         )
         .route(
@@ -282,16 +288,25 @@ fn admin_board_routes() -> Router<AppState> {
         .route(
             "/admin/site/banner",
             post(crate::handlers::admin::upload_global_banner)
+                .layer::<_, std::convert::Infallible>(axum::middleware::from_fn(
+                    crate::handlers::enforce_public_multipart_envelope,
+                ))
                 .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route(
             "/admin/home/banner",
             post(crate::handlers::admin::upload_home_banner)
+                .layer::<_, std::convert::Infallible>(axum::middleware::from_fn(
+                    crate::handlers::enforce_public_multipart_envelope,
+                ))
                 .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route(
             "/admin/board/banner",
             post(crate::handlers::admin::upload_board_banner)
+                .layer::<_, std::convert::Infallible>(axum::middleware::from_fn(
+                    crate::handlers::enforce_public_multipart_envelope,
+                ))
                 .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route(

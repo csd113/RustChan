@@ -466,6 +466,14 @@ pub struct AppState {
     pub maintenance_gate: MaintenanceGate,
     /// Gate limiting concurrent public media parsing and processing.
     pub(crate) media_upload_gate: MediaUploadGate,
+    /// Bound admitted HTTP requests and response streams without queuing.
+    pub(crate) request_work_gate: super::WorkGate,
+    /// Bound memory-hard authentication independently of media and search.
+    pub(crate) password_work_gate: super::WorkGate,
+    /// Bound anonymous CAPTCHA generation without blocking async workers.
+    pub(crate) captcha_work_gate: super::WorkGate,
+    /// Bound concurrent FTS counting and sorting without a waiter queue.
+    pub(crate) search_work_gate: super::WorkGate,
     /// State of database maintenance jobs.
     pub db_maintenance_jobs: DbMaintenanceJobs,
     /// Current Tor onion address, when onion service is enabled.

@@ -105,7 +105,7 @@ pub(in crate::server::handlers) fn require_admin_session_sid(
 }
 
 /// Requires same origin request.
-pub(super) fn require_same_origin_request(
+pub(in crate::server) fn require_same_origin_request(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
 ) -> Result<()> {
@@ -3591,8 +3591,8 @@ mod tests {
         ensure!(
             response.headers().get(header::LOCATION)
                 == Some(&HeaderValue::from_static(
-                "/admin/panel?flash=Failed%20job%20counter%20dismissed.&open=site-health#site-health"
-            ))
+                    "/admin/panel?flash=Failed%20job%20counter%20dismissed.&open=site-health#site-health"
+                ))
         );
         let conn = state.db.get().context("get database connection")?;
         ensure!(

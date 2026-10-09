@@ -994,11 +994,17 @@ pub(in crate::server) async fn unlock_board_access(
         return Ok(board_access_required_response(jar, html));
     }
 
+    let permit = state.password_work_gate.try_begin()?;
+    if record_board_unlock_failure(&attempt_key) > super::board_password_fail_limit() {
+        return Err(AppError::DbBusy);
+    }
     let password_hash = access_context.board.access_password_hash.clone();
-    let password_valid_result =
-        tokio::task::spawn_blocking(move || verify_password(&password, &password_hash))
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    let password_valid_result = tokio::task::spawn_blocking(move || {
+        let _password_permit = permit;
+        verify_password(&password, &password_hash)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
     let password_valid = match password_valid_result {
         Ok(valid) => valid,
         Err(error) => {
@@ -1020,7 +1026,6 @@ pub(in crate::server) async fn unlock_board_access(
     };
 
     if !password_valid {
-        record_board_unlock_failure(&attempt_key);
         if let Some(retry_after_secs) = board_unlock_retry_after_secs(&attempt_key) {
             let html = render_board_unlock_html(
                 &access_context.board,
@@ -1084,27 +1089,52 @@ pub(in crate::server) struct ThreadPreferenceForm {
     pub csrf: Option<String>,
 }
 
+/// Validated personal thread action; none of these changes global moderation state.
+#[derive(Clone, Copy)]
+enum ThreadPreferenceAction {
+    /// Set the personal pin.
+    Pin,
+    /// Clear the personal pin.
+    Unpin,
+    /// Hide from active board listings.
+    Hide,
+    /// Restore to active board listings.
+    Unhide,
+}
+
+impl ThreadPreferenceAction {
+    /// Reject unknown actions before entering a write transaction.
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "pin" => Ok(Self::Pin),
+            "unpin" => Ok(Self::Unpin),
+            "hide" => Ok(Self::Hide),
+            "unhide" => Ok(Self::Unhide),
+            _ => Err(AppError::BadRequest("Unknown thread action.".into())),
+        }
+    }
+}
+
 pub(in crate::server) async fn update_thread_preference(
     State(state): State<AppState>,
     Path(board_short): Path<String>,
     crate::middleware::ClientIp(client_ip): crate::middleware::ClientIp,
     jar: CookieJar,
+    req_headers: HeaderMap,
+    peer: SecureCookieContext,
     Form(form): Form<ThreadPreferenceForm>,
 ) -> Result<Response> {
-    check_csrf_jar(&jar, form.csrf.as_deref())?;
+    super::check_menu_action_csrf(&jar, &req_headers, peer, form.csrf.as_deref())?;
 
-    let board_from_form = form
-        .board
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect::<String>();
-    if board_from_form != board_short {
+    if form.board != board_short || !super::valid_action_board(&board_short) {
         return Err(AppError::BadRequest("Board mismatch.".into()));
+    }
+    if form.thread_id <= 0 {
+        return Err(AppError::BadRequest("Invalid thread ID.".into()));
     }
 
     let viewer_key = viewer_preference_key(&client_ip, &jar);
-    let action = form.action.trim().to_ascii_lowercase();
+    let action = ThreadPreferenceAction::parse(&form.action)?;
     let thread_id = form.thread_id;
     let admin_session_id = jar
         .get(ADMIN_SESSION_COOKIE)
@@ -1116,8 +1146,14 @@ pub(in crate::server) async fn update_thread_preference(
         let board_short = board_short.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
-            let access_context = load_board_access_context(
+            // Keep access/target validation, both flags, and default-row cleanup
+            // atomic with archiving, deletion, and another preference action.
+            let tx = rusqlite::Transaction::new_unchecked(
                 &conn,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let access_context = load_board_access_context(
+                &tx,
                 &board_short,
                 admin_session_id.as_deref(),
                 access_cookie.as_deref(),
@@ -1128,19 +1164,35 @@ pub(in crate::server) async fn update_thread_preference(
                 ));
             }
             let board = access_context.board;
-            let thread = db::get_thread(&conn, thread_id)?
+            let thread = db::get_thread(&tx, thread_id)?
                 .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
-            if thread.board_id != board.id || thread.archived {
+            if thread.board_id != board.id {
                 return Err(AppError::NotFound("Thread not found.".into()));
             }
-
-            match action.as_str() {
-                "pin" => db::set_thread_pinned(&conn, &viewer_key, thread.id, true)?,
-                "unpin" => db::set_thread_pinned(&conn, &viewer_key, thread.id, false)?,
-                "hide" => db::set_thread_hidden(&conn, &viewer_key, thread.id, true)?,
-                "unhide" => db::set_thread_hidden(&conn, &viewer_key, thread.id, false)?,
-                _ => return Err(AppError::BadRequest("Unknown thread action.".into())),
+            if thread.archived
+                && matches!(
+                    action,
+                    ThreadPreferenceAction::Pin | ThreadPreferenceAction::Hide
+                )
+            {
+                return Err(AppError::Conflict("This thread is archived.".into()));
             }
+
+            match action {
+                ThreadPreferenceAction::Pin => {
+                    db::set_thread_pinned(&tx, &viewer_key, thread.id, true)?;
+                }
+                ThreadPreferenceAction::Unpin => {
+                    db::set_thread_pinned(&tx, &viewer_key, thread.id, false)?;
+                }
+                ThreadPreferenceAction::Hide => {
+                    db::set_thread_hidden(&tx, &viewer_key, thread.id, true)?;
+                }
+                ThreadPreferenceAction::Unhide => {
+                    db::set_thread_hidden(&tx, &viewer_key, thread.id, false)?;
+                }
+            }
+            tx.commit()?;
             Ok(())
         }
     })

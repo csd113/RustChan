@@ -25,6 +25,8 @@ mod pool;
 pub mod posts;
 /// Baseline schema installation, repair, and verification.
 mod schema;
+/// Scoped `SQLite` progress limits for public full-text searches.
+mod search_budget;
 /// First-run setup state and completion markers.
 pub mod setup;
 /// Built-in and custom theme persistence.

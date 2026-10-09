@@ -180,6 +180,48 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
     Ok(posts)
 }
 
+/// Load at most 200 replies and the opening post, with a cursor for older replies.
+/// Numeric cursors use the thread/id index, without deep OFFSET scans.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn get_thread_post_window(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    before: Option<i64>,
+) -> Result<(Vec<Post>, Option<i64>)> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {POST_SELECT_COLUMNS} FROM posts
+         WHERE thread_id = ?1 AND is_op = 0 AND id <= ?2
+         ORDER BY id DESC LIMIT 201"
+    ))?;
+    let mut posts = stmt
+        .query_map(
+            params![
+                thread_id,
+                before.map_or(i64::MAX, |id| id.saturating_sub(1))
+            ],
+            map_post,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_older = posts.len() > 200;
+    posts.truncate(200);
+    let older_before = has_older
+        .then(|| posts.last().map(|post| post.id))
+        .flatten();
+    let op = conn
+        .prepare_cached(&format!(
+            "SELECT {POST_SELECT_COLUMNS} FROM posts WHERE thread_id = ?1 AND is_op = 1 LIMIT 1"
+        ))?
+        .query_row(params![thread_id], map_post)
+        .optional()?;
+    if let Some(op) = op {
+        posts.push(op);
+    }
+    posts.reverse();
+    Ok((posts, older_before))
+}
+
 /// Fetch posts in `thread_id` whose id is strictly greater than `since_id`.
 /// Returns them oldest-first. Used by the thread auto-update polling endpoint.
 ///
@@ -365,7 +407,10 @@ pub fn get_post_submission(
     Ok(conn
         .query_row(
             "SELECT thread_id, post_id, is_thread
-             FROM post_submissions
+             FROM (
+                 SELECT * FROM post_submissions
+                 UNION ALL SELECT * FROM post_submission_tombstones
+             )
              WHERE submission_token = ?1
                AND ip_hash = ?2
                AND board_id = ?3
@@ -399,6 +444,14 @@ pub fn record_post_submission(
         return Ok(());
     }
 
+    anyhow::ensure!(
+        !conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM post_submission_tombstones WHERE submission_token = ?1)",
+            [submission_token],
+            |row| row.get::<_, bool>(0),
+        )?,
+        "submission token was already accepted and deleted"
+    );
     conn.execute(
         "INSERT INTO post_submissions
          (submission_token, ip_hash, board_id, thread_id, post_id, is_thread)
@@ -422,6 +475,12 @@ pub fn record_post_submission(
     .context("Failed to prune expired post submission tokens")
     .map(|_affected_rows| ())?;
 
+    conn.execute(
+        "DELETE FROM post_submission_tombstones WHERE created_at < unixepoch() - 604800",
+        [],
+    )
+    .context("Failed to prune expired deleted submission receipts")
+    .map(|_affected_rows| ())?;
     Ok(())
 }
 
@@ -522,7 +581,7 @@ pub fn delete_post(
 }
 
 /// Delete a non-opening post inside the caller's transaction.
-fn delete_post_reply_in_tx(
+pub(crate) fn delete_post_reply_in_tx(
     conn: &rusqlite::Connection,
     post_id: i64,
 ) -> crate::error::Result<crate::db::DeletePathsResult> {
@@ -666,11 +725,23 @@ pub fn self_delete_post(
     token: &str,
     delete_window_secs: i64,
 ) -> crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> {
+    self_delete_post_with_validation(conn, post_id, token, delete_window_secs, |_| Ok(()))
+}
+
+/// Recheck mutable request policy under the same write lock as deletion.
+pub(crate) fn self_delete_post_with_validation(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    token: &str,
+    delete_window_secs: i64,
+    validate: impl FnOnce(&rusqlite::Connection) -> crate::error::Result<()>,
+) -> crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("Failed to begin self_delete_post transaction")?;
 
     let result: crate::error::Result<(SelfDeleteOutcome, Option<crate::db::DeletePathsResult>)> =
         (|| {
+            validate(conn)?;
             let row: Option<(i64, bool, String, i64, bool, bool)> = conn
                 .query_row(
                     "SELECT p.thread_id, p.is_op, p.deletion_token, p.created_at,
@@ -762,6 +833,27 @@ pub fn edit_post(
     new_body_html: &str,
     edit_window_secs: i64,
 ) -> Result<bool> {
+    edit_post_with_validation(
+        conn,
+        post_id,
+        token,
+        new_body,
+        new_body_html,
+        edit_window_secs,
+        |_| Ok(()),
+    )
+}
+
+/// Recheck mutable request policy under the same write lock as editing.
+pub(crate) fn edit_post_with_validation(
+    conn: &rusqlite::Connection,
+    post_id: i64,
+    token: &str,
+    new_body: &str,
+    new_body_html: &str,
+    edit_window_secs: i64,
+    validate: impl FnOnce(&rusqlite::Connection) -> crate::error::Result<()>,
+) -> Result<bool> {
     let window = if edit_window_secs <= 0 {
         60
     } else {
@@ -774,6 +866,7 @@ pub fn edit_post(
         .context("Failed to begin IMMEDIATE transaction for edit_post")?;
 
     let result: Result<bool> = (|| {
+        validate(conn)?;
         let row: Option<(String, i64, bool, bool)> = conn
             .query_row(
                 "SELECT p.deletion_token, p.created_at, t.locked, t.archived
@@ -858,7 +951,7 @@ fn search_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut current = String::new();
 
-    for ch in query.chars() {
+    for ch in query.chars().take(crate::models::SEARCH_QUERY_MAX_CHARS) {
         if ch.is_alphanumeric() {
             for lower in ch.to_lowercase() {
                 current.push(lower);
@@ -906,6 +999,8 @@ pub fn search_posts(
     offset: i64,
 ) -> Result<Vec<Post>> {
     let _timing = super::diagnostics::QueryTiming::start("search_posts");
+    let limit = limit.clamp(1, 100);
+    let offset = offset.clamp(0, 9_999);
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(Vec::new());
     };
@@ -922,11 +1017,14 @@ pub fn search_posts(
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
          ORDER BY posts.created_at DESC, posts.id DESC
          LIMIT ?3 OFFSET ?4";
-    let mut stmt = conn.prepare_cached(sql)?;
-    let posts = stmt
-        .query_map(params![board_id, fts_query, limit, offset], map_post)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(posts)
+    super::search_budget::with_search_budget(conn, || {
+        let mut stmt = conn.prepare_cached(sql)?;
+        let posts = stmt
+            .query_map(params![board_id, fts_query, limit, offset], map_post)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(posts)
+    })
+    .map_err(anyhow::Error::from)
 }
 
 /// # Errors
@@ -940,13 +1038,17 @@ pub fn count_search_results(
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(0);
     };
-    Ok(conn
-        .prepare_cached(
-            "SELECT COUNT(*)
-             FROM posts_fts CROSS JOIN posts ON posts.id = posts_fts.rowid
-             WHERE posts.board_id = ?1 AND posts_fts MATCH ?2",
-        )?
-        .query_row(params![board_id, fts_query], |r| r.get(0))?)
+    super::search_budget::with_search_budget(conn, || {
+        Ok(conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM (
+                 SELECT 1 FROM posts_fts CROSS JOIN posts ON posts.id = posts_fts.rowid
+                 WHERE posts.board_id = ?1 AND posts_fts MATCH ?2 LIMIT 10000
+             )",
+            )?
+            .query_row(params![board_id, fts_query], |r| r.get(0))?)
+    })
+    .map_err(anyhow::Error::from)
 }
 
 // File deduplication
@@ -1110,7 +1212,7 @@ pub fn get_poll_for_thread(
 ///
 /// This returns false for two distinct cases:
 ///   1. The voter has already voted (UNIQUE constraint fires INSERT OR IGNORE)
-///   2. The option does not belong to the poll, or the poll has expired
+///   2. The option does not belong to the poll, or the poll has expired/archived
 ///
 /// Callers that need to distinguish these cases should call `cast_vote` and, on
 /// false, separately query whether the IP has voted on this poll. A future
@@ -1129,7 +1231,9 @@ pub fn cast_vote(
          SELECT ?1, ?2, ?3
          FROM poll_options AS po
          JOIN polls AS p ON p.id = po.poll_id
-         WHERE po.id = ?2
+         JOIN threads AS t ON t.id = p.thread_id
+         WHERE t.archived = 0
+           AND po.id = ?2
            AND po.poll_id = ?1
            AND p.expires_at > unixepoch()",
         params![poll_id, option_id, ip_hash],
@@ -1613,6 +1717,16 @@ pub fn claim_next_job(conn: &rusqlite::Connection) -> Result<Option<(i64, String
          WHERE id = (
              SELECT candidate.id FROM background_jobs AS candidate
              WHERE candidate.status = 'pending' AND candidate.attempts < ?1
+               AND (candidate.job_type NOT IN ('video_transcode', 'audio_waveform')
+                    OR NOT EXISTS (
+                        SELECT 1 FROM pending_fs_ops fs,
+                            json_each(CASE WHEN json_valid(fs.payload_json)
+                                           THEN fs.payload_json ELSE '{}' END, '$.relative_paths') artifact
+                        WHERE fs.kind = 'upload_finalize'
+                          AND artifact.value = json_extract(
+                              CASE WHEN json_valid(candidate.payload)
+                                   THEN candidate.payload ELSE '{}' END, '$.d.file_path')
+                    ))
                AND (
                    candidate.job_type != 'thread_prune'
                    OR NOT EXISTS (
@@ -2786,6 +2900,44 @@ mod tests {
             rusqlite::params![id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?)
+    }
+
+    #[test]
+    fn thread_windows_are_bounded_and_keep_every_reply_reachable() -> Result<()> {
+        let conn = test_conn()?;
+        let op_id = seed_search_post(&conn, "window", "opening post")?;
+        let op = get_post(&conn, op_id)?.context("opening post exists")?;
+        conn.execute(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<450)
+            INSERT INTO posts(thread_id,board_id,body,body_html,deletion_token,created_at)
+            SELECT ?1,?2,'reply','reply','delete',1700000000+x FROM n",
+            params![op.thread_id, op.board_id],
+        )
+        .map(|_count| ())?;
+        let mut before = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let (posts, older) = super::get_thread_post_window(&conn, op.thread_id, before)?;
+            anyhow::ensure!(
+                posts.len() <= 201 && posts.first().is_some_and(|post| post.id == op_id)
+            );
+            for post in posts.iter().filter(|post| !post.is_op) {
+                anyhow::ensure!(seen.insert(post.id), "reply appeared twice across pages");
+            }
+            if older.is_none() {
+                break;
+            }
+            before = older;
+        }
+        anyhow::ensure!(seen.len() == 450);
+        let plan = conn.prepare("EXPLAIN QUERY PLAN SELECT id FROM posts WHERE thread_id=?1 AND is_op=0 AND id<?2 ORDER BY id DESC LIMIT 201")?
+            .query_map(params![op.thread_id,i64::MAX], |row| row.get::<_,String>(3))?
+            .collect::<rusqlite::Result<Vec<_>>>()?.join(" ");
+        anyhow::ensure!(
+            plan.contains("idx_posts_thread_live") && !plan.contains("TEMP B-TREE"),
+            "window must use keyset index: {plan}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -4109,6 +4261,11 @@ mod tests {
         assert!(
             !cast_vote(&conn, expired_poll, expired_option, "late")?,
             "an expired poll should reject the vote in the write statement"
+        );
+        crate::db::set_thread_archived(&conn, thread_id, true)?;
+        assert!(
+            !cast_vote(&conn, open_poll, open_option, "archived-voter")?,
+            "archival must reject votes in the same write statement"
         );
         Ok(())
     }

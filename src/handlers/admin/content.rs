@@ -18,18 +18,6 @@ use serde::Deserialize;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
-/// Reduce a board short name to its safe character set for display or URL use.
-///
-/// Unlike the restore-side `sanitize_board_short_value`, this is infallible and
-/// may return an empty string; callers must treat emptiness as missing input.
-fn board_short_fragment(board_short: &str) -> String {
-    board_short
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(8)
-        .collect()
-}
-
 /// Validates new board short name.
 fn validate_new_board_short_name(raw_short_name: &str) -> Result<String> {
     let trimmed = raw_short_name.trim();
@@ -40,19 +28,6 @@ fn validate_new_board_short_name(raw_short_name: &str) -> Result<String> {
         return Err(AppError::BadRequest("Invalid board name.".into()));
     }
     Ok(trimmed.to_lowercase())
-}
-
-fn resolve_board_short_name(
-    boards: Option<&[crate::models::Board]>,
-    board_id: i64,
-    fallback_board: &str,
-) -> String {
-    boards
-        .and_then(|boards| boards.iter().find(|board| board.id == board_id))
-        .map_or_else(
-            || board_short_fragment(fallback_board),
-            |board| board.short_name.clone(),
-        )
 }
 
 #[cfg(test)]
@@ -352,78 +327,57 @@ pub(in crate::server) async fn thread_action(
 
     let action = form.action.clone();
     let thread_id = form.thread_id;
-    let board_for_log = form.board.clone();
-    tokio::task::spawn_blocking({
+    let submitted_board = form.board.clone();
+    let board_name = tokio::task::spawn_blocking({
         let pool = state.db.clone();
-        move || -> Result<()> {
+        move || -> Result<String> {
             let conn = pool.get()?;
+            let tx = rusqlite::Transaction::new_unchecked(
+                &conn, rusqlite::TransactionBehavior::Immediate,
+            )?;
             let (admin_id, admin_name) =
-                super::require_admin_session_with_name(&conn, session_id.as_deref())?;
+                super::require_admin_session_with_name(&tx, session_id.as_deref())?;
+            let target = db::get_thread(&tx, thread_id)?
+                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+            let logged_board: String = tx.query_row(
+                "SELECT short_name FROM boards WHERE id = ?1", [target.board_id], |row| row.get(0),
+            )?;
+            if submitted_board != logged_board {
+                return Err(AppError::BadRequest("Board mismatch.".into()));
+            }
+            if target.archived && matches!(action.as_str(), "lock" | "unlock" | "sticky") {
+                return Err(AppError::Conflict("This thread is archived.".into()));
+            }
             match action.as_str() {
-                "sticky" => db::set_thread_sticky(&conn, thread_id, true)?,
-                "unsticky" => db::set_thread_sticky(&conn, thread_id, false)?,
-                "lock" => db::set_thread_locked(&conn, thread_id, true)?,
-                "unlock" => db::set_thread_locked(&conn, thread_id, false)?,
-                "archive" => db::set_thread_archived(&conn, thread_id, true)?,
+                "sticky" => db::set_thread_sticky(&tx, thread_id, true)?,
+                "unsticky" => db::set_thread_sticky(&tx, thread_id, false)?,
+                "lock" => db::set_thread_locked(&tx, thread_id, true)?,
+                "unlock" => db::set_thread_locked(&tx, thread_id, false)?,
+                "archive" => db::set_thread_archived(&tx, thread_id, true)?,
                 _ => {}
             }
-            if let Err(error) = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                &action,
-                "thread",
-                Some(thread_id),
-                &board_for_log,
-                "",
-            ) {
-                tracing::error!(
-                    target: "admin",
-                    admin_id,
-                    action = %action,
-                    thread_id,
-                    board = %board_for_log,
-                    error = %error,
-                    "Privileged thread action completed without audit-log record"
-                );
+            let board_id = target.board_id;
+            if matches!(action.as_str(), "archive" | "unsticky") {
+                let _schedule = db::persist_thread_prune_intent_in_tx(&tx, board_id)?;
             }
+            // Thread moderation and its audit record must commit together.
+            db::log_mod_action(
+                &tx, admin_id, &admin_name, &action, "thread", Some(thread_id),
+                &logged_board, "",
+            )?;
+            tx.commit()?;
             tracing::info!(target: "admin", action = %action, thread_id = thread_id, "Thread action");
-            Ok(())
+            Ok(logged_board)
         }
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    // Use the board name from the DB (via the thread's board_id),
-    // not the user-supplied form.board, to prevent path-confusion redirects.
-    let redirect_url = {
-        let pool = state.db.clone();
-        let board_name = tokio::task::spawn_blocking(move || -> Result<String> {
-            let conn = pool.get()?;
-            let thread = db::get_thread(&conn, thread_id)?;
-            let boards = db::get_all_boards(&conn).ok();
-            if let Some(t) = thread {
-                return Ok(resolve_board_short_name(
-                    boards.as_deref(),
-                    t.board_id,
-                    &form.board,
-                ));
-            }
-            // Fallback: sanitize the user-supplied board name to prevent open-redirect.
-            // Only allow alphanumeric characters (matching the board short_name format).
-            Ok(board_short_fragment(&form.board))
-        })
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-        // After archiving, send to the board archive; for all other actions
-        // stay on the thread.
-        if form.action == "archive" {
-            format!("/{board_name}/archive")
-        } else {
-            format!("/{board_name}/thread/{}", form.thread_id)
-        }
+    let redirect_url = if form.action == "archive" {
+        format!("/{board_name}/archive")
+    } else {
+        format!("/{board_name}/thread/{thread_id}")
     };
-
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
@@ -436,10 +390,6 @@ pub(in crate::server) struct AdminDeletePostForm {
     csrf: Option<String>,
 }
 
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "post deletion keeps authorization, database mutation, file cleanup, and audit logging together"
-)]
 pub(in crate::server) async fn admin_delete_post(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -457,65 +407,24 @@ pub(in crate::server) async fn admin_delete_post(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                super::require_admin_session_with_name(&conn, session_id.as_deref())?;
-
-            let post = db::get_post(&conn, post_id)?
+            let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+            let (admin_id, admin_name) = super::require_admin_session_with_name(&tx, session_id.as_deref())?;
+            let post = db::get_post(&tx, post_id)?
                 .ok_or_else(|| AppError::NotFound("Post not found.".into()))?;
-
-            // Resolve board name from DB, not user-supplied form field.
-            // Fallback sanitizes the user-supplied value to alphanumeric only.
-            let boards = db::get_all_boards(&conn).ok();
-            let board_name =
-                resolve_board_short_name(boards.as_deref(), post.board_id, &form.board);
-
+            let board_name: String = tx.query_row("SELECT short_name FROM boards WHERE id = ?1", [post.board_id], |row| row.get(0))?;
+            if board_name != form.board { return Err(AppError::BadRequest("Board mismatch.".into())); }
             let thread_id = post.thread_id;
             let is_op = post.is_op;
-
-            let deleted = if post.is_op {
-                db::delete_thread(&conn, post.thread_id)?
-            } else {
-                db::delete_post(&conn, post_id)?
-            };
-
+            let deleted = if is_op { db::delete_thread_verified(&tx, thread_id)? }
+                else { db::posts::delete_post_reply_in_tx(&tx, post_id)? };
+            db::log_mod_action(&tx, admin_id, &admin_name,
+                if is_op { "delete_thread" } else { "delete_post" }, "post", Some(post_id),
+                &board_name, &post.body.chars().take(80).collect::<String>())?;
+            tx.commit()?;
             if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
-                &conn,
-                &upload_dir,
-                deleted.pending_fs_op_id.as_deref(),
-                &deleted.paths,
+                &conn, &upload_dir, deleted.pending_fs_op_id.as_deref(), &deleted.paths,
             ) {
-                tracing::warn!(
-                    target: "admin",
-                    post_id = post_id,
-                    error = %error,
-                    "deleted post but file cleanup did not fully complete"
-                );
-            }
-
-            let action = if is_op {
-                "delete_thread"
-            } else {
-                "delete_post"
-            };
-            if let Err(error) = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                action,
-                "post",
-                Some(post_id),
-                &board_name,
-                &post.body.chars().take(80).collect::<String>(),
-            ) {
-                tracing::error!(
-                    target: "admin",
-                    admin_id,
-                    action,
-                    post_id,
-                    board = %board_name,
-                    error = %error,
-                    "Privileged post deletion completed without audit-log record"
-                );
+                tracing::warn!(target: "admin", post_id, %error, "deletion committed; file cleanup remains pending");
             }
             tracing::info!(target: "admin", post_id = post_id, "Post deleted");
             // If the post was an OP, redirect to the board index (thread is gone).
@@ -558,59 +467,19 @@ pub(in crate::server) async fn admin_delete_thread(
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
-            let (admin_id, admin_name) =
-                super::require_admin_session_with_name(&conn, session_id.as_deref())?;
-
-            // Fall back only to a sanitized user value when the DB row is gone.
-            let board_name = db::get_thread(&conn, thread_id)?
-                .and_then(|t| {
-                    db::get_all_boards(&conn)
-                        .ok()?
-                        .into_iter()
-                        .find(|b| b.id == t.board_id)
-                        .map(|b| b.short_name)
-                })
-                .unwrap_or_else(|| {
-                    form.board
-                        .chars()
-                        .filter(char::is_ascii_alphanumeric)
-                        .take(8)
-                        .collect()
-                });
-
-            let deleted = db::delete_thread(&conn, thread_id)?;
+            let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+            let (admin_id, admin_name) = super::require_admin_session_with_name(&tx, session_id.as_deref())?;
+            let target = db::get_thread(&tx, thread_id)?
+                .ok_or_else(|| AppError::NotFound("Thread not found.".into()))?;
+            let board_name: String = tx.query_row("SELECT short_name FROM boards WHERE id = ?1", [target.board_id], |row| row.get(0))?;
+            if board_name != form.board { return Err(AppError::BadRequest("Board mismatch.".into())); }
+            let deleted = db::delete_thread_verified(&tx, thread_id)?;
+            db::log_mod_action(&tx, admin_id, &admin_name, "delete_thread", "thread", Some(thread_id), &board_name, "")?;
+            tx.commit()?;
             if let Err(error) = crate::pending_fs::finalize_delete_files_payload(
-                &conn,
-                &upload_dir,
-                deleted.pending_fs_op_id.as_deref(),
-                &deleted.paths,
+                &conn, &upload_dir, deleted.pending_fs_op_id.as_deref(), &deleted.paths,
             ) {
-                tracing::warn!(
-                    target: "admin",
-                    thread_id = thread_id,
-                    error = %error,
-                    "deleted thread but file cleanup did not fully complete"
-                );
-            }
-
-            if let Err(error) = db::log_mod_action(
-                &conn,
-                admin_id,
-                &admin_name,
-                "delete_thread",
-                "thread",
-                Some(thread_id),
-                &board_name,
-                "",
-            ) {
-                tracing::error!(
-                    target: "admin",
-                    admin_id,
-                    thread_id,
-                    board = %board_name,
-                    error = %error,
-                    "Privileged thread deletion completed without audit-log record"
-                );
+                tracing::warn!(target: "admin", thread_id, %error, "deletion committed; file cleanup remains pending");
             }
             tracing::info!(target: "admin", thread_id = thread_id, "Thread deleted");
             Ok(board_name)
@@ -759,58 +628,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_board_short_name_falls_back_when_boards_missing() {
-        assert_eq!(
-            resolve_board_short_name(None, 123, "fallback-board!"),
-            "fallback"
-        );
-    }
-
-    #[test]
-    fn resolve_board_short_name_prefers_matching_board() {
-        let board = crate::models::Board {
-            id: 7,
-            display_order: 0,
-            short_name: "tech".to_owned(),
-            name: "Technology".to_owned(),
-            description: String::new(),
-            nsfw: false,
-            max_threads: 100,
-            max_archived_threads: 100,
-            bump_limit: 500,
-            allow_images: true,
-            allow_video: true,
-            allow_audio: true,
-            max_image_size: 8 * 1024 * 1024,
-            max_video_size: 50 * 1024 * 1024,
-            max_audio_size: 150 * 1024 * 1024,
-            max_pdf_size: 8 * 1024 * 1024,
-            allow_pdf: false,
-            allow_any_files: false,
-            allow_tripcodes: true,
-            allow_editing: false,
-            allow_self_delete: false,
-            edit_window_secs: 300,
-            allow_archive: true,
-            allow_video_embeds: true,
-            allow_captcha: false,
-            show_poster_ids: false,
-            collapse_greentext: false,
-            post_cooldown_secs: 0,
-            default_theme: String::new(),
-            banner_mode: crate::models::BoardBannerMode::Inherit,
-            access_mode: crate::models::BoardAccessMode::Public,
-            access_password_hash: String::new(),
-            created_at: 0,
-        };
-
-        assert_eq!(
-            resolve_board_short_name(Some(std::slice::from_ref(&board)), 7, "fallback"),
-            "tech"
-        );
-    }
-
-    #[test]
     fn checked_board_upload_dir_rejects_traversal_short_name_without_touching_sentinel(
     ) -> anyhow::Result<()> {
         let temp_dir = tempfile::tempdir().context("create upload root")?;
@@ -863,34 +680,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_delete_post_uses_fallback_board_when_lookup_breaks() -> anyhow::Result<()> {
-        let (state, thread_id, reply_id, _board_id) = seed_admin_data()?;
-        let conn = state.db.get().context("get database connection")?;
-        conn.execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")
-            .context("break board lookup")?;
-        drop(conn);
-
+    async fn admin_delete_post_fails_closed_when_board_lookup_breaks() -> anyhow::Result<()> {
+        let (state, _thread_id, reply_id, _board_id) = seed_admin_data()?;
+        state
+            .db
+            .get()?
+            .execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")?;
         let response = admin_delete_post(
-            State(state),
+            State(state.clone()),
             build_admin_jar(),
             admin_headers(),
             crate::test_support::connect_info(),
             Form(AdminDeletePostForm {
                 post_id: reply_id,
-                board: "fallback".to_owned(),
+                board: "fallback".into(),
                 csrf: Some(admin_signed_csrf()),
             }),
         )
-        .await
-        .context("delete post")?;
-
-        ensure!(response.status() == StatusCode::SEE_OTHER);
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .context("response omitted location header")?;
-        ensure!(location == format!("/fallback/thread/{thread_id}"));
+        .await;
+        ensure!(matches!(response, Err(AppError::Internal(_))));
+        ensure!(db::get_post(&*state.db.get()?, reply_id)?.is_some());
         Ok(())
     }
 
@@ -1003,7 +812,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_action_uses_fallback_board_when_lookup_breaks() -> anyhow::Result<()> {
+    async fn manual_archive_rolls_back_when_audit_logging_fails() -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        {
+            let conn = state.db.get()?;
+            conn.execute_batch(
+                "CREATE TRIGGER fail_mod_log BEFORE INSERT ON mod_log
+                BEGIN SELECT RAISE(ABORT, 'injected audit log failure'); END;",
+            )?;
+        }
+        let response = thread_action(
+            State(state.clone()),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(ThreadActionForm {
+                thread_id,
+                board: "test".to_owned(),
+                action: "archive".to_owned(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await;
+        ensure!(response.is_err());
+        let conn = state.db.get()?;
+        let thread = db::get_thread(&conn, thread_id)?.context("thread")?;
+        ensure!(!thread.archived && !thread.locked);
+        let jobs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM background_jobs WHERE job_type='thread_prune'",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(jobs == 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_action_rolls_back_when_board_lookup_breaks() -> anyhow::Result<()> {
         let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
         let conn = state.db.get().context("get database connection")?;
         conn.execute_batch("ALTER TABLE boards RENAME COLUMN short_name TO short_name_broken")
@@ -1011,7 +856,7 @@ mod tests {
         drop(conn);
 
         let response = thread_action(
-            State(state),
+            State(state.clone()),
             build_admin_jar(),
             admin_headers(),
             crate::test_support::connect_info(),
@@ -1022,16 +867,290 @@ mod tests {
                 csrf: Some(admin_signed_csrf()),
             }),
         )
-        .await
-        .context("run thread action")?;
+        .await;
+        ensure!(response.is_err(), "broken target lookup must fail closed");
+        let verification_conn = state.db.get()?;
+        let locked: bool = verification_conn.query_row(
+            "SELECT locked FROM threads WHERE id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            !locked,
+            "moderation must roll back when target validation fails"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn global_sticky_is_idempotent_and_commits_canonical_audit_context() -> anyhow::Result<()>
+    {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        for action in ["sticky", "sticky", "unsticky", "unsticky"] {
+            let response = thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(ThreadActionForm {
+                    thread_id,
+                    board: "test".to_owned(),
+                    action: action.to_owned(),
+                    csrf: Some(admin_signed_csrf()),
+                }),
+            )
+            .await?;
+            ensure!(response.status() == StatusCode::SEE_OTHER);
+            let conn = state.db.get()?;
+            ensure!(
+                db::get_thread(&conn, thread_id)?.context("thread")?.sticky == (action == "sticky")
+            );
+            let logged: String = conn.query_row(
+                "SELECT board_short FROM mod_log ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(logged == "test");
+        }
+        Ok(())
+    }
 
-        ensure!(response.status() == StatusCode::SEE_OTHER);
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .context("response omitted location header")?;
-        ensure!(location == format!("/fallback/thread/{thread_id}"));
+    #[tokio::test]
+    async fn global_thread_actions_reject_forged_board_session_and_csrf_without_mutation(
+    ) -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        let mismatch = thread_action(
+            State(state.clone()),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(ThreadActionForm {
+                thread_id,
+                board: "other".to_owned(),
+                action: "sticky".to_owned(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await;
+        ensure!(matches!(mismatch, Err(AppError::BadRequest(_))));
+        for (jar, headers, csrf) in [
+            (CookieJar::new(), admin_headers(), admin_signed_csrf()),
+            (
+                build_admin_jar(),
+                cross_origin_headers(),
+                admin_signed_csrf(),
+            ),
+            (build_admin_jar(), admin_headers(), "csrf123".to_owned()),
+        ] {
+            let response = thread_action(
+                State(state.clone()),
+                jar,
+                headers,
+                crate::test_support::connect_info(),
+                Form(ThreadActionForm {
+                    thread_id,
+                    board: "test".to_owned(),
+                    action: "sticky".to_owned(),
+                    csrf: Some(csrf),
+                }),
+            )
+            .await;
+            ensure!(matches!(response, Err(AppError::Forbidden(_))));
+        }
+        let conn = state.db.get()?;
+        ensure!(!db::get_thread(&conn, thread_id)?.context("thread")?.sticky);
+        let logs: i64 = conn.query_row("SELECT COUNT(*) FROM mod_log", [], |row| row.get(0))?;
+        ensure!(logs == 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archived_thread_actions_and_missing_targets_fail_without_contradictory_flags(
+    ) -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        {
+            let conn = state.db.get()?;
+            db::set_thread_archived(&conn, thread_id, true)?;
+        }
+        for action in ["unlock", "lock", "sticky"] {
+            let response = thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(ThreadActionForm {
+                    thread_id,
+                    board: "test".to_owned(),
+                    action: action.to_owned(),
+                    csrf: Some(admin_signed_csrf()),
+                }),
+            )
+            .await;
+            ensure!(matches!(response, Err(AppError::Conflict(_))));
+        }
+        let conn = state.db.get()?;
+        let target = db::get_thread(&conn, thread_id)?.context("thread")?;
+        ensure!(target.archived && target.locked && !target.sticky);
+        let response = thread_action(
+            State(state),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(ThreadActionForm {
+                thread_id: i64::MAX,
+                board: "test".to_owned(),
+                action: "sticky".to_owned(),
+                csrf: Some(admin_signed_csrf()),
+            }),
+        )
+        .await;
+        ensure!(matches!(response, Err(AppError::NotFound(_))));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn concurrent_global_sticky_changes_match_the_last_committed_audit_action(
+    ) -> anyhow::Result<()> {
+        let (state, thread_id, _reply_id, _board_id) = seed_admin_data()?;
+        let action = |value: &str| ThreadActionForm {
+            thread_id,
+            board: "test".to_owned(),
+            action: value.to_owned(),
+            csrf: Some(admin_signed_csrf()),
+        };
+        let (sticky, unsticky) = tokio::join!(
+            thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(action("sticky"))
+            ),
+            thread_action(
+                State(state.clone()),
+                build_admin_jar(),
+                admin_headers(),
+                crate::test_support::connect_info(),
+                Form(action("unsticky"))
+            ),
+        );
+        ensure!(
+            sticky?.status() == StatusCode::SEE_OTHER
+                && unsticky?.status() == StatusCode::SEE_OTHER
+        );
+        let conn = state.db.get()?;
+        let last: String = conn.query_row(
+            "SELECT action FROM mod_log ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(db::get_thread(&conn, thread_id)?.context("thread")?.sticky == (last == "sticky"));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn privileged_deletions_roll_back_when_audit_record_fails() -> anyhow::Result<()> {
+        let (state, thread_id, reply_id, _board) = seed_admin_data()?;
+        state.db.get()?.execute_batch("CREATE TRIGGER reject_audit BEFORE INSERT ON mod_log BEGIN SELECT RAISE(ABORT, 'injected'); END;")?;
+        ensure!(admin_delete_post(
+            State(state.clone()),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(AdminDeletePostForm {
+                post_id: reply_id,
+                board: "test".into(),
+                csrf: Some(admin_signed_csrf())
+            })
+        )
+        .await
+        .is_err());
+        ensure!(admin_delete_thread(
+            State(state.clone()),
+            build_admin_jar(),
+            admin_headers(),
+            crate::test_support::connect_info(),
+            Form(AdminDeleteThreadForm {
+                thread_id,
+                board: "test".into(),
+                csrf: Some(admin_signed_csrf())
+            })
+        )
+        .await
+        .is_err());
+        let conn = state.db.get()?;
+        ensure!(
+            conn.is_autocommit()
+                && db::get_post(&conn, reply_id)?.is_some()
+                && db::get_thread(&conn, thread_id)?.is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inline_ban_delete_rejects_forged_targets_and_rolls_back_failed_audit(
+    ) -> anyhow::Result<()> {
+        use axum::{body::Body, http::Request, routing::post, Router};
+        use tower::ServiceExt as _;
+        let (state, thread_id, reply_id, _board) = seed_admin_data()?;
+        let identity = "ab".repeat(32);
+        state
+            .db
+            .get()?
+            .execute("UPDATE posts SET ip_hash=?1", [&identity])
+            .map(|_rows| ())?;
+        let router = Router::new()
+            .route(
+                "/ban-delete",
+                post(super::super::moderation::admin_ban_and_delete),
+            )
+            .with_state(state.clone());
+        let request = |op: &str, actor: &str, board: &str| -> anyhow::Result<_> {
+            Ok(Request::builder().method("POST").uri("/ban-delete")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::HOST, "localhost").header(header::ORIGIN, "http://localhost")
+                .header(header::COOKIE, format!("{}=session123; csrf_token=csrf123", super::super::SESSION_COOKIE))
+                .extension(crate::test_support::connect_info())
+                .body(Body::from(format!("post_id={reply_id}&thread_id={thread_id}&board={board}&is_op={op}&ip_hash={actor}&_csrf={}", admin_signed_csrf())))?)
+        };
+        for (op, actor, board) in [
+            ("1", identity.as_str(), "test"),
+            ("0", "cd", "test"),
+            ("0", identity.as_str(), "wrong"),
+        ] {
+            let response = router.clone().oneshot(request(op, actor, board)?).await?;
+            ensure!(response.status() == StatusCode::BAD_REQUEST);
+        }
+        state.db.get()?.execute_batch("CREATE TRIGGER reject_audit BEFORE INSERT ON mod_log WHEN NEW.action='delete_post' BEGIN SELECT RAISE(ABORT, 'injected'); END;")?;
+        let failed = router
+            .clone()
+            .oneshot(request("0", &identity, "test")?)
+            .await?;
+        ensure!(failed.status() == StatusCode::INTERNAL_SERVER_ERROR);
+        {
+            let conn = state.db.get()?;
+            ensure!(db::get_post(&conn, reply_id)?.is_some());
+            let rows: i64 = conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM bans)+(SELECT COUNT(*) FROM mod_log)",
+                [],
+                |row| row.get(0),
+            )?;
+            ensure!(rows == 0 && conn.is_autocommit());
+            conn.execute_batch("DROP TRIGGER reject_audit")?;
+        }
+        let accepted = router.oneshot(request("0", &identity, "test")?).await?;
+        ensure!(accepted.status() == StatusCode::SEE_OTHER);
+        let conn = state.db.get()?;
+        ensure!(db::get_post(&conn, reply_id)?.is_none());
+        ensure!(
+            db::get_thread(&conn, thread_id)?
+                .context("OP survives reply deletion")?
+                .reply_count
+                == 0
+        );
+        let rows: i64 = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM bans)+(SELECT COUNT(*) FROM mod_log)",
+            [],
+            |row| row.get(0),
+        )?;
+        ensure!(rows == 3);
         Ok(())
     }
 }

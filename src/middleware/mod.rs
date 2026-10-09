@@ -6,8 +6,13 @@ mod csrf;
 mod ip;
 /// Request-path normalization.
 mod normalize;
+/// Concurrency admission for memory-hard authentication work.
+mod work_gate;
+
 /// Per-client request rate limiting.
 mod rate_limit;
+/// Bounded storage for browsing, action, and authentication budgets.
+mod rate_table;
 /// Shared application and maintenance state.
 mod state;
 /// Request transport metadata and cookie context.
@@ -19,6 +24,7 @@ pub use csrf::{validate_csrf, validate_signed_csrf};
 pub use ip::{extract_ip, ClientIp};
 pub use normalize::normalize_trailing_slash;
 pub use rate_limit::rate_limit_middleware;
+
 pub use state::{
     AppState, AutoFullBackupSettings, AutoFullBackupSettingsSnapshot, DbMaintenanceJobPhase,
     DbMaintenanceJobStatus, DbMaintenanceJobs, MaintenanceGate,
@@ -33,4 +39,18 @@ pub(crate) fn forwarded_proto_is_https(
     behind_proxy: bool,
 ) -> bool {
     ip::forwarded_proto_is_https(headers, peer, behind_proxy)
+}
+
+/// Non-queueing work allowance shared across clones of one application state.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkGate {
+    /// Owned permits remain with blocking work after request cancellation.
+    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+/// Bounded fixed-window storage for hashed visitor identities.
+#[derive(Debug, Default)]
+pub(crate) struct RateTable {
+    /// Serializes only admission and amortized expiration, never application work.
+    state: parking_lot::Mutex<rate_table::TableState>,
 }

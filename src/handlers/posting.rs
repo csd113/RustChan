@@ -347,7 +347,7 @@ fn checkout_post_connection(
 }
 
 /// Preserve a transaction's typed public rejection.
-fn post_creation_error(error: anyhow::Error) -> AppError {
+pub(super) fn post_creation_error(error: anyhow::Error) -> AppError {
     match error.downcast::<AppError>() {
         Ok(error) => error,
         Err(error) => error.into(),
@@ -637,6 +637,15 @@ fn submit_post_with_preparation(
         ffmpeg_available,
     } = command;
 
+    if submission_token.len() > 128
+        || !submission_token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(AppError::BadRequest(
+            "Invalid submission token. Reload the posting form.".into(),
+        ));
+    }
     let conn = pool.get()?;
     let board = db::get_board_by_short(&conn, &board_short)?
         .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
@@ -644,6 +653,22 @@ fn submit_post_with_preparation(
     let effective_max_video_size = board.max_video_size_bytes();
     let effective_max_audio_size = board.max_audio_size_bytes();
     let effective_max_pdf_size = board.max_pdf_size_bytes();
+
+    let ip_hash = hash_ip(&identity_key, &cookie_secret);
+    crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, ban_csrf_token.clone())?;
+    if let Some(existing) = db::get_post_submission(&conn, &submission_token, &ip_hash, board.id)? {
+        let target = match &mode {
+            SubmitPostMode::Reply { thread_id, sage: _ } => Some(*thread_id),
+            SubmitPostMode::NewThread {
+                subject: _,
+                poll_question: _,
+                poll_options: _,
+                poll_duration_secs: _,
+            } => None,
+        };
+        db::threads::validate_submission_target(existing, target).map_err(post_creation_error)?;
+        return existing_submission_result(&conn, board.short_name, existing);
+    }
 
     let reply_context = match &mode {
         SubmitPostMode::Reply { thread_id, sage } => {
@@ -653,11 +678,11 @@ fn submit_post_with_preparation(
             if thread.board_id != board.id {
                 return Err(AppError::NotFound("Thread not found in this board.".into()));
             }
-            if thread.locked {
-                return Err(AppError::Forbidden("This thread is locked.".into()));
-            }
             if thread.archived {
                 return Err(AppError::Forbidden("This thread is archived.".into()));
+            }
+            if thread.locked {
+                return Err(AppError::Forbidden("This thread is locked.".into()));
             }
 
             Some((*thread_id, *sage))
@@ -669,12 +694,6 @@ fn submit_post_with_preparation(
             poll_duration_secs: _,
         } => None,
     };
-
-    let ip_hash = hash_ip(&identity_key, &cookie_secret);
-    crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, ban_csrf_token.clone())?;
-    if let Some(existing) = db::get_post_submission(&conn, &submission_token, &ip_hash, board.id)? {
-        return existing_submission_result(&conn, board.short_name, existing);
-    }
 
     let is_admin = is_admin_session(&conn, admin_session_id.as_deref());
     if board.post_cooldown_secs > 0 && !is_admin {
@@ -756,7 +775,12 @@ fn submit_post_with_preparation(
         )
         .map_err(anyhow::Error::new)
     };
-    let (post_id, thread_id, redirect_url, prune_board_id) = match mode {
+    let pending_media_board = uploads
+        .primary
+        .as_ref()
+        .filter(|upload| upload.processing_pending)
+        .map(|_upload| board.short_name.as_str());
+    let (post_id, thread_id, redirect_url, prune_board_id, created_at) = match mode {
         SubmitPostMode::NewThread {
             subject,
             poll_question,
@@ -820,17 +844,18 @@ fn submit_post_with_preparation(
                 &new_post,
                 &submission_token,
                 poll_insert.as_ref(),
-                db::threads::PostFilesystemCommit::new_with_validation(
+                db::threads::PostFilesystemCommit::new_with_media_validation(
                     pending_upload_op.as_ref(),
                     &deduplicated_paths,
                     true,
+                    pending_media_board,
                     validate,
                 ),
             );
-            let (thread_id, post_id, _) = match create_result {
-                Ok(db::threads::PostCreationOutcome::Created(ids)) => {
+            let ((thread_id, post_id, _), created_at) = match create_result {
+                Ok(db::threads::PostCreationOutcome::Created(ids, created_at)) => {
                     drop(recovered_conn);
-                    ids
+                    (ids, created_at)
                 }
                 Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
                     let result =
@@ -850,6 +875,7 @@ fn submit_post_with_preparation(
                 thread_id,
                 format!("/{}/thread/{thread_id}#p{post_id}", board.short_name),
                 Some(board.id),
+                created_at,
             )
         }
         SubmitPostMode::Reply {
@@ -873,21 +899,22 @@ fn submit_post_with_preparation(
                 false,
             );
             let recovered_conn = checkout_post_connection(pool, &uploads, &upload_dir)?;
-            let post_id = match db::threads::create_reply_submission(
+            let (post_id, created_at) = match db::threads::create_reply_submission(
                 &recovered_conn,
                 &new_post,
                 &submission_token,
                 should_bump,
-                db::threads::PostFilesystemCommit::new_with_validation(
+                db::threads::PostFilesystemCommit::new_with_media_validation(
                     pending_upload_op.as_ref(),
                     &deduplicated_paths,
                     false,
+                    pending_media_board,
                     validate,
                 ),
             ) {
-                Ok(db::threads::PostCreationOutcome::Created(post_id)) => {
+                Ok(db::threads::PostCreationOutcome::Created(post_id, created_at)) => {
                     drop(recovered_conn);
-                    post_id
+                    (post_id, created_at)
                 }
                 Ok(db::threads::PostCreationOutcome::Replayed(existing)) => {
                     let result =
@@ -910,35 +937,40 @@ fn submit_post_with_preparation(
                 thread_id,
                 format!("/{}/thread/{thread_id}#p{post_id}", board.short_name),
                 None,
+                created_at,
             )
         }
     };
 
     finalize_pending_uploads(pool, &upload_dir, &uploads);
-    crate::handlers::enqueue_post_jobs(
+    if let Err(error) = crate::handlers::enqueue_post_jobs(
         job_queue,
         pool,
         post_id,
         &ip_hash,
         body_text.len(),
-        uploads.primary.as_ref(),
+        None,
         &board.short_name,
-    )?;
-    if let Some(prune_board_id) = prune_board_id {
-        let recovered_conn = pool.get()?;
-        if let Err(error) = job_queue.notify_persisted_thread_prune(&recovered_conn) {
-            tracing::warn!(
-                target: "workers",
-                board = %board.short_name,
-                board_id = prune_board_id,
-                error = %error,
-                "durable board prune intent persisted but worker notification accounting failed"
-            );
+    ) {
+        tracing::warn!(target: "workers", post_id, %error, "post committed; auxiliary scheduling failed");
+    }
+    if prune_board_id.is_some() || pending_media_board.is_some() {
+        if let Err(error) = pool
+            .get()
+            .map_err(anyhow::Error::new)
+            .and_then(|notification_conn| {
+                job_queue.notify_persisted_thread_prune(&notification_conn)
+            })
+        {
+            tracing::warn!(target: "workers", post_id, %error, "durable posting work will be discovered by worker polling");
         }
+    }
+    if let Some(prune_board_id) = prune_board_id {
         tracing::info!(
             target: "board",
             board = %board.short_name,
             thread_id = thread_id,
+            board_id = prune_board_id,
             "Created new thread"
         );
     } else {
@@ -953,17 +985,13 @@ fn submit_post_with_preparation(
         );
     }
 
-    let recovered_conn = pool.get()?;
-    let stored_post = db::get_post(&recovered_conn, post_id)?
-        .ok_or_else(|| AppError::NotFound("Posted row not found.".into()))?;
-
     Ok(SubmitPostResult {
         redirect_url,
         board_short: board.short_name,
         thread_id,
         post_id,
         deletion_token,
-        created_at: stored_post.created_at,
+        created_at,
     })
 }
 
@@ -1110,7 +1138,7 @@ mod tests {
         }
     }
 
-    fn reply_command(
+    pub(super) fn reply_command(
         board_short: &str,
         thread_id: i64,
         submission_token: &str,
@@ -1159,7 +1187,7 @@ mod tests {
         ))
     }
 
-    fn one_pixel_png() -> Result<Vec<u8>> {
+    pub(super) fn one_pixel_png() -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         image::DynamicImage::new_rgba8(1, 1)
             .write_to(
@@ -1190,7 +1218,7 @@ mod tests {
         include_bytes!("../../tests/fixtures/media/video.mp4").to_vec()
     }
 
-    fn pending_upload_stage_count(upload_dir: &std::path::Path) -> Result<usize> {
+    pub(super) fn pending_upload_stage_count(upload_dir: &std::path::Path) -> Result<usize> {
         let pending = upload_dir.join(".pending");
         if !pending.exists() {
             return Ok(0);
@@ -2934,7 +2962,7 @@ mod tests {
     }
 
     /// Replace the test state's pool with one connection to expose nested borrowing.
-    fn single_connection_state() -> Result<crate::middleware::AppState> {
+    pub(super) fn single_connection_state() -> Result<crate::middleware::AppState> {
         let mut state = crate::test_support::app_state();
         let path = {
             let conn = state.db.get()?;
@@ -3018,7 +3046,12 @@ mod tests {
                     }
                     Ok(())
                 });
-            assert!(matches!(result, Err(AppError::Forbidden(_))));
+            let expected = if archived {
+                "This thread is archived."
+            } else {
+                "This thread is locked."
+            };
+            assert!(matches!(result, Err(AppError::Forbidden(message)) if message == expected));
             let recovered_conn = state.db.get()?;
             assert_eq!(
                 crate::db::get_posts_for_thread(&recovered_conn, thread)?.len(),
@@ -3188,3 +3221,7 @@ mod tests {
 #[cfg(test)]
 /// Opt-in posting/media connection-lifetime measurements.
 mod performance;
+
+#[cfg(test)]
+/// End-to-end regression coverage for retries and stale posting state.
+mod lifecycle_tests;

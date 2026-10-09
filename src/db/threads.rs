@@ -76,7 +76,7 @@ fn map_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<Thread> {
 /// Collect all file paths (`file_path`, `thumb_path`, `audio_file_path`) for every
 /// post in the given set of thread ids. Returns a flat Vec of non-null paths.
 ///
-/// Uses a single JOIN query instead of one query per thread.
+/// Uses bounded batches instead of one query per thread.
 ///
 /// Call before deleting the thread rows; cascading deletion removes the posts
 /// that supply these paths.
@@ -88,35 +88,37 @@ fn collect_thread_file_paths(
         return Ok(Vec::new());
     }
 
-    // Build WHERE thread_id IN (?, ?, ...) dynamically.
-    let placeholders: String = thread_ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT file_path, thumb_path, audio_file_path
-         FROM posts WHERE thread_id IN ({placeholders})"
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
-        .query_map(rusqlite::params_from_iter(thread_ids), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-
     let mut paths = Vec::new();
-    for (f, t, a) in rows {
-        if let Some(p) = f {
-            paths.push(p);
-        }
-        if let Some(p) = t {
-            paths.push(p);
-        }
-        if let Some(p) = a {
-            paths.push(p);
+    for batch in thread_ids.chunks(500) {
+        // Bound parameters so restored or backlogged boards cannot exceed SQLite limits.
+        let placeholders: String = batch
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT file_path, thumb_path, audio_file_path
+         FROM posts WHERE thread_id IN ({placeholders})"
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<(Option<String>, Option<String>, Option<String>)> = stmt
+            .query_map(rusqlite::params_from_iter(batch), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        for (f, t, a) in rows {
+            if let Some(p) = f {
+                paths.push(p);
+            }
+            if let Some(p) = t {
+                paths.push(p);
+            }
+            if let Some(p) = a {
+                paths.push(p);
+            }
         }
     }
     Ok(paths)
@@ -154,19 +156,44 @@ pub fn get_threads_for_board(
 
 /// Paginate threads before computing reply aggregates; exclude missing OPs first.
 pub(super) fn thread_page_sql(archived: bool) -> String {
+    thread_listing_sql(archived, false)
+}
+
+/// Build the shared page query, applying personal visibility before pagination.
+fn thread_listing_sql(archived: bool, personalized: bool) -> String {
     // Preserve the legacy aggregate's tie order for each listing, including
     // deterministic boundaries when many replies bump in the same second.
-    let order = if archived {
+    let base_order = if archived {
         "t.bumped_at DESC, t.id ASC"
     } else {
         "t.sticky DESC, t.bumped_at DESC, t.id DESC"
     };
+    let order = if personalized && !archived {
+        format!("t.viewer_pinned DESC, {base_order}")
+    } else {
+        base_order.to_owned()
+    };
+    let page_order = if personalized && !archived {
+        format!("COALESCE(pref.pinned, 0) DESC, {base_order}")
+    } else {
+        base_order.to_owned()
+    };
+    let (columns, join, visibility) = if personalized {
+        (
+            ", COALESCE(pref.pinned, 0) AS viewer_pinned",
+            "LEFT JOIN user_thread_preferences pref ON pref.thread_id = t.id AND pref.user_hash = ?5",
+            "AND COALESCE(pref.hidden, 0) = ?6",
+        )
+    } else {
+        ("", "", "")
+    };
     format!(
         "WITH page AS MATERIALIZED (
-             SELECT t.* FROM threads t
+             SELECT t.*{columns} FROM threads t {join}
              WHERE t.board_id = ?1 AND t.archived = ?4
+               {visibility}
                AND EXISTS (SELECT 1 FROM posts op WHERE op.thread_id=t.id AND op.is_op=1)
-             ORDER BY {order} LIMIT ?2 OFFSET ?3
+             ORDER BY {page_order} LIMIT ?2 OFFSET ?3
          )
          SELECT t.id, t.board_id, t.subject, t.created_at, t.bumped_at,
                 t.locked, t.sticky, t.reply_count,
@@ -177,6 +204,52 @@ pub(super) fn thread_page_sql(archived: bool) -> String {
          FROM page t JOIN posts op ON op.thread_id=t.id AND op.is_op=1
          ORDER BY {order}"
     )
+}
+
+/// List a visitor's visible or hidden active threads in canonical personal order.
+///
+/// Personal pins precede sticky threads, then bump time and descending thread ID.
+/// Filtering and sorting occur before LIMIT/OFFSET, so pages never repeat pins.
+///
+/// # Errors
+/// Returns an error if the indexed listing cannot be read.
+pub fn get_threads_for_viewer(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    user_hash: &str,
+    hidden: bool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Thread>> {
+    let sql = thread_listing_sql(false, true);
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let threads = stmt
+        .query_map(
+            params![board_id, limit, offset, 0_i32, user_hash, i32::from(hidden)],
+            map_thread,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(threads)
+}
+
+/// Count active, renderable threads with the same visibility filter as listing.
+///
+/// # Errors
+/// Returns an error if the count cannot be read.
+pub fn count_threads_for_viewer(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    user_hash: &str,
+    hidden: bool,
+) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM threads t
+         LEFT JOIN user_thread_preferences pref ON pref.thread_id = t.id AND pref.user_hash = ?2
+         WHERE t.board_id = ?1 AND t.archived = 0 AND COALESCE(pref.hidden, 0) = ?3
+           AND EXISTS (SELECT 1 FROM posts op WHERE op.thread_id = t.id AND op.is_op = 1)",
+        params![board_id, user_hash, i32::from(hidden)],
+        |row| row.get(0),
+    )?)
 }
 
 /// Execute an indexed page and its bounded per-thread aggregate probes.
@@ -247,7 +320,7 @@ pub fn get_thread(conn: &rusqlite::Connection, thread_id: i64) -> Result<Option<
 /// Result of atomically deciding whether a public post submission is new.
 pub(crate) enum PostCreationOutcome<T> {
     /// The transaction created and committed a new post bundle.
-    Created(T),
+    Created(T, i64),
     /// The token already names a canonical committed post.
     Replayed(super::PostSubmissionRecord),
 }
@@ -263,6 +336,8 @@ pub(crate) struct PostFilesystemCommit<'a, F = fn(&rusqlite::Connection) -> Resu
     schedule_thread_prune: bool,
     /// Posting policy checked after token replay and while holding the write lock.
     validate: F,
+    /// Board name for media work that must persist alongside the new post.
+    media_job_board: Option<&'a str>,
 }
 
 impl<'a> PostFilesystemCommit<'a> {
@@ -290,13 +365,111 @@ impl<'a, F> PostFilesystemCommit<'a, F> {
         schedule_thread_prune: bool,
         validate: F,
     ) -> Self {
+        Self::new_with_media_validation(
+            pending_fs_op,
+            deduplicated_paths,
+            schedule_thread_prune,
+            None,
+            validate,
+        )
+    }
+
+    /// Include required media work in the atomic creation bundle.
+    pub(crate) const fn new_with_media_validation(
+        pending_fs_op: Option<&'a crate::pending_fs::PendingFsOpInsert>,
+        deduplicated_paths: &'a [&'a str],
+        schedule_thread_prune: bool,
+        media_job_board: Option<&'a str>,
+        validate: F,
+    ) -> Self {
         Self {
             pending_fs_op,
             deduplicated_paths,
             schedule_thread_prune,
             validate,
+            media_job_board,
         }
     }
+}
+
+/// Persist media intent before commit; a full queue leaves an explicit failure.
+fn persist_new_post_metadata(
+    conn: &rusqlite::Connection,
+    post: &super::NewPost,
+    post_id: i64,
+    media_board: Option<&str>,
+) -> Result<i64> {
+    if let Some(board_short) = media_board {
+        let source = post
+            .file_path
+            .as_ref()
+            .context("pending media requires a source")?;
+        let (job_type, job_tag) = match post.media_type.as_deref() {
+            Some("video") => ("video_transcode", "VideoTranscode"),
+            Some("audio") => ("audio_waveform", "AudioWaveform"),
+            _ => anyhow::bail!("pending processing requires audio or video"),
+        };
+        let capacity = crate::config::CONFIG.job_queue_capacity;
+        let full = capacity > 0 && u64::try_from(super::pending_job_count(conn)?)? >= capacity;
+        if full {
+            super::set_post_media_processing_state(
+                conn,
+                post_id,
+                Some(super::MEDIA_PROCESSING_FAILED),
+                Some("Background media queue is full; deferred processing was skipped."),
+            )?;
+        } else {
+            let payload = serde_json::json!({
+                "t": job_tag, "d": { "post_id": post_id, "file_path": source, "board_short": board_short }
+            }).to_string();
+            super::enqueue_job(conn, job_type, &payload).map(|_job_id| ())?;
+            super::set_post_media_processing_state(
+                conn,
+                post_id,
+                Some(super::MEDIA_PROCESSING_PENDING),
+                None,
+            )?;
+        }
+    }
+    Ok(conn.query_row(
+        "SELECT created_at FROM posts WHERE id = ?1",
+        [post_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Reject reuse of a receipt for another operation or reply target.
+pub(crate) fn validate_submission_target(
+    record: super::PostSubmissionRecord,
+    thread_id: Option<i64>,
+) -> Result<()> {
+    if record.is_thread != thread_id.is_none()
+        || thread_id.is_some_and(|target| target != record.thread_id)
+    {
+        return Err(crate::error::AppError::Conflict(
+            "This submission token belongs to a different posting form. Reload the page.".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// A token accepted for another actor/board must never create new content.
+fn reject_conflicting_submission(conn: &rusqlite::Connection, token: &str) -> Result<()> {
+    if !token.is_empty()
+        && conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM post_submissions WHERE submission_token=?1)
+            OR EXISTS(SELECT 1 FROM post_submission_tombstones WHERE submission_token=?1)",
+            [token],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Err(crate::error::AppError::Conflict(
+            "This submission token has already been used. Reload the posting form.".into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Create a thread, its OP post, and an optional poll atomically.
@@ -321,7 +494,7 @@ pub fn create_thread_with_optional_poll(
         poll,
         PostFilesystemCommit::new(pending_fs_op, &[], false),
     )? {
-        PostCreationOutcome::Created(ids) => Ok(ids),
+        PostCreationOutcome::Created(ids, _) => Ok(ids),
         PostCreationOutcome::Replayed(existing) => Ok((existing.thread_id, existing.post_id, None)),
     }
 }
@@ -355,10 +528,12 @@ pub(crate) fn create_thread_submission(
             if let Some(existing) =
                 super::posts::get_post_submission(conn, submission_token, ip_hash, board_id)?
             {
+                validate_submission_target(existing, None)?;
                 return Ok(PostCreationOutcome::Replayed(existing));
             }
         }
 
+        reject_conflicting_submission(conn, submission_token)?;
         (filesystem.validate)(conn)?;
         validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
 
@@ -406,7 +581,16 @@ pub(crate) fn create_thread_submission(
                 .map(|_operation_summary| ())?;
         }
 
-        Ok(PostCreationOutcome::Created((thread_id, post_id, poll_id)))
+        let created_at = persist_new_post_metadata(
+            conn,
+            &post_with_thread,
+            post_id,
+            filesystem.media_job_board,
+        )?;
+        Ok(PostCreationOutcome::Created(
+            (thread_id, post_id, poll_id),
+            created_at,
+        ))
     })();
 
     match result {
@@ -443,7 +627,7 @@ pub fn create_reply_with_thread_update(
         should_bump,
         PostFilesystemCommit::new(pending_fs_op, &[], false),
     )? {
-        PostCreationOutcome::Created(post_id) => Ok(post_id),
+        PostCreationOutcome::Created(post_id, _) => Ok(post_id),
         PostCreationOutcome::Replayed(existing) => Ok(existing.post_id),
     }
 }
@@ -468,39 +652,22 @@ pub(crate) fn create_reply_submission(
             if let Some(existing) =
                 super::posts::get_post_submission(conn, submission_token, ip_hash, post.board_id)?
             {
+                validate_submission_target(existing, Some(post.thread_id))?;
                 return Ok(PostCreationOutcome::Replayed(existing));
             }
         }
 
+        if post.is_op {
+            return Err(crate::error::AppError::BadRequest(
+                "A reply cannot be a thread starter.".into(),
+            )
+            .into());
+        }
+        reject_conflicting_submission(conn, submission_token)?;
         (filesystem.validate)(conn)?;
         validate_deduplicated_paths(conn, filesystem.deduplicated_paths)?;
 
-        let flags = conn
-            .query_row(
-                "SELECT locked, archived
-                 FROM threads
-                 WHERE id = ?1 AND board_id = ?2",
-                params![post.thread_id, post.board_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i32>(0)? != 0_i32,
-                        row.get::<_, i32>(1)? != 0_i32,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((locked, archived)) = flags else {
-            anyhow::bail!(
-                "Thread id {} not found while creating reply",
-                post.thread_id
-            );
-        };
-        if locked {
-            return Err(anyhow::Error::new(ThreadClosed::Locked));
-        }
-        if archived {
-            return Err(anyhow::Error::new(ThreadClosed::Archived));
-        }
+        ensure_replyable(conn, post.board_id, post.thread_id)?;
 
         let post_id = super::posts::create_post_inner(conn, post)?;
         let updated = if should_bump {
@@ -541,7 +708,9 @@ pub(crate) fn create_reply_submission(
                 false,
             )?;
         }
-        Ok(PostCreationOutcome::Created(post_id))
+        let created_at =
+            persist_new_post_metadata(conn, post, post_id, filesystem.media_job_board)?;
+        Ok(PostCreationOutcome::Created(post_id, created_at))
     })();
 
     match result {
@@ -557,6 +726,38 @@ pub(crate) fn create_reply_submission(
             Err(error)
         }
     }
+}
+
+/// Authoritative current parent-state check, performed under the posting write lock.
+fn ensure_replyable(conn: &rusqlite::Connection, board_id: i64, thread_id: i64) -> Result<()> {
+    let flags = conn
+        .query_row(
+            "SELECT locked, archived
+                 FROM threads
+                 WHERE id = ?1 AND board_id = ?2",
+            params![thread_id, board_id],
+            |row| {
+                Ok((
+                    row.get::<_, i32>(0)? != 0_i32,
+                    row.get::<_, i32>(1)? != 0_i32,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((locked, archived)) = flags else {
+        return Err(crate::error::AppError::NotFound(
+            "Thread not found. It may have been deleted or pruned.".into(),
+        )
+        .into());
+    };
+    if archived {
+        return Err(anyhow::Error::new(ThreadClosed::Archived));
+    }
+    if locked {
+        return Err(anyhow::Error::new(ThreadClosed::Locked));
+    }
+
+    Ok(())
 }
 
 /// Revalidate a prior dedup cache hit after the post transaction owns the write lock.
@@ -710,243 +911,125 @@ pub fn delete_thread(
 }
 
 // Archive / prune
-/// Archive oldest non-sticky threads that exceed the board's `max_threads` limit.
+/// Archive overflow non-sticky active threads, keeping the newest bump/ID pairs.
 ///
-/// Archived threads are locked and marked read-only; their content remains
-/// accessible via `/{board}/archive`. Returns the count of threads archived
-/// (no file deletion occurs).
-///
-/// ID selection and the bulk update share a transaction so a concurrent bump
-/// cannot change the ordering between those operations.
-///
-/// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom for "skip the first
-/// max rows, return everything else". It is not standard SQL. The LIMIT -1
-/// means "no upper bound on the result set after the offset is applied".
+/// Archiving locks threads and preserves all posts and media references.
+/// Sticky active threads do not count against the limit; locked threads do.
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
+/// Returns an error for invalid limits or a failed transaction.
 pub fn archive_old_threads(conn: &rusqlite::Connection, board_id: i64, max: i64) -> Result<usize> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin archive_old_threads transaction")?;
-
-    let result: Result<usize> = (|| {
-        // Collect inside the transaction to prevent races with concurrent bumps.
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id FROM threads
-                 WHERE board_id = ?1 AND sticky = 0 AND archived = 0
-                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-            )?;
-            // Bind `collected` explicitly so `stmt` is dropped before the
-            // block ends — the MappedRows iterator borrows `stmt`, and the
-            // compiler requires the borrow to end before the binding goes out
-            // of scope at the closing `}`.
-            let collected = stmt
-                .query_map(params![board_id, max], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            collected
-        };
-
-        let count = ids.len();
-        if count == 0 {
-            return Ok(0);
-        }
-
-        // Single bulk UPDATE instead of N individual statements.
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql =
-            format!("UPDATE threads SET archived = 1, locked = 1 WHERE id IN ({placeholders})");
-        conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk archive threads")
-            .map(|_affected_rows| ())?;
-
-        Ok(count)
-    })();
-
-    match result {
-        Ok(0) => {
-            // Nothing to archive — roll back the (empty) transaction cleanly.
-            drop(conn.execute_batch("ROLLBACK"));
-            Ok(0)
-        }
-        Ok(count) => {
-            super::commit_transaction(conn, "Failed to commit archive_old_threads transaction")?;
-            Ok(count)
-        }
-        Err(e) => {
-            drop(conn.execute_batch("ROLLBACK"));
-            Err(e)
-        }
-    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let count = archive_old_threads_in_tx(&tx, board_id, max)?;
+    tx.commit()?;
+    Ok(count)
 }
 
-/// Hard-delete oldest non-sticky, non-archived threads that exceed `max_threads`.
-/// Used when a board has archiving disabled — threads are permanently removed.
+/// Archive overflow while the caller holds the SQLite write transaction.
+pub(crate) fn archive_old_threads_in_tx(
+    conn: &rusqlite::Transaction<'_>,
+    board_id: i64,
+    max: i64,
+) -> Result<usize> {
+    validate_retention_limit(max, false)?;
+    // A subquery avoids building an unbounded parameter list for backlog recovery.
+    conn.execute(
+        "UPDATE threads SET archived = 1, locked = 1
+         WHERE id IN (
+             SELECT id FROM threads
+             WHERE board_id = ?1 AND sticky = 0 AND archived = 0
+             ORDER BY bumped_at DESC, id DESC LIMIT -1 OFFSET ?2
+         )",
+        params![board_id, max],
+    )
+    .context("Failed to archive overflow threads")
+}
+
+/// Hard-delete overflow non-sticky active threads when archiving is disabled.
 ///
-/// Returns the on-disk paths that are now safe to delete (i.e. no longer
-/// referenced by any remaining post after the prune). The caller is responsible
-/// for actually removing these files from disk.
-///
-/// ID selection, bulk deletion, and the final path-reference check share a
-/// transaction so a concurrent insert cannot make a returned path live again.
-/// File paths are collected with one joined query.
-///
-/// Note: LIMIT -1 OFFSET ? is a SQLite-specific idiom — see `archive_old_threads`.
+/// Returns safe file paths and a durable cleanup intent for filesystem replay.
 ///
 /// # Errors
-/// Returns an error if the database operation fails.
+/// Returns an error for invalid limits or a failed transaction.
 pub fn prune_old_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
     max: i64,
 ) -> Result<crate::db::DeletePathsResult> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin prune_old_threads transaction")?;
-
-    let result: Result<crate::db::DeletePathsResult> = (|| {
-        // Collect ids inside the transaction to prevent concurrent bumps from
-        // changing the ordering between the SELECT and the DELETE.
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id FROM threads
-                 WHERE board_id = ?1 AND sticky = 0 AND archived = 0
-                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-            )?;
-            let collected = stmt
-                .query_map(params![board_id, max], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            collected
-        };
-
-        if ids.is_empty() {
-            return Ok(crate::db::DeletePathsResult {
-                paths: Vec::new(),
-                pending_fs_op_id: None,
-            });
-        }
-
-        // Collect all file paths in a single query BEFORE the DELETEs.
-        let candidates = collect_thread_file_paths(conn, &ids)?;
-
-        // Single bulk DELETE instead of N individual statements.
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
-        conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk delete pruned threads")
-            .map(|_affected_rows| ())?;
-
-        // Determine safe paths INSIDE the transaction so the check sees the
-        // post-delete state before any concurrent writer can insert new references.
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
-        if let Some(op) = pending_fs_op.as_ref() {
-            super::insert_pending_fs_op(conn, op)?;
-        }
-        Ok(crate::db::DeletePathsResult {
-            paths: safe,
-            pending_fs_op_id: pending_fs_op.map(|op| op.id),
-        })
-    })();
-
-    match result {
-        Ok(result) => {
-            super::commit_transaction(conn, "Failed to commit prune_old_threads transaction")?;
-            Ok(result)
-        }
-        Err(e) => {
-            drop(conn.execute_batch("ROLLBACK"));
-            Err(e)
-        }
-    }
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let result = prune_old_threads_in_tx(&tx, board_id, max, false)?;
+    tx.commit()?;
+    Ok(result)
 }
 
-/// Hard-delete oldest archived threads that exceed the archive retention cap.
+/// Hard-delete archived overflow, keeping the first entries in archive order.
 ///
-/// Returns the on-disk paths that are now safe to remove. As with live-thread
-/// pruning, the caller is responsible for deleting those files from disk.
-///
-/// The ordering uses `bumped_at DESC`, matching the archive page and ensuring
-/// we keep the most recently-active archived threads.
+/// Retention uses bump time, not time of archival. Archived sticky threads are
+/// subject to this cap too. File cleanup is durably scheduled before commit.
 ///
 /// # Errors
-/// Returns an error if the transaction cannot be opened or committed, if the
-/// candidate threads cannot be queried, or if the bulk delete/safe-path
-/// calculation fails.
+/// Returns an error for invalid limits or a failed transaction.
 pub fn prune_old_archived_threads(
     conn: &rusqlite::Connection,
     board_id: i64,
     max: i64,
 ) -> Result<crate::db::DeletePathsResult> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .context("Failed to begin prune_old_archived_threads transaction")?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let result = prune_old_threads_in_tx(&tx, board_id, max, true)?;
+    tx.commit()?;
+    Ok(result)
+}
 
-    let result: Result<crate::db::DeletePathsResult> = (|| {
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare_cached(
-                "SELECT id FROM threads
-                 WHERE board_id = ?1 AND archived = 1
-                 ORDER BY bumped_at DESC LIMIT -1 OFFSET ?2",
-            )?;
-            let collected = stmt
-                .query_map(params![board_id, max], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            collected
-        };
+/// Reject invalid destructive limits even when called outside the worker.
+fn validate_retention_limit(max: i64, archived: bool) -> Result<()> {
+    let upper = if archived { 10_000 } else { 1_000 };
+    anyhow::ensure!(
+        (1..=upper).contains(&max),
+        "invalid retention limit {max}; expected 1..={upper}; preserving content"
+    );
+    Ok(())
+}
 
-        if ids.is_empty() {
-            return Ok(crate::db::DeletePathsResult {
-                paths: Vec::new(),
-                pending_fs_op_id: None,
-            });
-        }
-
-        let candidates = collect_thread_file_paths(conn, &ids)?;
-
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i.saturating_add(1)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("DELETE FROM threads WHERE id IN ({placeholders})");
-        conn.execute(&sql, rusqlite::params_from_iter(&ids))
-            .context("Failed to bulk delete archived threads")
-            .map(|_affected_rows| ())?;
-
-        let safe = super::paths_safe_to_delete(conn, candidates)?;
-        let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
-        if let Some(op) = pending_fs_op.as_ref() {
-            super::insert_pending_fs_op(conn, op)?;
-        }
-        Ok(crate::db::DeletePathsResult {
-            paths: safe,
-            pending_fs_op_id: pending_fs_op.map(|op| op.id),
-        })
-    })();
-
-    match result {
-        Ok(result) => {
-            super::commit_transaction(
-                conn,
-                "Failed to commit prune_old_archived_threads transaction",
-            )?;
-            Ok(result)
-        }
-        Err(e) => {
-            drop(conn.execute_batch("ROLLBACK"));
-            Err(e)
-        }
+/// Select, delete, reference-check and journal files in the caller's transaction.
+pub(crate) fn prune_old_threads_in_tx(
+    conn: &rusqlite::Transaction<'_>,
+    board_id: i64,
+    max: i64,
+    archived: bool,
+) -> Result<crate::db::DeletePathsResult> {
+    validate_retention_limit(max, archived)?;
+    // Archive ties historically ascend by ID. Active ties descend by ID, exactly
+    // matching the board index. Never let query planner choice decide retention.
+    let sql = if archived {
+        "SELECT id FROM threads WHERE board_id = ?1 AND archived = 1
+         ORDER BY bumped_at DESC, id ASC LIMIT -1 OFFSET ?2"
+    } else {
+        "SELECT id FROM threads WHERE board_id = ?1 AND sticky = 0 AND archived = 0
+         ORDER BY bumped_at DESC, id DESC LIMIT -1 OFFSET ?2"
+    };
+    let ids = conn
+        .prepare_cached(sql)?
+        .query_map(params![board_id, max], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let candidates = collect_thread_file_paths(conn, &ids)?;
+    for batch in ids.chunks(500) {
+        let placeholders = vec!["?"; batch.len()].join(", ");
+        conn.execute(
+            &format!("DELETE FROM threads WHERE id IN ({placeholders})"),
+            rusqlite::params_from_iter(batch),
+        )
+        .context("Failed to delete overflow threads")
+        .map(|_affected_rows| ())?;
     }
+    let safe = super::paths_safe_to_delete(conn, candidates)?;
+    let pending_fs_op = super::build_delete_files_pending_op(&safe)?;
+    if let Some(op) = pending_fs_op.as_ref() {
+        super::insert_pending_fs_op(conn, op)?;
+    }
+    Ok(crate::db::DeletePathsResult {
+        paths: safe,
+        pending_fs_op_id: pending_fs_op.map(|op| op.id),
+    })
 }
 
 // Archive listing
@@ -1707,3 +1790,10 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod archive_tests;
+
+#[cfg(test)]
+/// Full posting state-machine and WAL concurrency regressions.
+mod lifecycle_tests;

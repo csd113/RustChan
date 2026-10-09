@@ -96,6 +96,10 @@ pub(crate) fn app_state() -> crate::middleware::AppState {
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         media_upload_gate: crate::middleware::MediaUploadGate::new(),
+        request_work_gate: crate::middleware::WorkGate::new(256),
+        password_work_gate: crate::middleware::WorkGate::new(2),
+        captcha_work_gate: crate::middleware::WorkGate::new(2),
+        search_work_gate: crate::middleware::WorkGate::new(2),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         onion_address: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
     }

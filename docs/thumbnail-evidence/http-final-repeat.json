@@ -1,0 +1,346 @@
+{
+  "limitations": "Debug build, loopback HTTP/1.1, warm OS cache, 16 concurrent requests, current-thread runtime; middleware/browser cache excluded. DB checkouts measured; SQL count and syscall count require separate instrumentation. ps CPU cumulative; RSS sampled, not peak. Original removed before requests.",
+  "samples": [
+    {
+      "admin_cookie": false,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 34380,
+        "latency": {
+          "max_us": 28665,
+          "p50_us": 1811,
+          "p95_us": 17779
+        },
+        "process_cpu_time_and_rss_kib": "0:00.70  48064",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 17250,
+        "latency": {
+          "max_us": 3026,
+          "p50_us": 1807,
+          "p95_us": 2812
+        },
+        "process_cpu_time_and_rss_kib": "0:00.74  48224",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 22986,
+        "latency": {
+          "max_us": 4204,
+          "p50_us": 2517,
+          "p95_us": 3220
+        },
+        "process_cpu_time_and_rss_kib": "0:00.79  48352",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 18741,
+        "latency": {
+          "max_us": 3649,
+          "p50_us": 1953,
+          "p95_us": 3238
+        },
+        "process_cpu_time_and_rss_kib": "0:00.83  48496",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 21114,
+        "latency": {
+          "max_us": 4138,
+          "p50_us": 2277,
+          "p95_us": 3365
+        },
+        "process_cpu_time_and_rss_kib": "0:00.88  48608",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 17841,
+        "latency": {
+          "max_us": 3543,
+          "p50_us": 1845,
+          "p95_us": 2505
+        },
+        "process_cpu_time_and_rss_kib": "0:00.93  48608",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 22351,
+        "latency": {
+          "max_us": 4437,
+          "p50_us": 2493,
+          "p95_us": 3324
+        },
+        "process_cpu_time_and_rss_kib": "0:00.98  48672",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 19291,
+        "latency": {
+          "max_us": 3764,
+          "p50_us": 2001,
+          "p95_us": 3560
+        },
+        "process_cpu_time_and_rss_kib": "0:01.02  48800",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 21414,
+        "latency": {
+          "max_us": 3477,
+          "p50_us": 2478,
+          "p95_us": 2745
+        },
+        "process_cpu_time_and_rss_kib": "0:01.07  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 18079,
+        "latency": {
+          "max_us": 3742,
+          "p50_us": 1869,
+          "p95_us": 3372
+        },
+        "process_cpu_time_and_rss_kib": "0:01.11  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 22742,
+        "latency": {
+          "max_us": 4190,
+          "p50_us": 2655,
+          "p95_us": 3413
+        },
+        "process_cpu_time_and_rss_kib": "0:01.16  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 18891,
+        "latency": {
+          "max_us": 3638,
+          "p50_us": 1987,
+          "p95_us": 3186
+        },
+        "process_cpu_time_and_rss_kib": "0:01.20  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 22022,
+        "latency": {
+          "max_us": 4206,
+          "p50_us": 2505,
+          "p95_us": 3632
+        },
+        "process_cpu_time_and_rss_kib": "0:01.24  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 18390,
+        "latency": {
+          "max_us": 3722,
+          "p50_us": 1890,
+          "p95_us": 3401
+        },
+        "process_cpu_time_and_rss_kib": "0:01.28  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 22432,
+        "latency": {
+          "max_us": 3022,
+          "p50_us": 2606,
+          "p95_us": 2897
+        },
+        "process_cpu_time_and_rss_kib": "0:01.33  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 18502,
+        "latency": {
+          "max_us": 3709,
+          "p50_us": 1924,
+          "p95_us": 3381
+        },
+        "process_cpu_time_and_rss_kib": "0:01.37  48816",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 20991,
+        "latency": {
+          "max_us": 4568,
+          "p50_us": 2301,
+          "p95_us": 3353
+        },
+        "process_cpu_time_and_rss_kib": "0:01.41  48832",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": false,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 17826,
+        "latency": {
+          "max_us": 3552,
+          "p50_us": 1839,
+          "p95_us": 2386
+        },
+        "process_cpu_time_and_rss_kib": "0:01.46  48832",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": false,
+      "measurement": {
+        "body_bytes": 71168,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 21886,
+        "latency": {
+          "max_us": 3624,
+          "p50_us": 2505,
+          "p95_us": 2930
+        },
+        "process_cpu_time_and_rss_kib": "0:01.50  48832",
+        "requests": 128
+      }
+    },
+    {
+      "admin_cookie": true,
+      "conditional": true,
+      "measurement": {
+        "body_bytes": 0,
+        "concurrency": 16,
+        "database_checkouts": 128,
+        "elapsed_us": 19120,
+        "latency": {
+          "max_us": 3870,
+          "p50_us": 1983,
+          "p95_us": 3374
+        },
+        "process_cpu_time_and_rss_kib": "0:01.55  48832",
+        "requests": 128
+      }
+    }
+  ],
+  "thumbnail_bytes": 556
+}

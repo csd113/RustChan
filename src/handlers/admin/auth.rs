@@ -26,9 +26,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use chrono::Utc;
-use dashmap::DashMap;
 use serde::Deserialize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -51,9 +49,23 @@ fn admin_login_fail_window_secs() -> u64 {
 /// Admin login CSRF scope used by this handler.
 const ADMIN_LOGIN_CSRF_SCOPE: &str = "admin-login";
 
-/// `ip_hash` → (`fail_count`, `window_start_secs`).
-static ADMIN_LOGIN_FAILS: LazyLock<DashMap<String, (u32, u64)>> = LazyLock::new(DashMap::new);
-static LOGIN_CLEANUP_SECS: AtomicU64 = AtomicU64::new(0);
+/// Public dummy hash with the same Argon2 parameters as newly created accounts.
+/// Missing usernames perform password work without ever yielding an account ID.
+const MISSING_USER_HASH: &str = "$argon2id$v=19$m=65536,t=2,p=2$cnVzdGNoYW4tdjEuNi41ISE$9bLCu60YvVwNCStcJ+Uv2kvViRlaP/Rm/dg64RcLFjI";
+
+/// Avoid a cheap username-enumeration path within the shared password budget.
+fn verify_login_password(
+    user: Option<&crate::models::AdminUser>,
+    password: &str,
+) -> Result<Option<i64>> {
+    let hash = user.map_or(MISSING_USER_HASH, |account| account.password_hash.as_str());
+    let verified = verify_password(password, hash)?;
+    Ok(user.filter(|_account| verified).map(|account| account.id))
+}
+
+/// Bounded hashed-IP failure state; unknown identities fail closed at capacity.
+static ADMIN_LOGIN_FAILS: LazyLock<crate::middleware::RateTable> =
+    LazyLock::new(crate::middleware::RateTable::default);
 
 fn login_now_secs() -> u64 {
     SystemTime::now()
@@ -92,53 +104,24 @@ fn redact_login_username(username: &str) -> String {
 
 /// Returns true if this IP is currently locked out.
 pub(super) fn is_login_locked(ip_key: &str) -> bool {
-    let now = login_now_secs();
-    if let Some(entry) = ADMIN_LOGIN_FAILS.get(ip_key) {
-        let (count, window_start) = *entry;
-        if now.saturating_sub(window_start) <= admin_login_fail_window_secs() {
-            return count >= admin_login_fail_limit();
-        }
-    }
-    false
+    ADMIN_LOGIN_FAILS
+        .retry_after(ip_key, login_now_secs(), admin_login_fail_limit())
+        .is_some()
 }
 
-/// Record a failed login attempt; returns the new failure count.
-#[expect(
-    clippy::significant_drop_tightening,
-    reason = "the DashMap entry guard must remain held while its attempt count is updated"
-)]
+/// Reserve authentication work before verification; returns the current attempt count.
 pub(super) fn record_login_fail(ip_key: &str) -> u32 {
-    let now = login_now_secs();
-    let mut entry = ADMIN_LOGIN_FAILS
-        .entry(ip_key.to_owned())
-        .or_insert((0, now));
-    let (count, window_start) = entry.value_mut();
-    if now.saturating_sub(*window_start) > admin_login_fail_window_secs() {
-        *count = 1;
-        *window_start = now;
-    } else {
-        *count = count.saturating_add(1);
-    }
-    *count
+    ADMIN_LOGIN_FAILS.record(ip_key, login_now_secs(), admin_login_fail_window_secs())
 }
 
-fn clear_login_fails(ip_key: &str) {
-    drop(ADMIN_LOGIN_FAILS.remove(ip_key));
+/// Clear the successful client's failure budget.
+pub(super) fn clear_login_fails(ip_key: &str) {
+    ADMIN_LOGIN_FAILS.remove(ip_key);
 }
 
-/// Remove login-fail entries whose window has expired.
-/// Called periodically from the background task in `server/server.rs`.
+/// Expire retained failed-login identities during background cleanup.
 pub(in crate::server) fn prune_login_fails() {
-    let now = login_now_secs();
-    // Throttle to at most once per admin_login_fail_window_secs() seconds.
-    let last = LOGIN_CLEANUP_SECS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) < admin_login_fail_window_secs() {
-        return;
-    }
-    LOGIN_CLEANUP_SECS.store(now, Ordering::Relaxed);
-    ADMIN_LOGIN_FAILS.retain(|_, (_, window_start)| {
-        now.saturating_sub(*window_start) <= admin_login_fail_window_secs()
-    });
+    ADMIN_LOGIN_FAILS.prune(login_now_secs());
 }
 
 /// Ensures admin login CSRF.
@@ -293,7 +276,7 @@ pub(in crate::server) async fn admin_login(
 
     let username = form.username.trim().to_owned();
     let username_log = redact_login_username(&username);
-    if username.is_empty() || username.len() > 64 {
+    if username.is_empty() || username.len() > 64 || form.password.len() > 1024 {
         return render_admin_login_response(
             &state,
             jar,
@@ -304,26 +287,32 @@ pub(in crate::server) async fn admin_login(
         .await;
     }
 
+    let permit = state.password_work_gate.try_begin()?;
+    // Reserve before Argon2 so concurrent attempts cannot all pass a stale
+    // failure-count check. Successful authentication clears this reservation.
+    let attempts = record_login_fail(&ip_key);
+    if attempts > admin_login_fail_limit() {
+        return Err(AppError::Forbidden(
+            "Too many login attempts. Please wait and try again.".into(),
+        ));
+    }
     let pool = state.db.clone();
-    let password = form.password.clone();
+    let password = form.password;
 
     // Argon2 verification is CPU-intensive; always use spawn_blocking.
     let result = tokio::task::spawn_blocking(move || -> Result<Option<i64>> {
+        let _password_permit = permit;
         let conn = pool.get()?;
         let user = db::get_admin_by_username(&conn, &username)?;
-        if let Some(u) = user {
-            if verify_password(&password, &u.password_hash)? {
-                return Ok(Some(u.id));
-            }
-        }
-        Ok(None)
+        drop(conn);
+        verify_login_password(user.as_ref(), &password)
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     match result {
         None => {
-            let fails = record_login_fail(&ip_key);
+            let fails = attempts;
             let locked_out = fails >= admin_login_fail_limit();
             warn!(
                 username = %username_log,
@@ -440,7 +429,31 @@ mod tests {
     };
     use tower::ServiceExt as _;
 
+    /// Assign different test threads distinct loopback client identities.
+    static NEXT_TEST_PEER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    std::thread_local! {
+        /// Preserve one identity throughout each asynchronous authentication test.
+        static TEST_PEER: std::net::SocketAddr = std::net::SocketAddr::from((
+            std::net::Ipv4Addr::from(0x7f00_0001_u32.saturating_add(NEXT_TEST_PEER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))), 41000));
+    }
+
+    /// Keep independent tests from consuming each other's authentication reservations.
+    fn test_connect_info() -> axum::extract::ConnectInfo<std::net::SocketAddr> {
+        TEST_PEER.with(|peer| axum::extract::ConnectInfo(*peer))
+    }
+
     const TEST_CSRF_COOKIE: &str = "csrf123";
+
+    #[test]
+    fn missing_user_password_work_cannot_authenticate_the_dummy_hash() -> Result<()> {
+        anyhow::ensure!(verify_login_password(None, "legacy-admin-password")?.is_none());
+        anyhow::ensure!(verify_login_password(None, "incorrect-password")?.is_none());
+        let dummy = argon2::password_hash::phc::PasswordHash::new(MISSING_USER_HASH)?;
+        let current = crate::utils::crypto::hash_password("current-password")?;
+        let current = argon2::password_hash::phc::PasswordHash::new(&current)?;
+        anyhow::ensure!(dummy.algorithm == current.algorithm && dummy.params == current.params);
+        Ok(())
+    }
     const TEST_ADMIN_ORIGIN: &str = "http://localhost";
     const TEST_ONION_HOST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaam2dqd.onion";
     const TEST_ONION_ORIGIN: &str =
@@ -475,7 +488,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .header(header::ORIGIN, TEST_ADMIN_ORIGIN)
             .header(header::COOKIE, format!("csrf_token={TEST_CSRF_COOKIE}"))
-            .extension(crate::test_support::connect_info())
+            .extension(test_connect_info())
             .body(Body::from(body))
             .context("build admin login request")
     }
@@ -552,42 +565,51 @@ mod tests {
     fn locked_after_exceeding_fail_limit() {
         let key = login_ip_key("test-lock-unique-99887766");
         // Clean up any residue from a previous run
-        drop(ADMIN_LOGIN_FAILS.remove(&key));
+        ADMIN_LOGIN_FAILS.remove(&key);
 
         let now = login_now_secs();
-        let _previous_failure_window =
-            ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit(), now));
+        ADMIN_LOGIN_FAILS.insert(
+            key.clone(),
+            (admin_login_fail_limit(), now),
+            admin_login_fail_window_secs(),
+        );
         assert!(is_login_locked(&key));
 
         // Cleanup
-        drop(ADMIN_LOGIN_FAILS.remove(&key));
+        ADMIN_LOGIN_FAILS.remove(&key);
     }
 
     #[test]
     fn not_locked_below_fail_limit() {
         let key = login_ip_key("test-below-limit-11223344");
-        drop(ADMIN_LOGIN_FAILS.remove(&key));
+        ADMIN_LOGIN_FAILS.remove(&key);
 
         let now = login_now_secs();
-        let _previous_failure_window =
-            ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() - 1, now));
+        ADMIN_LOGIN_FAILS.insert(
+            key.clone(),
+            (admin_login_fail_limit() - 1, now),
+            admin_login_fail_window_secs(),
+        );
         assert!(!is_login_locked(&key));
 
-        drop(ADMIN_LOGIN_FAILS.remove(&key));
+        ADMIN_LOGIN_FAILS.remove(&key);
     }
 
     #[test]
     fn expired_window_is_not_locked() {
         let key = login_ip_key("test-expired-window-55667788");
-        drop(ADMIN_LOGIN_FAILS.remove(&key));
+        ADMIN_LOGIN_FAILS.remove(&key);
 
         // window_start far in the past, beyond admin_login_fail_window_secs()
         let old_ts = login_now_secs().saturating_sub(admin_login_fail_window_secs() + 60);
-        let _previous_failure_window =
-            ADMIN_LOGIN_FAILS.insert(key.clone(), (admin_login_fail_limit() + 10, old_ts));
+        ADMIN_LOGIN_FAILS.insert(
+            key.clone(),
+            (admin_login_fail_limit() + 10, old_ts),
+            admin_login_fail_window_secs(),
+        );
         assert!(!is_login_locked(&key));
 
-        drop(ADMIN_LOGIN_FAILS.remove(&key));
+        ADMIN_LOGIN_FAILS.remove(&key);
     }
 
     #[tokio::test]
@@ -596,9 +618,12 @@ mod tests {
         create_test_board(&state)?;
 
         let ip_key = login_ip_key("192.0.2.44");
-        drop(ADMIN_LOGIN_FAILS.remove(&ip_key));
-        let _previous_failure_window =
-            ADMIN_LOGIN_FAILS.insert(ip_key.clone(), (admin_login_fail_limit(), login_now_secs()));
+        ADMIN_LOGIN_FAILS.remove(&ip_key);
+        ADMIN_LOGIN_FAILS.insert(
+            ip_key.clone(),
+            (admin_login_fail_limit(), login_now_secs()),
+            admin_login_fail_window_secs(),
+        );
 
         let router = Router::new()
             .route("/admin/login", post(admin_login))
@@ -616,7 +641,7 @@ mod tests {
             .await
             .context("send locked-out admin login request")?;
 
-        drop(ADMIN_LOGIN_FAILS.remove(&ip_key));
+        ADMIN_LOGIN_FAILS.remove(&ip_key);
 
         anyhow::ensure!(
             response.status() == StatusCode::OK,
@@ -786,7 +811,7 @@ mod tests {
                             super::super::SESSION_COOKIE
                         ),
                     )
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "return_to=/admin&_csrf={}",
                         signed_admin_session_csrf("session123")
@@ -825,7 +850,7 @@ mod tests {
     #[tokio::test]
     async fn admin_login_marks_session_cookie_secure_for_direct_https_request() -> Result<()> {
         let state = crate::test_support::app_state();
-        clear_login_fails(&login_ip_key("127.0.0.1"));
+        clear_login_fails(&login_ip_key(&test_connect_info().0.ip().to_string()));
         create_test_admin_and_board(&state)?;
 
         let router = Router::new()
@@ -847,7 +872,7 @@ mod tests {
                     .header(header::HOST, &host)
                     .header(header::ORIGIN, &origin)
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .extension(crate::middleware::RequestTransport { direct_https: true })
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
@@ -894,7 +919,7 @@ mod tests {
                     .header(header::HOST, "192.168.1.20:8080")
                     .header(header::ORIGIN, "http://192.168.1.20:8080")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -938,7 +963,7 @@ mod tests {
                     .header(header::HOST, TEST_ONION_HOST)
                     .header(header::ORIGIN, TEST_ONION_ORIGIN)
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1017,7 +1042,7 @@ mod tests {
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "http://localhost:3000")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1052,7 +1077,7 @@ mod tests {
                     .header(header::HOST, "example.test:8080")
                     .header(header::ORIGIN, "https://example.test")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1086,7 +1111,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header(header::HOST, "localhost")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1120,7 +1145,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .header(header::HOST, "localhost")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from("username=admin&password=hunter2&_csrf=csrf123"))
                     .context("build origin-less admin login request with invalid CSRF")?,
             )
@@ -1152,7 +1177,7 @@ mod tests {
                     .header(header::HOST, "localhost")
                     .header(header::ORIGIN, "null")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1187,7 +1212,7 @@ mod tests {
                     .header(header::HOST, "127.0.0.1:8080")
                     .header(header::ORIGIN, "http://localhost:8080")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1222,7 +1247,7 @@ mod tests {
                     .header(header::HOST, "[::1]:8080")
                     .header(header::ORIGIN, "http://[::1]:8080")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1259,7 +1284,7 @@ mod tests {
                     .header(header::ORIGIN, "null")
                     .header(header::REFERER, "https://demo.serveo.net/admin")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()
@@ -1295,7 +1320,7 @@ mod tests {
                     .header(header::HOST, "demo.serveo.net")
                     .header("sec-fetch-site", "same-origin")
                     .header(header::COOKIE, "csrf_token=csrf123")
-                    .extension(crate::test_support::connect_info())
+                    .extension(test_connect_info())
                     .body(Body::from(format!(
                         "username=admin&password=hunter2&_csrf={}",
                         signed_admin_csrf()

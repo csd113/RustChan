@@ -20,6 +20,8 @@ use crate::config::{
 use crate::middleware::AppState;
 
 mod assets;
+/// Native listener socket admission and handshake deadlines.
+mod connections;
 mod headers;
 mod lifecycle;
 mod observability;
@@ -639,6 +641,10 @@ async fn run_server_lifecycle(
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
         media_upload_gate: crate::middleware::MediaUploadGate::new(),
+        request_work_gate: crate::middleware::WorkGate::new(256),
+        password_work_gate: crate::middleware::WorkGate::new(2),
+        captcha_work_gate: crate::middleware::WorkGate::new(2),
+        search_work_gate: crate::middleware::WorkGate::new(2),
         db_maintenance_jobs: crate::middleware::DbMaintenanceJobs::new(),
         onion_address: Arc::new(tokio::sync::RwLock::new(None)),
     };
@@ -1766,10 +1772,15 @@ fn seed_initial_default_theme(conn: &rusqlite::Connection, initial_default_theme
 fn configure_http_limits(
     builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
 ) {
-    let _configured_http1 = builder.http1().max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+    let _configured_http1 = builder
+        .http1()
+        .max_buf_size(headers::HTTP_MAX_HEADER_BYTES)
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(15));
     let _configured_http2 = builder
         .http2()
-        .max_header_list_size(u32::try_from(headers::HTTP_MAX_HEADER_BYTES).unwrap_or(u32::MAX));
+        .max_header_list_size(u32::try_from(headers::HTTP_MAX_HEADER_BYTES).unwrap_or(u32::MAX))
+        .max_concurrent_streams(128);
 }
 
 /// Listener label paired with its task result.
@@ -1848,7 +1859,7 @@ async fn run_plain_http(
     }));
 
     let std_listener = listener.into_std()?;
-    let mut server = axum_server::from_tcp(std_listener)?;
+    let mut server = axum_server::from_tcp(std_listener)?.map(connections::BoundedAcceptor::new);
     configure_http_limits(server.http_builder());
     server
         .handle(handle)
@@ -1891,13 +1902,20 @@ pub async fn run_https_static(
     // Convert tokio TcpListener → std TcpListener for axum_server::from_tcp_rustls.
     // set_nonblocking(true) is required — axum-server expects a non-blocking socket.
     let std_listener = listener.into_std()?;
-    let mut server = axum_server::from_tcp_rustls(std_listener, tls_config)?;
+    let mut server = axum_server::from_tcp_rustls(std_listener, tls_config)?
+        .map(connections::BoundedAcceptor::new);
     configure_http_limits(server.http_builder());
 
     server
         .handle(handle)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
+}
+
+/// Keep failed connection diagnostics separate from the listener admission loop.
+#[cfg(feature = "tls-acme")]
+fn log_acme_connection_failure(error: &tokio::task::JoinError) {
+    tracing::warn!(target: "server", %error, "ACME HTTPS connection task failed");
 }
 
 // HTTPS listener (ACME / Let's Encrypt path)
@@ -1925,6 +1943,7 @@ pub async fn run_https_acme(
     use tower::Service as _;
 
     let mut connections = tokio::task::JoinSet::new();
+    let connection_slots = Arc::new(tokio::sync::Semaphore::new(256));
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -1933,6 +1952,7 @@ pub async fn run_https_acme(
             }
             result = listener.accept() => {
                 let (tcp, peer_addr) = result?;
+                let Ok(permit) = Arc::clone(&connection_slots).try_acquire_owned() else { continue; };
 
                 let acme_acceptor = Arc::clone(&acme_acceptor);
                 let server_cfg = Arc::clone(&server_cfg);
@@ -1942,10 +1962,13 @@ pub async fn run_https_acme(
                     use tokio_util::compat::{TokioAsyncReadCompatExt as _, FuturesAsyncReadCompatExt as _};
                     // rustls-acme requires futures::{AsyncRead, AsyncWrite}; wrap
                     // the tokio TcpStream with the tokio-util compat shim.
+                    let _connection_permit = permit;
                     let tcp = tcp.compat();
-                    match acme_acceptor.accept(tcp).await {
+                    let Ok(accepted) = tokio::time::timeout(Duration::from_secs(15), acme_acceptor.accept(tcp)).await else { return; };
+                    match accepted {
                         Ok(Some(start)) => {
-                            match start.into_stream(server_cfg).await {
+                            let Ok(handshake) = tokio::time::timeout(Duration::from_secs(15), start.into_stream(server_cfg)).await else { return; };
+                            match handshake {
                                 Ok(tls_stream) => {
                                     // Convert the futures-io TLS stream back to a
                                     // tokio-io stream so TokioIo / hyper can use it.
@@ -1963,7 +1986,7 @@ pub async fn run_https_acme(
                                         svc.clone().call(request)
                                     });
                                     let mut builder = http1::Builder::new();
-                                    let _configured = builder.max_buf_size(headers::HTTP_MAX_HEADER_BYTES);
+                                    let _configured = builder.max_buf_size(headers::HTTP_MAX_HEADER_BYTES).timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(15));
                                     let connection_result = builder.serve_connection(io, svc).await;
                                     if let Err(e) = connection_result {
                                         tracing::debug!(
@@ -1994,11 +2017,7 @@ pub async fn run_https_acme(
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 if let Err(error) = result {
-                    tracing::warn!(
-                        target: "server",
-                        %error,
-                        "ACME HTTPS connection task failed"
-                    );
+                    log_acme_connection_failure(&error);
                 }
             }
         }

@@ -43,15 +43,26 @@ pub fn manage_account(
         "password is too long"
     );
     crate::utils::crypto::validate_password(new_password)?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let session = super::get_session(&tx, session)?.context("administrator session expired")?;
+    let authorized = super::get_session(conn, session)?.context("administrator session expired")?;
     let actor =
-        super::get_admin_name_by_id(&tx, session.admin_id)?.context("administrator missing")?;
-    let user = super::get_admin_by_username(&tx, &actor)?.context("administrator missing")?;
+        super::get_admin_name_by_id(conn, authorized.admin_id)?.context("administrator missing")?;
+    let user = super::get_admin_by_username(conn, &actor)?.context("administrator missing")?;
     if !crate::utils::crypto::verify_password(current_password, &user.password_hash)? {
         return Ok(false);
     }
+    // Password work runs before taking SQLite's single writer lock. Recheck
+    // session and credentials under that lock to close the authorization race.
     let hash = crate::utils::crypto::hash_password(new_password)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current_session =
+        super::get_session(&tx, session)?.context("administrator session expired")?;
+    let current_user =
+        super::get_admin_by_username(&tx, &actor)?.context("administrator missing")?;
+    ensure!(
+        current_session.admin_id == authorized.admin_id
+            && current_user.password_hash == user.password_hash,
+        "administrator authorization changed; retry after signing in again"
+    );
     match action {
         AccountAction::Create => {
             ensure!(

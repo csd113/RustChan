@@ -645,7 +645,14 @@ pub(in crate::server) async fn setup_review(
             .admin_password
             .as_deref()
             .ok_or_else(|| AppError::BadRequest("Initial admin password is required.".into()))?;
-        let password_hash = crypto::hash_password(password)?;
+        let password = password.to_owned();
+        let permit = state.password_work_gate.try_begin()?;
+        let password_hash = tokio::task::spawn_blocking(move || {
+            let _password_permit = permit;
+            crypto::hash_password(&password)
+        })
+        .await
+        .map_err(|error| AppError::Internal(error.into()))??;
         let token = crypto::random_hex(32);
         jar = jar.add(make_pending_admin_hash_cookie(
             &token,
@@ -690,9 +697,23 @@ pub(in crate::server) async fn setup_finish(
             .map_err(|errors| AppError::BadRequest(errors.join(" ")))?;
     let board_slug = parsed.board_slug.clone();
     let auto_backup_settings = state.auto_full_backup_settings.clone();
+    let permit = state.password_work_gate.try_begin()?;
     tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
+            let _password_permit = permit;
+            // Hash before beginning a write transaction; availability and admin
+            // presence are rechecked under the transaction before publication.
+            let prepared_hash = pending_admin_hash;
+            let prepared_hash = if prepared_hash.is_some() {
+                prepared_hash
+            } else {
+                parsed
+                    .admin_password
+                    .as_deref()
+                    .map(crypto::hash_password)
+                    .transpose()?
+            };
             let mut conn = pool.get()?;
             let tx = conn.transaction()?;
             db::ensure_setup_available(&tx)
@@ -704,15 +725,10 @@ pub(in crate::server) async fn setup_finish(
                 let username = parsed.admin_username.as_deref().ok_or_else(|| {
                     AppError::BadRequest("Initial admin username is required.".into())
                 })?;
-                let password_hash = if let Some(hash) = pending_admin_hash.as_deref() {
-                    hash.to_owned()
-                } else {
-                    let password = parsed.admin_password.as_deref().ok_or_else(|| {
-                        AppError::BadRequest("Initial admin password is required.".into())
-                    })?;
-                    crypto::hash_password(password)?
-                };
-                db::create_admin(&tx, username, &password_hash).map(|_completed_value| ())?;
+                let password_hash = prepared_hash.as_deref().ok_or_else(|| {
+                    AppError::BadRequest("Initial admin password is required.".into())
+                })?;
+                db::create_admin(&tx, username, password_hash).map(|_completed_value| ())?;
             }
             if db::board_slug_exists(&tx, &parsed.board_slug)? {
                 return Err(AppError::Conflict(format!(

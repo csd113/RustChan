@@ -341,7 +341,6 @@ src/workers/mod.rs	1380	expect	clippy::cognitive_complexity	source validation an
 src/workers/mod.rs	1551	expect	clippy::too_many_arguments	the finalisation boundary carries the durable job and all validated filesystem identities	fn transcode_video_finalise
 src/workers/mod.rs	1593	expect	clippy::too_many_arguments	output installation and atomic DB completion require the full validated transcode identity	fn persist_transcoded_webm
 src/workers/mod.rs	1934	expect	clippy::too_many_arguments	the finalisation boundary explicitly carries all validated paths and DB identity	fn waveform_finalise
-src/workers/mod.rs	2115	expect	clippy::cognitive_complexity	archive, prune, and filesystem finalization remain one consistency operation	fn prune_threads
 src/workers/mod.rs	2561	expect	clippy::cognitive_complexity,clippy::too_many_lines	the bounded legacy-state matrix is intentionally explicit	fn reconcile_media_job_states
 src/workers/mod.rs	3050	expect	clippy::expect_used	test database queries stop locally with fixture-specific failure context	fn file_hash_count
 src/workers/mod.rs	3227	expect	clippy::expect_used	fixture setup failures should stop this queue durability test	fn required_thread_prune_bypasses_capacity_and_survives_queue_recreation

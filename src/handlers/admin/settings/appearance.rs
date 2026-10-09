@@ -1,10 +1,10 @@
 use super::{
     admin_panel_error_redirect_anchor, admin_panel_error_redirect_anchor_open,
     admin_panel_redirect_anchor, admin_panel_redirect_anchor_open, check_admin_csrf_jar,
-    format_favicon_upload_error, read_limited_upload_bytes, read_text_field,
-    require_admin_post_origin_and_csrf, require_admin_session_sid, require_same_origin_request,
-    AppError, AppState, CookieJar, Form, HeaderMap, Multipart, Response, Result, State,
-    MAX_FAVICON_UPLOAD_BYTES, SESSION_COOKIE,
+    format_favicon_upload_error, preflight_asset_upload, read_limited_upload_bytes,
+    read_text_field, require_admin_post_origin_and_csrf, require_admin_session_sid,
+    require_same_origin_request, AppError, AppState, AssetMultipartBudget, CookieJar, Form,
+    HeaderMap, Multipart, Response, Result, State, MAX_FAVICON_UPLOAD_BYTES, SESSION_COOKIE,
 };
 use axum::response::IntoResponse as _;
 use serde::Deserialize;
@@ -60,7 +60,10 @@ pub(in crate::server) async fn update_site_favicon(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_same_origin_request(&headers, Some(peer))?;
+    preflight_asset_upload(&state, session_id.clone()).await?;
+    let media_permit = state.media_upload_gate.try_begin()?;
 
+    let mut budget = AssetMultipartBudget::default();
     let mut csrf = None;
     let mut favicon_bytes: Option<Vec<u8>> = None;
 
@@ -72,6 +75,7 @@ pub(in crate::server) async fn update_site_favicon(
         let Some(field) = next_field else {
             break;
         };
+        budget.note(&field)?;
         match field.name() {
             Some("_csrf") => csrf = Some(read_text_field(field).await?),
             Some("favicon") => {
@@ -80,7 +84,7 @@ pub(in crate::server) async fn update_site_favicon(
                     favicon_bytes = Some(bytes);
                 }
             }
-            _ => {}
+            _ => crate::handlers::discard_unknown_multipart_field(field).await?,
         }
     }
 
@@ -91,6 +95,7 @@ pub(in crate::server) async fn update_site_favicon(
     let favicon_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
+            let _media_permit = media_permit;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             crate::favicon::write_favicon_set(
@@ -125,7 +130,10 @@ pub(in crate::server) async fn update_board_favicon(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_same_origin_request(&headers, Some(peer))?;
+    preflight_asset_upload(&state, session_id.clone()).await?;
+    let media_permit = state.media_upload_gate.try_begin()?;
 
+    let mut budget = AssetMultipartBudget::default();
     let mut csrf = None;
     let mut board_id = None;
     let mut favicon_bytes: Option<Vec<u8>> = None;
@@ -138,6 +146,7 @@ pub(in crate::server) async fn update_board_favicon(
         let Some(field) = next_field else {
             break;
         };
+        budget.note(&field)?;
         match field.name() {
             Some("_csrf") => csrf = Some(read_text_field(field).await?),
             Some("board_id") => {
@@ -149,7 +158,7 @@ pub(in crate::server) async fn update_board_favicon(
                     favicon_bytes = Some(bytes);
                 }
             }
-            _ => {}
+            _ => crate::handlers::discard_unknown_multipart_field(field).await?,
         }
     }
 
@@ -161,6 +170,7 @@ pub(in crate::server) async fn update_board_favicon(
     let favicon_result = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
+            let _media_permit = media_permit;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let board_short: String = conn.query_row(

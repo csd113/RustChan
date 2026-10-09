@@ -30,7 +30,7 @@ use formatting::{apply_dice, apply_emoji};
     reason = "the reply-reference regex is a source literal covered by sanitizer tests"
 )]
 static RE_REPLY: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&gt;&gt;(\d+)").expect("RE_REPLY is valid"));
+    LazyLock::new(|| Regex::new(r"&gt;&gt;([0-9]+)").expect("RE_REPLY is valid"));
 
 /// Matches escaped cross-board links and optional thread identifiers.
 #[expect(
@@ -38,7 +38,7 @@ static RE_REPLY: LazyLock<Regex> =
     reason = "the cross-board-link regex is a source literal covered by sanitizer tests"
 )]
 static RE_CROSSLINK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"&gt;&gt;&gt;/([a-z0-9]+)/(\d+)?").expect("RE_CROSSLINK is valid")
+    Regex::new(r"&gt;&gt;&gt;/([a-z0-9]{1,8})/([0-9]+)?").expect("RE_CROSSLINK is valid")
 });
 
 /// Matches HTTP(S) URLs after HTML escaping.
@@ -163,7 +163,12 @@ pub fn render_post_body(escaped: &str, collapse_greentext: bool) -> String {
             // quote lines plainly so no collapse UI exists at all.
             if collapse_greentext && group.len() >= 3 {
                 let count = group.len();
-                crate::templates::append_html(&mut html, format_args!("<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {count} lines</summary>"));
+                crate::templates::append_html(
+                    &mut html,
+                    format_args!(
+                        "<details open class=\"greentext-block\"><summary class=\"quote\">&gt; {count} lines</summary>"
+                    ),
+                );
                 for ql in &group {
                     crate::templates::append_html(
                         &mut html,
@@ -240,6 +245,15 @@ fn render_inline(text: &str) -> String {
     // Both handled in one pass by RE_CROSSLINK so there is no second-pass corruption.
     result = RE_CROSSLINK
         .replace_all(&result, |caps: &regex::Captures<'_>| {
+            let Some(whole) = caps.get(0) else {
+                return String::new();
+            };
+            let invalid_prefix = result.get(..whole.start()).is_some_and(|prefix| prefix.ends_with("&gt;"));
+            let invalid_suffix = result.get(whole.end()..).and_then(|suffix| suffix.chars().next())
+                .is_some_and(|next| next.is_alphanumeric() || next == '_' || (caps.get(2).is_none() && next == '-'));
+            if invalid_prefix || invalid_suffix {
+                return whole.as_str().to_owned();
+            }
             let Some(board) = caps.get(1).map(|value| value.as_str()) else {
                 return caps
                     .get(0)
@@ -247,8 +261,11 @@ fn render_inline(text: &str) -> String {
             };
             caps.get(2).map_or_else(
                 || format!(r#"<a href="/{board}" class="quotelink crosslink">&gt;&gt;&gt;/{board}/</a>"#),
-                |pid| {
-                    let pid = pid.as_str();
+                |post_match| {
+                    let raw_pid = post_match.as_str();
+                    let Some(pid) = raw_pid.parse::<i64>().ok().filter(|id| *id > 0) else {
+                        return whole.as_str().to_owned();
+                    };
                     format!(
                         r#"<a href="/{board}/post/{pid}" class="quotelink crosslink" data-crossboard="{board}" data-pid="{pid}">&gt;&gt;&gt;/{board}/{pid}</a>"#,
                     )
@@ -265,9 +282,40 @@ fn render_inline(text: &str) -> String {
                     .get(0)
                     .map_or_else(String::new, |value| value.as_str().to_owned());
             };
-            format!(r##"<a href="#p{n}" class="quotelink" data-pid="{n}">&gt;&gt;{n}</a>"##)
+            let Some(whole) = caps.get(0) else {
+                return String::new();
+            };
+            let valid_boundary = !result
+                .get(..whole.start())
+                .is_some_and(|prefix| prefix.ends_with("&gt;"))
+                && !result
+                    .get(whole.end()..)
+                    .and_then(|suffix| suffix.chars().next())
+                    .is_some_and(|next| next.is_alphanumeric() || next == '_');
+            let Some(pid) = n.parse::<i64>().ok().filter(|id| *id > 0 && valid_boundary) else {
+                return whole.as_str().to_owned();
+            };
+            format!(r##"<a href="#p{pid}" class="quotelink" data-pid="{pid}">&gt;&gt;{n}</a>"##)
         })
         .into_owned();
+
+    // Format escaped text before generating URL attributes. Applying markup to
+    // generated anchors could put markup's quotes inside a hostile href.
+    // [spoiler]…[/spoiler]
+    result = RE_SPOILER
+        .replace_all(&result, |caps: &regex::Captures<'_>| {
+            let spoiler = caps.get(1).map_or("", |value| value.as_str());
+            format!(r#"<span class="spoiler" data-action="toggle-spoiler">{spoiler}</span>"#)
+        })
+        .into_owned();
+
+    // **bold**
+    result = RE_BOLD
+        .replace_all(&result, "<strong>$1</strong>")
+        .into_owned();
+
+    // __italic__
+    result = RE_ITALIC.replace_all(&result, "<em>$1</em>").into_owned();
 
     // URLs — also append a video embed placeholder when the URL is a known video link.
     // The placeholder is an empty <span> with data attributes; the client-side embed
@@ -311,22 +359,6 @@ fn render_inline(text: &str) -> String {
             }
         })
         .into_owned();
-
-    // [spoiler]…[/spoiler]
-    result = RE_SPOILER
-        .replace_all(&result, |caps: &regex::Captures<'_>| {
-            let spoiler = caps.get(1).map_or("", |value| value.as_str());
-            format!(r#"<span class="spoiler" data-action="toggle-spoiler">{spoiler}</span>"#)
-        })
-        .into_owned();
-
-    // **bold**
-    result = RE_BOLD
-        .replace_all(&result, "<strong>$1</strong>")
-        .into_owned();
-
-    // __italic__
-    result = RE_ITALIC.replace_all(&result, "<em>$1</em>").into_owned();
 
     // Emoji shortcodes (applied last, after HTML transforms)
     result = apply_emoji(&result);
@@ -415,9 +447,75 @@ pub fn validate_subject(subject: &str) -> Option<String> {
     }
 }
 
+/// Safely render legacy markup that predates the attribute-context correction.
+/// Only malformed cached HTML falls back to escaped text, preserving valid dice rolls.
+#[must_use]
+pub fn safe_stored_post_html(body: &str, body_html: &str, collapse_greentext: bool) -> String {
+    let malformed_url = body_html.len() > 256 * 1024
+        || ["href=\"", "data-url=\""].iter().any(|attribute| {
+            body_html.split(attribute).skip(1).any(|suffix| {
+                suffix
+                    .split('"')
+                    .next()
+                    .is_some_and(|value| value.contains('<'))
+            })
+        });
+    if malformed_url {
+        escape_html(&body.chars().take(4096).collect::<String>()).replace('\n', "<br>")
+    } else {
+        normalize_greentext_blocks(body_html, collapse_greentext)
+    }
+}
+
+/// Keep in-page quotes local and route references outside the rendered window safely.
+#[must_use]
+pub fn route_missing_quote_links<S: std::hash::BuildHasher>(
+    html: &str,
+    board: &str,
+    visible: &std::collections::HashSet<i64, S>,
+) -> String {
+    static QUOTE_HREF: LazyLock<Option<Regex>> =
+        LazyLock::new(|| Regex::new(r##"href="#p([0-9]+)""##).ok());
+    let Some(regex) = QUOTE_HREF.as_ref() else {
+        return html.to_owned();
+    };
+    let board = escape_html(board);
+    regex
+        .replace_all(html, |caps: &regex::Captures<'_>| {
+            let Some(pid) = caps
+                .get(1)
+                .and_then(|value| value.as_str().parse::<i64>().ok())
+            else {
+                return caps
+                    .get(0)
+                    .map_or_else(String::new, |value| value.as_str().to_owned());
+            };
+            if visible.contains(&pid) {
+                format!(r##"href="#p{pid}""##)
+            } else {
+                format!(r#"href="/{board}/post/{pid}""#)
+            }
+        })
+        .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_malformed_url_markup_is_rendered_as_text_without_rerolling_valid_html() {
+        let legacy = r#"<a href="https://example.invalid/<span class="spoiler" data-action="toggle-spoiler">bad</span>">link</a>"#;
+        let safe = safe_stored_post_html(
+            "https://example.invalid/[spoiler]bad[/spoiler]<img>",
+            legacy,
+            false,
+        );
+        assert!(!safe.contains("<span") && !safe.contains("<img>"));
+        assert!(safe.contains("&lt;img&gt;"));
+        let valid = "<span class=\"dice-roll\">immutable roll 4</span>";
+        assert_eq!(safe_stored_post_html("[dice 1d6]", valid, false), valid);
+    }
 
     #[test]
     fn test_escape_html() {
@@ -817,10 +915,10 @@ mod tests {
         // Extremely large post IDs should not cause integer overflow
         let escaped = escape_html(">>99999999999999999999");
         let html = render_post_body(&escaped, false);
-        // Must render as a link regardless of numeric size
+        // Invalid IDs remain readable text rather than broken numeric links
         assert!(
-            html.contains("quotelink"),
-            "large post ID should still produce a link"
+            !html.contains("quotelink"),
+            "an overflowing post ID must remain plain text"
         );
     }
 
@@ -881,5 +979,85 @@ mod tests {
         assert!(!stripped.contains("<details"));
         assert!(stripped.contains("class=\"quote\""));
         assert!(stripped.contains("line1"));
+    }
+    #[test]
+    fn malformed_quote_identifiers_remain_safe_plain_text() {
+        for raw in [
+            ">>0",
+            ">>-1",
+            ">>１２３",
+            ">>123abc",
+            ">>>123",
+            ">>9223372036854775808",
+            ">>>/test/99999999999999999999999",
+            ">>>/toolongboard/7",
+            ">>>/test/123abc",
+            ">>>/test/-1",
+            ">>>/test/１２３",
+            ">>>>/test/123",
+        ] {
+            let html = render_post_body(&escape_html(raw), false);
+            assert!(
+                !html.contains("quotelink"),
+                "invalid reference was linkified: {raw}"
+            );
+        }
+        let valid = render_post_body(
+            &escape_html(">>00012 >>>/test/00012 >>9223372036854775807 <script>alert(1)</script>"),
+            false,
+        );
+        assert!(
+            valid.contains("data-pid=\"12\""),
+            "leading zeros must resolve to a canonical post ID"
+        );
+        assert!(
+            valid.contains("data-pid=\"9223372036854775807\""),
+            "largest supported post ID must remain representable"
+        );
+        assert!(
+            !valid.contains("<script>"),
+            "quote parsing must preserve escaping"
+        );
+    }
+    #[test]
+    fn markup_in_urls_cannot_rewrite_generated_attributes() {
+        for text in [
+            "https://example.invalid/[spoiler]payload[/spoiler]",
+            "https://example.invalid/**bold**",
+            "https://example.invalid/__italic__",
+            "[spoiler]https://example.invalid/a?x=1&y=2[/spoiler]",
+            "https://example.invalid/[spoiler]x[/spoiler]onmouseover=alert(1)",
+            "https://example.invalid/\"<img src=x onerror=alert(1)>",
+        ] {
+            let html = render_post_body(&escape_html(text), false);
+            for attribute in html.split("href=\"").skip(1) {
+                let value = attribute.split('"').next().unwrap_or_default();
+                assert!(
+                    !value.contains('<') && !value.contains('>'),
+                    "markup entered an href: {html}"
+                );
+            }
+            assert!(
+                !html.contains("<img"),
+                "hostile content became an image tag: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_and_many_quotes_remain_bounded_data() {
+        for body in [
+            "e\u{0301}".repeat(2000),
+            "\u{200d}\u{202e}😀".repeat(500),
+            ">>1 ".repeat(1000),
+            "[spoiler]".repeat(1000),
+        ] {
+            let html = render_post_body(&escape_html(&body), false);
+            assert!(
+                html.len() < 256 * 1024,
+                "markup expansion must stay bounded"
+            );
+            assert!(!html.contains("<script"));
+        }
     }
 }

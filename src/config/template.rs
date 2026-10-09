@@ -200,7 +200,8 @@ db_warn_threshold_mb = 2048
 job_queue_capacity = 1000
 
 # When true, threads that would be hard-deleted by the prune worker are instead
-# moved to the archive table, even on boards where archiving is disabled.
+# marked archived in place, even on boards where archiving is disabled.
+# The board archive count cap still applies; this does not guarantee permanent retention.
 archive_before_prune = true
 
 # Maximum total size (MiB) of all thumbnail/waveform cache files across all boards.

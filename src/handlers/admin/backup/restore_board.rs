@@ -20,13 +20,18 @@ use axum::{extract::FromRequest as _, response::IntoResponse as _};
 use rusqlite::{params, OptionalExtension as _};
 use serde::Deserialize;
 
-/// Validates board restore media metadata.
+/// Validate post body bounds and board restore media metadata before staging.
 fn validate_board_restore_media_metadata(
     manifest: &board_manifest::BoardBackupManifest,
 ) -> Result<()> {
     let board_short = manifest.board.short_name.as_str();
 
     for post in &manifest.posts {
+        if post.body.chars().take(4097).count() > 4096 {
+            return Err(AppError::BadRequest(
+                "Board backup contains an oversized post body.".into(),
+            ));
+        }
         if let Some(file_path) = post.file_path.as_deref() {
             safety::validate_restored_media_path_for_board(
                 file_path,
@@ -364,8 +369,8 @@ where
 
     let board_short = manifest.board.short_name.clone();
     validate_board_short_name(&board_short)?;
-    validate_board_backup_access_settings(&mut manifest)?;
     validate_board_restore_media_metadata(&manifest)?;
+    validate_board_backup_access_settings(&mut manifest)?;
     let workspace = BoardRestoreWorkspace::prepare(upload_dir, &board_short)?;
     extract_uploads(&workspace.staged_upload_root)?;
 
@@ -1444,6 +1449,36 @@ mod tests {
             }],
             banners: Vec::<BannerRow>::new(),
         }
+    }
+
+    #[test]
+    fn board_restore_body_bounds_apply_before_filesystem_or_database_mutation() -> TestResult<()> {
+        let mut manifest = sample_manifest();
+        for chars in [4095, 4096, 4097] {
+            manifest.posts.first_mut().context("fixture post")?.body = "😀".repeat(chars);
+            ensure!(validate_board_restore_media_metadata(&manifest).is_ok() == (chars <= 4096));
+        }
+        let pool = crate::db::init_test_pool()?;
+        let mut conn = pool.get()?;
+        let directory = tempfile::tempdir()?;
+        let uploads = directory.path().join("uploads");
+        let extracted = std::cell::Cell::new(false);
+        let result = super::execute_board_restore(
+            &mut conn,
+            uploads.to_str().context("fixture path")?,
+            manifest,
+            |_path| {
+                extracted.set(true);
+                Ok(())
+            },
+            "test restore",
+            "test completion",
+        );
+        ensure!(matches!(result, Err(crate::error::AppError::BadRequest(_))));
+        ensure!(!extracted.get() && !uploads.exists());
+        let posts: i64 = conn.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))?;
+        ensure!(posts == 0);
+        Ok(())
     }
 
     #[test]

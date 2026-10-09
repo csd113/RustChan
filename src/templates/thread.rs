@@ -5,12 +5,50 @@ use crate::utils::{
     files::format_file_size, redirect::encode_query_component, sanitize::escape_html,
 };
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use super::{
     admin_ban_delete_modal_script, base_layout, base_layout_with_preferences,
     compress_modal_script, fmt_ts, fmt_ts_short, report_modal_script, thread_autoupdate_script,
 };
+
+/// Navigation metadata for bounded thread pages.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ThreadWindow {
+    /// Exclusive upper post ID for the next older page.
+    pub(crate) older_before: Option<i64>,
+    /// Historical pages retain their selected range rather than polling forward.
+    pub(crate) historical: bool,
+}
+
+/// Render links that also work when JavaScript is disabled.
+fn render_window_nav(board: &Board, thread: &Thread, window: ThreadWindow) -> String {
+    let mut nav = String::new();
+    let short = escape_html(&board.short_name);
+    if let Some(before) = window.older_before {
+        super::append_html(
+            &mut nav,
+            format_args!(
+                r#"<a href="/{short}/thread/{}?before={before}">[ Older replies ]</a> "#,
+                thread.id
+            ),
+        );
+    }
+    if window.historical {
+        super::append_html(
+            &mut nav,
+            format_args!(
+                r#"<a href="/{short}/thread/{}">[ Latest replies ]</a>"#,
+                thread.id
+            ),
+        );
+    }
+    if nav.is_empty() {
+        nav
+    } else {
+        format!(r#"<nav class="thread-window-nav" aria-label="Reply pages">{nav}</nav>"#)
+    }
+}
 
 /// Number of seconds during which a poster may edit or delete a new post.
 const SELF_ACTION_WINDOW_SECS: i64 = 60;
@@ -200,40 +238,57 @@ pub fn delete_post_page(
 
 /// Renders the top or bottom thread navigation controls.
 fn render_thread_nav(board: &Board, thread: &Thread, is_bottom: bool) -> String {
+    let board_short = escape_html(&board.short_name);
+    let position = if is_bottom { "bottom" } else { "top" };
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
+    let return_suffix = if thread.archived { "/archive" } else { "" };
+    let refresh_controls = if thread.archived {
+        String::new()
+    } else {
+        format!(
+            r#"  <div class="thread-nav-group thread-nav-refresh">
+    <noscript><a class="thread-nav-control thread-nav-update" href="/{board_short}/thread/{thread_id}">[ Update now ]</a></noscript>
+    <button class="thread-nav-control thread-nav-btn thread-nav-update" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update now ]</button>
+    <label class="autoupdate-label">
+      <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
+      <span>Auto refresh</span>
+    </label>
+  </div>
+"#,
+            thread_id = thread.id,
+        )
+    };
+    let update_status = if thread.archived {
+        ""
+    } else if is_bottom {
+        r#"<span class="autoupdate-status" data-role="autoupdate-status"></span>"#
+    } else {
+        // Announce updates once; the bottom copy is visual feedback only.
+        r#"<span class="autoupdate-status" data-role="autoupdate-status" role="status"></span>"#
+    };
     let nav_class = if is_bottom {
         "board-header thread-nav thread-nav-bottom"
     } else {
         "board-header thread-nav"
     };
     format!(
-        r#"<div class="{nav_class}">
-  <div class="thread-nav-group thread-nav-links">
-    <a href="/{board_short}">[ Return ]</a>
-    <a href="/{board_short}/catalog">[ Catalog ]</a>
-    <a href="{jump_link}">[ {jump_label} ]</a>
-  </div>
-  <div class="thread-nav-group thread-nav-refresh">
-    <noscript><a href="/{board_short}/thread/{thread_id}">[ Update now ]</a></noscript>
-    <button class="thread-nav-btn" type="button" data-action="fetch-updates" data-busy-label="[ Updating… ]">[ Update now ]</button>
-    <label class="autoupdate-label">
-      <input type="checkbox" data-role="autoupdate-toggle" data-action="autoupdate-toggle">
-      <span>Auto refresh</span>
-    </label>
-  </div>
-  <div class="thread-nav-group thread-nav-state">
-    <span class="autoupdate-status" data-role="autoupdate-status" role="status" aria-live="polite"></span>
-    <span class="thread-reply-stat" title="Reply count"><span class="thread-reply-stat-label">Replies</span>: <span data-role="thread-reply-count">{reply_count}</span></span>
+        r#"<div class="{nav_class}" id="{position}" tabindex="-1" role="group" aria-label="Thread controls at {position}">
+  <nav class="thread-nav-group thread-nav-links" aria-label="Thread navigation at {position}">
+    <a class="thread-nav-control" href="/{board_short}{return_suffix}">[ Return ]</a>
+    <a class="thread-nav-control" href="/{board_short}/catalog">[ Catalog ]</a>
+    <a class="thread-nav-control" href="{jump_link}">[ {jump_label} ]</a>
+  </nav>
+{refresh_controls}  <div class="thread-nav-group thread-nav-state">
+    {update_status}
+    <span class="thread-reply-stat" title="Reply count"><span class="thread-reply-stat-label">Replies:</span> <span data-role="thread-reply-count">{reply_count}</span></span>
   </div>
 </div>
 "#,
         nav_class = nav_class,
-        board_short = escape_html(&board.short_name),
         jump_link = jump_link,
         jump_label = jump_label,
         reply_count = thread.reply_count,
-        thread_id = thread.id,
     )
 }
 
@@ -292,10 +347,6 @@ pub fn render_archive_state_badges(sticky: bool) -> String {
 // Thread page
 #[must_use]
 #[expect(
-    clippy::too_many_lines,
-    reason = "the thread document keeps navigation, posts, poll, forms, and modals together"
-)]
-#[expect(
     clippy::too_many_arguments,
     reason = "thread rendering consumes distinct moderation, poll, form, theme, and visitor contexts"
 )]
@@ -317,7 +368,62 @@ pub fn thread_page(
     current_theme: Option<&str>,
     collapse_greentext: bool,
     can_post: bool,
+    thread_preference: crate::db::UserThreadPreference,
     user_preferences: crate::templates::UserPreferences,
+) -> String {
+    thread_page_window(
+        board,
+        thread,
+        posts,
+        owned_post_controls,
+        csrf_token,
+        boards,
+        is_admin,
+        admin_csrf_token,
+        poll,
+        error,
+        success,
+        reply_prefill,
+        edit_overlay_state,
+        current_theme,
+        collapse_greentext,
+        can_post,
+        thread_preference,
+        user_preferences,
+        ThreadWindow::default(),
+    )
+}
+
+/// Render a bounded thread window while preserving the normal document hooks.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the thread document keeps navigation, posts, poll, forms, and modals together"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thread rendering consumes distinct moderation, poll, form, theme, and visitor contexts"
+)]
+pub(crate) fn thread_page_window(
+    board: &Board,
+    thread: &Thread,
+    posts: &[Post],
+    owned_post_controls: &BTreeMap<i64, OwnedPostControls>,
+    csrf_token: &str,
+    boards: &[Board],
+    is_admin: bool,
+    admin_csrf_token: Option<&str>,
+    poll: Option<&crate::models::PollData>,
+    error: Option<&str>,
+    success: Option<&str>,
+    reply_prefill: Option<&super::forms::PostFormState>,
+    edit_overlay_state: Option<&EditOverlayState>,
+    current_theme: Option<&str>,
+    collapse_greentext: bool,
+    can_post: bool,
+    thread_preference: crate::db::UserThreadPreference,
+    user_preferences: crate::templates::UserPreferences,
+    window: ThreadWindow,
 ) -> String {
     let mut body = String::new();
     let admin_form_csrf = admin_csrf_token.unwrap_or(csrf_token);
@@ -340,14 +446,14 @@ pub fn thread_page(
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="action" value="{sticky_act}">
 <input type="hidden" name="board" value="{board}">
-<button type="submit" class="admin-toolbar-btn">{sticky_lbl}</button>
+<button type="submit" class="admin-toolbar-btn"{sticky_disabled}>{sticky_lbl}</button>
 </form>
 <form method="POST" action="/admin/thread/action" style="display:inline">
 <input type="hidden" name="_csrf" value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="action" value="{lock_act}">
 <input type="hidden" name="board" value="{board}">
-<button type="submit" class="admin-toolbar-btn">{lock_lbl}</button>
+<button type="submit" class="admin-toolbar-btn"{lock_disabled}>{lock_lbl}</button>
 </form>
 {archive_btn}
 <form method="POST" action="/admin/thread/delete" style="display:inline">
@@ -366,6 +472,12 @@ pub fn thread_page(
             csrf = escape_html(admin_form_csrf),
             tid = thread.id,
             board = escape_html(&board.short_name),
+            sticky_disabled = if thread.archived && !thread.sticky {
+                " disabled"
+            } else {
+                ""
+            },
+            lock_disabled = if thread.archived { " disabled" } else { "" },
             sticky_act = sticky_action.0,
             sticky_lbl = sticky_action.1,
             lock_act = lock_action.0,
@@ -425,8 +537,7 @@ pub fn thread_page(
     crate::templates::append_html(
         &mut body,
         format_args!(
-            r#"<div id="top"></div>
-<div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
+            r#"<div class="thread-board-banner board-thread-header">/{s}/ — {bn}{access_badge}</div>
 {admin_toolbar}
 {top_nav}"#,
             s = escape_html(&board.short_name),
@@ -436,27 +547,44 @@ pub fn thread_page(
             top_nav = render_thread_nav(board, thread, false)
         ),
     );
+    {
+        body.push_str(r#"<div class="thread-actions-row">"#);
+        if thread_preference.hidden {
+            body.push_str(r#"<span class="notice">Hidden from your index and catalog. This direct link remains available.</span>"#);
+        }
+        body.push_str(&super::board::render_thread_actions(
+            &board.short_name,
+            thread,
+            csrf_token,
+            thread_preference,
+            &format!("/{}/thread/{}", board.short_name, thread.id),
+        ));
+        body.push_str("</div>");
+    }
     body.push_str(thread_notice);
 
     if let Some(pd) = poll {
-        body.push_str(&render_poll(pd, thread.id, &board.short_name, csrf_token));
+        body.push_str(&render_poll(pd, thread, &board.short_name, csrf_token));
     }
 
+    body.push_str(&render_window_nav(board, thread, window));
+    let visible_ids = posts.iter().map(|post| post.id).collect::<HashSet<_>>();
     let last_post_id = posts.iter().map(|p| p.id).max().unwrap_or(0);
     crate::templates::append_html(
         &mut body,
         format_args!(
-            r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}" data-locked="{locked}" data-sticky="{sticky}" data-archived="{archived}">"#,
+            r#"<div id="thread-posts" data-activity-page="thread" data-thread-id="{tid}" data-board="{board}" data-last-id="{last}" data-history-page="{history}" data-locked="{locked}" data-sticky="{sticky}" data-archived="{archived}">"#,
             tid = thread.id,
             board = escape_html(&board.short_name),
             last = last_post_id,
+            history = window.historical,
             locked = thread.locked,
             sticky = thread.sticky,
             archived = thread.archived,
         ),
     );
     for post in posts {
-        body.push_str(&render_post(
+        let post_html = render_post(
             post,
             &board.short_name,
             csrf_token,
@@ -480,10 +608,16 @@ pub fn thread_page(
                 video_audio_muted: user_preferences.video_audio_muted,
             },
             SELF_ACTION_WINDOW_SECS,
+        );
+        body.push_str(&crate::utils::sanitize::route_missing_quote_links(
+            &post_html,
+            &board.short_name,
+            &visible_ids,
         ));
     }
 
     body.push_str("</div>\n");
+    body.push_str(&render_window_nav(board, thread, window));
     body.push_str(&render_edit_overlay(
         board,
         thread.id,
@@ -533,7 +667,6 @@ pub fn thread_page(
             "unlock posting",
         ));
     }
-    body.push_str("<div id=\"bottom\"></div>\n");
     body.push_str(&render_thread_nav(board, thread, true));
 
     body.push_str(&compress_modal_script(
@@ -602,12 +735,16 @@ fn poll_expiry_label(pd: &crate::models::PollData) -> String {
 /// Renders a poll voting form or its results.
 fn render_poll(
     pd: &crate::models::PollData,
-    thread_id: i64,
+    thread: &Thread,
     board_short: &str,
     csrf_token: &str,
 ) -> String {
-    let expires_str = poll_expiry_label(pd);
-    let show_results = pd.is_expired || pd.user_voted_option.is_some();
+    let expires_str = if thread.archived {
+        "archived".to_owned()
+    } else {
+        poll_expiry_label(pd)
+    };
+    let show_results = thread.archived || pd.is_expired || pd.user_voted_option.is_some();
 
     let mut html = format!(
         r#"<div class="poll-container" id="poll">
@@ -617,7 +754,7 @@ fn render_poll(
   <span class="poll-status {status_class}">[{expires}]</span>
 </div>"#,
         q = escape_html(&pd.poll.question),
-        status_class = if pd.is_expired {
+        status_class = if thread.archived || pd.is_expired {
             "poll-closed"
         } else {
             "poll-open"
@@ -675,7 +812,7 @@ fn render_poll(
 <input type="hidden" name="thread_id" value="{tid}">
 <input type="hidden" name="board"     value="{board}">"#,
                 csrf = escape_html(csrf_token),
-                tid = thread_id,
+                tid = thread.id,
                 board = escape_html(board_short)
             ),
         );
@@ -1394,8 +1531,11 @@ fn render_post_with_context(
     }
 
     // Post body (pre-rendered, sanitised HTML)
-    let body_html =
-        crate::utils::sanitize::normalize_greentext_blocks(&post.body_html, collapse_greentext);
+    let body_html = crate::utils::sanitize::safe_stored_post_html(
+        &post.body,
+        &post.body_html,
+        collapse_greentext,
+    );
     let body_html = annotate_op_quotelinks(&body_html, thread_op_id);
     let body_html = match link_context {
         PostLinkContext::Inline => body_html,
@@ -1612,7 +1752,7 @@ fn render_edit_overlay(
 mod tests {
     use super::{
         delete_post_page, display_file_name, edit_post_page, render_post, render_search_post,
-        thread_page, EditOverlayState, OwnedPostControls, RenderPostOpts,
+        render_thread_nav, thread_page, EditOverlayState, OwnedPostControls, RenderPostOpts,
     };
     use crate::models::{BoardAccessMode, MediaType, Post, Thread};
 
@@ -1669,6 +1809,136 @@ mod tests {
     }
 
     #[test]
+    fn archived_media_and_markup_use_the_same_safe_post_renderer() {
+        for (media, mime) in [
+            (Some(MediaType::Image), "image/webp"),
+            (Some(MediaType::Video), "video/webm"),
+            (Some(MediaType::Audio), "audio/ogg"),
+            (Some(MediaType::Pdf), "application/pdf"),
+            (Some(MediaType::Other), "application/octet-stream"),
+            (None, "image/webp"),
+        ] {
+            let post = Post {
+                media_type: media,
+                mime_type: Some(mime.to_owned()),
+                // Keep hostile fixtures distinct from served inline-script source.
+                name: concat!("<scr", "ipt>alert(1)</script>").to_owned(),
+                file_name: Some(concat!("unsafe\"<scr", "ipt>.webp").to_owned()),
+                body_html: crate::utils::sanitize::render_post_body(
+                    &crate::utils::sanitize::escape_html(concat!(
+                        ">quote\n>>1 [spoiler]hidden[/spoiler] <scr",
+                        "ipt>alert(1)</script>"
+                    )),
+                    false,
+                ),
+                audio_file_path: Some("test/companion.opus".to_owned()),
+                audio_file_name: Some("companion.opus".to_owned()),
+                audio_mime_type: Some("audio/ogg".to_owned()),
+                ..sample_post()
+            };
+            let render = |archived| {
+                render_post(
+                    &post,
+                    "test",
+                    "csrf",
+                    RenderPostOpts {
+                        show_delete: false,
+                        is_admin: false,
+                        admin_csrf_token: None,
+                        show_media: true,
+                        allow_editing: false,
+                        allow_self_delete: false,
+                        owned_post_controls: None,
+                        show_poster_ids: false,
+                        collapse_greentext: false,
+                        thread_state: Some((false, archived, archived)),
+                        thread_op_id: Some(1),
+                        video_audio_muted: false,
+                    },
+                    0,
+                )
+            };
+            let active = render(false);
+            let archived = render(true);
+            assert_eq!(
+                active, archived,
+                "archive state must preserve reply media and markup"
+            );
+            assert!(
+                !archived.contains("<script>"),
+                "user text must remain escaped"
+            );
+            assert!(archived.contains("data-media-thumb"));
+            assert!(archived.contains("quotelink"));
+        }
+    }
+
+    #[test]
+    fn thread_nav_preserves_live_and_locked_routes_and_refresh_semantics() {
+        let board = crate::test_fixtures::sample_board();
+        for locked in [false, true] {
+            let thread = Thread {
+                locked,
+                ..sample_thread()
+            };
+            for is_bottom in [false, true] {
+                let html = render_thread_nav(&board, &thread, is_bottom);
+                let position = if is_bottom { "bottom" } else { "top" };
+                let jump = if is_bottom { "top" } else { "bottom" };
+                assert!(html.contains(r#"href="/test">[ Return ]</a>"#));
+                assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
+                assert!(html.contains(&format!(r##"href="#{jump}""##)));
+                assert!(html.contains(&format!(r#"id="{position}" tabindex="-1""#)));
+                assert!(html.contains(r#"<nav class="thread-nav-group thread-nav-links""#));
+                assert!(html.contains(r#"<noscript><a class="thread-nav-control thread-nav-update" href="/test/thread/87">[ Update now ]</a></noscript>"#));
+                assert!(html.contains(r#"type="button" data-action="fetch-updates""#));
+                assert!(html.contains(r#"data-role="autoupdate-toggle""#));
+                assert_eq!(
+                    html.matches(r#"role="status""#).count(),
+                    usize::from(!is_bottom)
+                );
+                assert!(!html.contains("<form"));
+                assert!(!html.contains("&nbsp;"));
+            }
+        }
+    }
+
+    #[test]
+    fn archived_thread_nav_returns_to_archive_without_refresh_actions() {
+        // Rendering relies on the archive state even if restored data is unlocked
+        // or the board has stopped automatically archiving new threads.
+        let board = crate::test_fixtures::sample_board();
+        for locked in [false, true] {
+            let thread = Thread {
+                archived: true,
+                locked,
+                ..sample_thread()
+            };
+            for is_bottom in [false, true] {
+                let html = render_thread_nav(&board, &thread, is_bottom);
+                assert!(html.contains(r#"href="/test/archive">[ Return ]</a>"#));
+                assert!(html.contains(r#"href="/test/catalog">[ Catalog ]</a>"#));
+                assert!(html.contains(r#"data-role="thread-reply-count">12"#));
+                assert!(!html.contains("thread-nav-refresh"));
+                assert!(!html.contains("Update now"));
+                assert!(!html.contains("autoupdate"));
+            }
+        }
+    }
+
+    #[test]
+    fn thread_nav_escapes_board_names_in_all_destinations() {
+        let board = crate::models::Board {
+            short_name: "a\"<>&".into(),
+            ..crate::test_fixtures::sample_board()
+        };
+        let html = render_thread_nav(&board, &sample_thread(), false);
+        assert!(html.contains(r#"href="/a&quot;&lt;&gt;&amp;">[ Return ]"#));
+        assert!(html.contains(r#"href="/a&quot;&lt;&gt;&amp;/catalog""#));
+        assert!(html.contains(r#"href="/a&quot;&lt;&gt;&amp;/thread/87""#));
+    }
+
+    #[test]
     fn thread_page_renders_thread_nav_links_and_reply_open_action() {
         let board = crate::test_fixtures::sample_board();
         let thread = sample_thread();
@@ -1694,6 +1964,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -1703,6 +1974,16 @@ mod tests {
         assert!(html.contains(r##"href="#top">[ Top ]</a>"##));
         assert!(html.contains(r#"data-activity-page="thread""#));
         assert!(html.contains(r#"data-action="toggle-post-form""#));
+        assert_eq!(html.matches(r#"id="top""#).count(), 1);
+        assert_eq!(html.matches(r#"id="bottom""#).count(), 1);
+        assert_eq!(html.matches(r#"class="thread-nav-control""#).count(), 6);
+        assert_eq!(html.matches(r#"data-action="fetch-updates""#).count(), 2);
+        assert_eq!(
+            html.matches(r#"data-role="autoupdate-status" role="status""#)
+                .count(),
+            1
+        );
+        assert!(html.find(r#"id="bottom""#) > html.find(r#"id="thread-posts""#));
     }
 
     #[test]
@@ -1735,6 +2016,7 @@ mod tests {
             None,
             false,
             false,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -1773,6 +2055,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2332,6 +2615,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2377,6 +2661,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2408,6 +2693,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2432,6 +2718,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2468,6 +2755,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 
@@ -2543,6 +2831,7 @@ mod tests {
                 None,
                 false,
                 true,
+                crate::db::UserThreadPreference::default(),
                 crate::templates::UserPreferences::default(),
             );
             assert_eq!(html.contains(r#"data-action="open-edit-modal""#), can_edit);
@@ -2630,6 +2919,7 @@ mod tests {
             None,
             false,
             true,
+            crate::db::UserThreadPreference::default(),
             crate::templates::UserPreferences::default(),
         );
 

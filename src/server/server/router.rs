@@ -19,6 +19,19 @@ use super::{
 };
 use routes::{admin_routes, public_routes};
 
+#[cfg(test)]
+/// Adversarial requests through the complete middleware stack.
+mod security_tests;
+
+/// Record generic server failures without exposing request query strings.
+fn log_http_failure(
+    error: &tower_http::classify::ServerErrorsFailureClass,
+    latency: std::time::Duration,
+    _span: &tracing::Span,
+) {
+    tracing::error!(target: "server", %error, latency_ms = latency.as_millis(), "request failed");
+}
+
 /// Build the complete application router around shared state and transport mode.
 pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
     let behind_proxy = crate::config::CONFIG.behind_proxy;
@@ -32,8 +45,15 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         .route("/static/theme-init.js", get(serve_theme_init_js))
         .merge(public_routes().layer(axum_middleware::from_fn(public_cache_middleware)))
         .merge(admin_routes().layer(axum_middleware::from_fn(admin_cache_middleware)))
+        // Inner upload routes explicitly override this streaming extractor cap.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            super::headers::HTTP_FORM_MAX_BYTES,
+        ))
         .layer(axum_middleware::from_fn(
             crate::middleware::rate_limit_middleware,
+        ))
+        .layer(axum_middleware::from_fn(
+            super::headers::mutation_origin_middleware,
         ))
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
@@ -93,24 +113,15 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
                     tracing::debug_span!(
                         "http",
                         method = %request.method(),
-                        uri    = %request.uri(),
+                        path = %request.uri().path().chars().take(256).collect::<String>(),
                     )
                 })
                 .on_response(
                     tower_http::trace::DefaultOnResponse::new().level(tracing::Level::TRACE),
                 )
-                .on_failure(
-                    |error: tower_http::classify::ServerErrorsFailureClass,
-                     latency: std::time::Duration,
-                     _span: &tracing::Span| {
-                        tracing::error!(
-                            target: "server",
-                            %error,
-                            latency_ms = latency.as_millis(),
-                            "request failed",
-                        );
-                    },
-                ),
+                .on_failure(|error, latency, span: &tracing::Span| {
+                    log_http_failure(&error, latency, span);
+                }),
         )
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),

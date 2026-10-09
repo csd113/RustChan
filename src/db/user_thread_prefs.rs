@@ -93,7 +93,8 @@ pub fn get_thread_preference(
     .map_err(Into::into)
 }
 
-/// Fetch all saved thread preferences for one user on one board.
+/// Fetch active preferences within the supported 1,000-thread board ceiling.
+/// Oversized imported boards cannot force an unbounded metadata allocation.
 ///
 /// # Errors
 /// Returns an error if the board preference query fails in `SQLite`.
@@ -108,7 +109,8 @@ pub fn get_preferences_for_board(
          JOIN threads t ON t.id = utp.thread_id
          WHERE utp.user_hash = ?1
            AND t.board_id = ?2
-           AND t.archived = 0",
+           AND t.archived = 0
+         ORDER BY utp.thread_id DESC LIMIT 1000",
     )?;
 
     let rows = stmt.query_map(params![user_hash, board_id], |row| {
@@ -134,6 +136,25 @@ mod tests {
     use super::{get_thread_preference, set_thread_hidden, set_thread_pinned};
     use anyhow::{Context as _, Result};
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn board_preference_collection_is_bounded_without_losing_individual_preferences() -> Result<()>
+    {
+        let pool = crate::db::init_test_pool()?;
+        let conn = pool.get()?;
+        let board = crate::db::create_board(&conn, "bound", "Bound", "", false)?;
+        conn.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1000) INSERT INTO threads(id,board_id) SELECT i,?1 FROM n", [board]).map(|_rows| ())?;
+        conn.execute("INSERT INTO user_thread_preferences(user_hash,thread_id,pinned,hidden) SELECT 'viewer',id,1,0 FROM threads", []).map(|_rows| ())?;
+        let exact = super::get_preferences_for_board(&conn, "viewer", board)?;
+        anyhow::ensure!(exact.len() == 1000 && exact.contains_key(&1));
+        conn.execute("INSERT INTO threads(id,board_id) VALUES(1001,?1)", [board])
+            .map(|_rows| ())?;
+        set_thread_pinned(&conn, "viewer", 1001, true)?;
+        let over = super::get_preferences_for_board(&conn, "viewer", board)?;
+        anyhow::ensure!(over.len() == 1000 && over.contains_key(&1001) && !over.contains_key(&1));
+        anyhow::ensure!(get_thread_preference(&conn, "viewer", 1)?.is_some_and(|pref| pref.pinned));
+        Ok(())
+    }
 
     fn seeded_thread(pool: &crate::db::DbPool) -> Result<i64> {
         let conn = pool.get()?;

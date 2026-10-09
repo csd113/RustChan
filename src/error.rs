@@ -89,6 +89,10 @@ impl From<r2d2::Error> for AppError {
 
 impl From<anyhow::Error> for AppError {
     fn from(error: anyhow::Error) -> Self {
+        let error = match error.downcast::<Self>() {
+            Ok(error) => return error,
+            Err(error) => error,
+        };
         let database_busy = error.chain().any(|cause| {
             cause
                 .downcast_ref::<rusqlite::Error>()
@@ -220,6 +224,12 @@ mod tests {
     use axum::body::to_bytes;
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse as _;
+
+    #[test]
+    fn wrapped_application_errors_preserve_client_error_classification() {
+        let wrapped = anyhow::Error::new(AppError::BadRequest("bounded search".into()));
+        assert!(matches!(AppError::from(wrapped), AppError::BadRequest(_)));
+    }
 
     #[test]
     #[expect(

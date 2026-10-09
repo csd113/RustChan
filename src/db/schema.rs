@@ -272,10 +272,64 @@ const BASE_SCHEMA_SQL: &str = "
     );
 ";
 
+/// Retain bounded retry receipts after content deletion, including cascade/prune.
+/// These historical IDs intentionally have no foreign keys: deletion must not
+/// erase the evidence that a submission was already accepted.
+const SUBMISSION_TOMBSTONE_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS post_submission_tombstones (
+        submission_token TEXT PRIMARY KEY,
+        ip_hash TEXT NOT NULL,
+        board_id INTEGER NOT NULL,
+        thread_id INTEGER NOT NULL,
+        post_id INTEGER NOT NULL,
+        is_thread INTEGER NOT NULL CHECK (is_thread IN (0, 1)),
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_submission_tombstones_created
+        ON post_submission_tombstones(created_at);
+    CREATE INDEX IF NOT EXISTS idx_post_submissions_board
+        ON post_submissions(board_id);
+    CREATE INDEX IF NOT EXISTS idx_post_submissions_thread
+        ON post_submissions(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_post_submissions_post
+        ON post_submissions(post_id);
+    CREATE TRIGGER IF NOT EXISTS posts_submission_tombstone
+    BEFORE DELETE ON posts BEGIN
+        INSERT OR IGNORE INTO post_submission_tombstones
+        SELECT submission_token, ip_hash, board_id, thread_id, post_id, is_thread, created_at
+        FROM post_submissions WHERE post_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS threads_submission_tombstone
+    BEFORE DELETE ON threads BEGIN
+        INSERT OR IGNORE INTO post_submission_tombstones
+        SELECT submission_token, ip_hash, board_id, thread_id, post_id, is_thread, created_at
+        FROM post_submissions WHERE thread_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS boards_submission_tombstone
+    BEFORE DELETE ON boards BEGIN
+        INSERT OR IGNORE INTO post_submission_tombstones
+        SELECT submission_token, ip_hash, board_id, thread_id, post_id, is_thread, created_at
+        FROM post_submissions WHERE board_id = OLD.id;
+    END;
+";
+
+/// Exactly recognized objects added for retry receipts on existing databases.
+const SUBMISSION_TOMBSTONE_OBJECTS: [&str; 9] = [
+    "post_submission_tombstones",
+    "sqlite_autoindex_post_submission_tombstones_1",
+    "idx_submission_tombstones_created",
+    "idx_post_submissions_board",
+    "idx_post_submissions_thread",
+    "idx_post_submissions_post",
+    "posts_submission_tombstone",
+    "threads_submission_tombstone",
+    "boards_submission_tombstone",
+];
+
 /// Complete baseline secondary-index definitions.
 const INDEX_SCHEMA_SQL: &str = "
-    CREATE INDEX IF NOT EXISTS idx_threads_board_sticky_bumped
-        ON threads(board_id, sticky DESC, bumped_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_threads_active_order
+        ON threads(board_id, sticky DESC, bumped_at DESC, id DESC) WHERE archived = 0;
     CREATE INDEX IF NOT EXISTS idx_posts_thread
         ON posts(thread_id, created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_posts_thread_live
@@ -304,6 +358,8 @@ const INDEX_SCHEMA_SQL: &str = "
         ON background_jobs(status, priority DESC, created_at ASC);
     CREATE INDEX IF NOT EXISTS idx_reports_status
         ON reports(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_reports_reporter_created
+        ON reports(reporter_hash, created_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_open_unique
         ON reports(post_id, reporter_hash)
         WHERE status = 'open';
@@ -340,7 +396,8 @@ const INDEX_SCHEMA_SQL: &str = "
 /// Obsolete theme index accepted only during the known legacy repair path.
 const LEGACY_THEME_SORT_INDEX: &str = "idx_themes_enabled_sort";
 /// Additive indexes introduced after the first package-version baseline.
-const ADDITIVE_BASELINE_INDEXES: [&str; 11] = [
+const ADDITIVE_BASELINE_INDEXES: [&str; 12] = [
+    "idx_threads_active_order",
     "idx_posts_thread_live",
     "idx_posts_board_ip_created",
     "idx_posts_file_path",
@@ -354,7 +411,11 @@ const ADDITIVE_BASELINE_INDEXES: [&str; 11] = [
     "idx_ban_appeals_ip_created",
 ];
 /// Redundant indexes removed when the additive index set is installed.
-const REDUNDANT_LEGACY_INDEXES: [&str; 2] = ["idx_file_hashes", "idx_posts_thread_id"];
+const REDUNDANT_LEGACY_INDEXES: [&str; 3] = [
+    "idx_file_hashes",
+    "idx_posts_thread_id",
+    "idx_threads_board_sticky_bumped",
+];
 /// Board columns whose historical default was zero instead of the baseline value.
 const LEGACY_BOARD_ZERO_DEFAULT_COLUMNS: [&str; 4] = [
     "allow_editing",
@@ -678,6 +739,7 @@ fn install_baseline_schema_in_transaction(conn: &rusqlite::Connection) -> Result
 /// Create every table, index, search object, and invariant in the baseline.
 fn create_baseline_schema_objects(conn: &rusqlite::Connection) -> Result<()> {
     create_base_tables(conn)?;
+    conn.execute_batch(SUBMISSION_TOMBSTONE_SQL)?;
     create_indexes(conn)?;
     ensure_posts_search_index(conn)?;
     ensure_post_invariants(conn)?;
@@ -930,7 +992,8 @@ fn can_repair_known_legacy_baseline_drift(expected: &SchemaShape, actual: &Schem
 fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) -> bool {
     for (name, expected_object) in &expected.objects {
         let Some(actual_object) = actual.objects.get(name) else {
-            if ADDITIVE_BASELINE_INDEXES.contains(&name.as_str())
+            if SUBMISSION_TOMBSTONE_OBJECTS.contains(&name.as_str())
+                || ADDITIVE_BASELINE_INDEXES.contains(&name.as_str())
                 || (expected_object.kind == "trigger" && is_additive_domain_trigger(name))
             {
                 continue;
@@ -978,6 +1041,8 @@ fn schema_objects_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaS
 /// Return whether SQL exactly describes a removed redundant index.
 fn is_redundant_legacy_index(name: &str, sql: &str) -> bool {
     let expected = match name {
+        "idx_threads_board_sticky_bumped" =>
+            "CREATE INDEX idx_threads_board_sticky_bumped ON threads(board_id, sticky DESC, bumped_at DESC)",
         "idx_file_hashes" => "CREATE INDEX idx_file_hashes ON file_hashes(sha256)",
         "idx_posts_thread_id" => "CREATE INDEX idx_posts_thread_id ON posts(thread_id)",
         _ => return false,
@@ -996,6 +1061,9 @@ fn is_legacy_theme_sort_index(sql: &str) -> bool {
 fn tables_are_legacy_repairable(expected: &SchemaShape, actual: &SchemaShape) -> bool {
     for (table, expected_table) in &expected.tables {
         let Some(actual_table) = actual.tables.get(table) else {
+            if table == "post_submission_tombstones" {
+                continue;
+            }
             return false;
         };
         let repairable = match table.as_str() {
@@ -1020,7 +1088,8 @@ fn table_is_additive_index_repairable(expected: &TableShape, actual: &TableShape
     for (name, expected_index) in &expected.indexes {
         match actual.indexes.get(name) {
             Some(actual_index) if actual_index == expected_index => {}
-            None if ADDITIVE_BASELINE_INDEXES.contains(&name.as_str()) => {}
+            None if ADDITIVE_BASELINE_INDEXES.contains(&name.as_str())
+                || SUBMISSION_TOMBSTONE_OBJECTS.contains(&name.as_str()) => {}
             Some(_) | None => return false,
         }
     }
@@ -1077,9 +1146,11 @@ fn apply_additive_schema_repairs(conn: &rusqlite::Connection) -> Result<()> {
 
 /// Install additive indexes and domain triggers while the caller owns a transaction.
 fn apply_additive_schema_repairs_in_transaction(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(SUBMISSION_TOMBSTONE_SQL)?;
     conn.execute_batch(
         "DROP INDEX IF EXISTS idx_themes_enabled_sort;
          DROP INDEX IF EXISTS idx_file_hashes;
+         DROP INDEX IF EXISTS idx_threads_board_sticky_bumped;
          DROP INDEX IF EXISTS idx_posts_thread_id;",
     )
     .context("Remove obsolete indexes failed")?;
@@ -2484,7 +2555,8 @@ mod tests {
             conn.execute_batch(&format!("DROP INDEX {index}"))?;
         }
         conn.execute_batch(
-            "CREATE INDEX idx_file_hashes ON file_hashes(sha256);
+            "CREATE INDEX idx_threads_board_sticky_bumped ON threads(board_id, sticky DESC, bumped_at DESC);
+             CREATE INDEX idx_file_hashes ON file_hashes(sha256);
              CREATE INDEX idx_posts_thread_id ON posts(thread_id);
              CREATE TABLE schema_version (version TEXT NOT NULL PRIMARY KEY);",
         )?;
@@ -3469,6 +3541,33 @@ mod tests {
                  -- another comment\nON Things(\"Value\")"
             ) == normalize_schema_sql("create index example on things ( value )")
         );
+        Ok(())
+    }
+    #[test]
+    fn submission_receipt_upgrade_preserves_live_tokens_and_deleted_history() -> Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        install_or_migrate_schema(&conn)?;
+        conn.execute_batch("INSERT INTO boards(id,short_name,name) VALUES(1,'life','Life');
+            INSERT INTO threads(id,board_id) VALUES(1,1);
+            INSERT INTO posts(id,thread_id,board_id,body,body_html,deletion_token,is_op) VALUES(1,1,1,'body','body','token',1);
+            INSERT INTO post_submissions(submission_token,ip_hash,board_id,thread_id,post_id,is_thread) VALUES('receipt','actor',1,1,1,1);
+            DROP TRIGGER posts_submission_tombstone;
+            DROP TRIGGER threads_submission_tombstone;
+            DROP TRIGGER boards_submission_tombstone;
+            DROP INDEX idx_post_submissions_board;
+            DROP INDEX idx_post_submissions_thread;
+            DROP INDEX idx_post_submissions_post;
+            DROP TABLE post_submission_tombstones;")?;
+        install_or_migrate_schema(&conn)?;
+        let receipt = crate::db::get_post_submission(&conn, "receipt", "actor", 1)?
+            .context("preserved receipt")?;
+        anyhow::ensure!(receipt.post_id == 1);
+        crate::db::delete_thread(&conn, 1).map(|_cleanup| ())?;
+        anyhow::ensure!(
+            crate::db::get_post_submission(&conn, "receipt", "actor", 1)? == Some(receipt)
+        );
+        verify_database_schema(&conn)?;
+        install_or_migrate_schema(&conn)?;
         Ok(())
     }
 }

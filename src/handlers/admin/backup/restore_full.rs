@@ -187,45 +187,58 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
 }
 
 fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> {
-    let posts = {
-        let mut stmt = conn
-            .prepare("SELECT id, body FROM posts")
-            .map_err(|error| {
-                AppError::BadRequest(format!("Restored database is invalid: {error}"))
-            })?;
-        let rows = stmt
-            .query_map([], |row| {
+    // Keyset pages prevent an 8 GiB snapshot from materializing every body.
+    // Incremental reads bound bytes before allocation and count NUL bytes as
+    // Rust scalars, unlike SQLite text length/substr functions.
+    let mut before: Option<i64> = None;
+    loop {
+        let sql = if before.is_none() {
+            "SELECT id, typeof(body) FROM posts WHERE id >= ?1 ORDER BY id LIMIT 128"
+        } else {
+            "SELECT id, typeof(body) FROM posts WHERE id > ?1 ORDER BY id LIMIT 128"
+        };
+        let posts = conn
+            .prepare_cached(sql)?
+            .query_map([before.unwrap_or(i64::MIN)], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| {
-                AppError::BadRequest(format!("Restored database is invalid: {error}"))
-            })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|error| {
-                AppError::BadRequest(format!(
-                    "Restored database has an invalid post body row: {error}"
-                ))
             })?
-    };
-
-    let mut update = conn
-        .prepare("UPDATE posts SET body_html = ?1 WHERE id = ?2")
-        .map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "Prepare restored body_html update: {error}"
-            ))
-        })?;
-    for (post_id, body) in posts {
-        let body_html = render_restored_body_html(&body);
-        update
-            .execute(params![body_html, post_id])
-            .map_err(|error| {
-                AppError::Internal(anyhow::anyhow!(
-                    "Update restored body_html for post {post_id}: {error}"
-                ))
-            })
-            .map(|_completed_value| ())?;
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if posts.is_empty() {
+            break;
+        }
+        for (post_id, body_type) in posts {
+            if body_type != "text" {
+                return Err(AppError::BadRequest(
+                    "Restored database contains an invalid post body.".into(),
+                ));
+            }
+            let blob = conn.blob_open("main", "posts", "body", post_id, true)?;
+            if blob.len() > 4 * 4096 {
+                return Err(AppError::BadRequest(
+                    "Restored database contains an oversized post body.".into(),
+                ));
+            }
+            let mut bytes = vec![0; blob.len()];
+            blob.read_at_exact(&mut bytes, 0)?;
+            drop(blob);
+            let body = String::from_utf8(bytes).map_err(|_error| {
+                AppError::BadRequest("Restored post bodies must be valid UTF-8.".into())
+            })?;
+            if body.chars().count() > 4096 {
+                return Err(AppError::BadRequest(
+                    "Restored database contains an oversized post body.".into(),
+                ));
+            }
+            let body_html = render_restored_body_html(&body);
+            conn.execute(
+                "UPDATE posts SET body_html=?1 WHERE id=?2",
+                params![body_html, post_id],
+            )
+            .map(|_rows| ())?;
+            before = Some(post_id);
+        }
     }
+
     Ok(())
 }
 
@@ -1169,6 +1182,55 @@ pub(in crate::server) async fn restore_saved_full_backup(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restored_bodies_are_processed_in_pages_and_oversized_unicode_is_rejected(
+    ) -> anyhow::Result<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE posts(id INTEGER PRIMARY KEY, body TEXT, body_html TEXT);
+            WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<300)
+            INSERT INTO posts SELECT x,'safe <img>','<img onerror=bad>' FROM n;",
+        )?;
+        super::recompute_restored_post_body_html(&conn)?;
+        let unsafe_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM posts WHERE body_html LIKE '%<img%'",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(unsafe_count == 0);
+        conn.execute("UPDATE posts SET body='' WHERE id=1", [])
+            .map(|_rows| ())?;
+        super::recompute_restored_post_body_html(&conn)?;
+        for chars in [4095, 4096, 4097] {
+            conn.execute("UPDATE posts SET body=?1 WHERE id=1", ["😀".repeat(chars)])
+                .map(|_rows| ())?;
+            let result = super::recompute_restored_post_body_html(&conn);
+            anyhow::ensure!(
+                result.is_ok() == (chars <= 4096),
+                "restore scalar boundary {chars}"
+            );
+        }
+        for chars in [4095, 4096, 4097, 65_536] {
+            conn.execute(
+                "UPDATE posts SET body=?1 WHERE id=1",
+                [format!("\0{}", "x".repeat(chars - 1))],
+            )
+            .map(|_rows| ())?;
+            let result = super::recompute_restored_post_body_html(&conn);
+            anyhow::ensure!(
+                result.is_ok() == (chars <= 4096),
+                "restore NUL boundary {chars}"
+            );
+        }
+        conn.execute("UPDATE posts SET body=CAST(X'FF' AS TEXT) WHERE id=1", [])
+            .map(|_rows| ())?;
+        anyhow::ensure!(matches!(
+            super::recompute_restored_post_body_html(&conn),
+            Err(crate::error::AppError::BadRequest(_))
+        ));
+        Ok(())
+    }
+
     #[test]
     fn restore_preflight_bounds_session_duration_for_any_clock_value() -> anyhow::Result<()> {
         use anyhow::Context as _;

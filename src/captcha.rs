@@ -2,8 +2,9 @@ use ::captcha::{
     filters::{Dots, Grid, Noise, Wave},
     Captcha,
 };
-use dashmap::DashMap;
+use parking_lot::Mutex;
 use sha2::{Digest as _, Sha256};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use subtle::ConstantTimeEq as _;
 
@@ -22,10 +23,49 @@ const CAPTCHA_CHARSET: &[char] = &[
 ];
 
 /// In-memory, single-use challenge store keyed by challenge identifier.
-static CAPTCHA_CHALLENGES: LazyLock<DashMap<String, StoredCaptchaChallenge>> =
-    LazyLock::new(DashMap::new);
+static CAPTCHA_CHALLENGES: LazyLock<Mutex<ChallengeStore>> = LazyLock::new(Mutex::default);
+/// Hard cap includes outstanding generation reservations.
+const CAPTCHA_MAX_CHALLENGES: usize = 4096;
 
-#[derive(Clone)]
+#[derive(Default)]
+/// Bounded challenge state and amortized expiration scheduling.
+struct ChallengeStore {
+    /// Single-use challenges awaiting a response.
+    challenges: HashMap<String, StoredCaptchaChallenge>,
+    /// Slots reserved before expensive generation starts.
+    generating: usize,
+    /// Last whole-store expiry scan.
+    last_pruned: Option<i64>,
+}
+
+/// A capacity reservation reclaimed on every failed generation path.
+struct ChallengeReservation<'a> {
+    /// Store that owns the reservation.
+    store: &'a Mutex<ChallengeStore>,
+}
+
+impl Drop for ChallengeReservation<'_> {
+    fn drop(&mut self) {
+        let mut store = self.store.lock();
+        store.generating = store.generating.saturating_sub(1);
+    }
+}
+
+/// Reserve a slot atomically before PNG generation; never queue at capacity.
+fn reserve_challenge(
+    store: &Mutex<ChallengeStore>,
+    now: i64,
+) -> Result<ChallengeReservation<'_>, CaptchaImageError> {
+    let mut state = store.lock();
+    prune_store(&mut state, now);
+    if state.challenges.len().saturating_add(state.generating) >= CAPTCHA_MAX_CHALLENGES {
+        return Err(CaptchaImageError::Busy);
+    }
+    state.generating = state.generating.saturating_add(1);
+    drop(state);
+    Ok(ChallengeReservation { store })
+}
+
 /// Hashed server-side state for one outstanding CAPTCHA challenge.
 struct StoredCaptchaChallenge {
     /// Board short name that owns the challenge.
@@ -43,6 +83,8 @@ pub enum CaptchaImageError {
     InvalidRequest,
     /// The CAPTCHA backend failed to encode an image.
     GenerationFailed,
+    /// Outstanding challenges have exhausted the bounded store.
+    Busy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +133,7 @@ pub fn generate_captcha_image(
         return Err(CaptchaImageError::InvalidRequest);
     }
 
-    prune_expired(chrono::Utc::now().timestamp());
+    let _reservation = reserve_challenge(&CAPTCHA_CHALLENGES, chrono::Utc::now().timestamp())?;
 
     let mut captcha = Captcha::new();
     let _configured = captcha
@@ -139,7 +181,7 @@ pub fn verify_captcha(
     let now = chrono::Utc::now().timestamp();
     prune_expired(now);
 
-    let Some((_, challenge)) = CAPTCHA_CHALLENGES.remove(captcha_id) else {
+    let Some(challenge) = CAPTCHA_CHALLENGES.lock().challenges.remove(captcha_id) else {
         return Err(CaptchaValidationError::Expired);
     };
 
@@ -163,7 +205,7 @@ pub fn verify_captcha(
 /// Hash and store one challenge when its generated answer is valid.
 fn store_challenge(board_short: &str, captcha_id: &str, answer: &str, now: i64) {
     if let Some(answer_hash) = answer_hash(board_short, captcha_id, answer) {
-        let _previous_value = CAPTCHA_CHALLENGES.insert(
+        let _previous_value = CAPTCHA_CHALLENGES.lock().challenges.insert(
             captcha_id.to_owned(),
             StoredCaptchaChallenge {
                 board_short: board_short.to_owned(),
@@ -176,7 +218,21 @@ fn store_challenge(board_short: &str, captcha_id: &str, answer: &str, now: i64) 
 
 /// Remove challenges whose expiration time is at or before `now`.
 fn prune_expired(now: i64) {
-    CAPTCHA_CHALLENGES.retain(|_, challenge| challenge.expires_at > now);
+    prune_store(&mut CAPTCHA_CHALLENGES.lock(), now);
+}
+
+/// Expire in one bounded scan at most once per minute, including under saturation.
+fn prune_store(store: &mut ChallengeStore, now: i64) {
+    if store
+        .last_pruned
+        .is_some_and(|last| now.saturating_sub(last) < 60)
+    {
+        return;
+    }
+    store
+        .challenges
+        .retain(|_, challenge| challenge.expires_at > now);
+    store.last_pruned = Some(now);
 }
 
 /// Compute the secret-bound answer hash for a scoped challenge.
@@ -232,7 +288,7 @@ pub mod testing {
         let Some(answer_hash) = super::answer_hash(board_short, captcha_id, answer) else {
             return;
         };
-        let _previous_value = super::CAPTCHA_CHALLENGES.insert(
+        let _previous_value = super::CAPTCHA_CHALLENGES.lock().challenges.insert(
             captcha_id.to_owned(),
             super::StoredCaptchaChallenge {
                 board_short: board_short.to_owned(),
@@ -244,7 +300,10 @@ pub mod testing {
 
     /// Return whether a challenge identifier is currently stored.
     pub fn challenge_exists_for_test(captcha_id: &str) -> bool {
-        super::CAPTCHA_CHALLENGES.contains_key(captcha_id)
+        super::CAPTCHA_CHALLENGES
+            .lock()
+            .challenges
+            .contains_key(captcha_id)
     }
 }
 
@@ -339,5 +398,21 @@ mod tests {
             verify_captcha("test", "not-an-id", "ABC23"),
             Err(CaptchaValidationError::Missing)
         );
+    }
+    #[test]
+    fn challenge_capacity_includes_concurrent_reservations_and_recovers_on_drop() {
+        let store = Mutex::new(ChallengeStore::default());
+        let reservations = (0..CAPTCHA_MAX_CHALLENGES)
+            .map(|_| reserve_challenge(&store, 100))
+            .collect::<Vec<_>>();
+        assert!(reservations.iter().all(Result::is_ok));
+        assert!(matches!(
+            reserve_challenge(&store, 100),
+            Err(CaptchaImageError::Busy)
+        ));
+        assert_eq!(store.lock().generating, CAPTCHA_MAX_CHALLENGES);
+        drop(reservations);
+        assert_eq!(store.lock().generating, 0);
+        assert!(reserve_challenge(&store, 100).is_ok());
     }
 }

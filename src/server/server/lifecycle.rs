@@ -1,5 +1,7 @@
 //! Request lifecycle accounting and shutdown-signal handling.
 
+use futures::StreamExt as _;
+
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tracing::Instrument as _;
@@ -26,13 +28,17 @@ pub(super) async fn track_requests(
     {
         return recovery_unavailable();
     }
+    let permit = match state.request_work_gate.try_begin() {
+        Ok(permit) => permit,
+        Err(error) => return axum::response::IntoResponse::into_response(error),
+    };
     let _previous_request_count = REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
     let _previous_in_flight_count = IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
     let _in_flight_guard = ScopedDecrement(&IN_FLIGHT);
 
     let req_id = uuid::Uuid::new_v4().to_string();
     let method = req.method().clone();
-    let path = req.uri().path().to_owned();
+    let path = req.uri().path().chars().take(256).collect::<String>();
     let mut req = req;
     let _previous_request_id = req.extensions_mut().insert(req_id.clone());
     let span = tracing::info_span!(
@@ -68,7 +74,14 @@ pub(super) async fn track_requests(
     if let Ok(value) = axum::http::HeaderValue::from_str(&req_id) {
         let _previous_request_header = response.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
-    response
+    // Retain admission through streamed media responses, including clients
+    // that stop reading after the response headers have been sent.
+    response.map(move |body| {
+        axum::body::Body::from_stream(body.into_data_stream().map(move |chunk| {
+            let _request_permit = &permit;
+            chunk
+        }))
+    })
 }
 
 /// Wait for a platform shutdown signal.

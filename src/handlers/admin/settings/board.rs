@@ -42,6 +42,29 @@ pub(in crate::server) struct BoardSettingsForm {
     csrf: Option<String>,
 }
 
+/// Parse destructive retention settings without silently reducing saved limits.
+fn parse_retention_setting(raw: Option<&str>, archived: bool) -> Result<Option<i64>> {
+    let upper = if archived { 10_000 } else { 1_000 };
+    let label = if archived {
+        "Archive thread limit"
+    } else {
+        "Active thread limit"
+    };
+    raw.map(|value| {
+        let invalid = || {
+            AppError::BadRequest(format!(
+                "{label} must be a whole number between 1 and {upper}."
+            ))
+        };
+        let parsed = value.trim().parse::<i64>().map_err(|_error| invalid())?;
+        if !(1..=upper).contains(&parsed) {
+            return Err(invalid());
+        }
+        Ok(parsed)
+    })
+    .transpose()
+}
+
 fn parse_board_upload_limit_bytes(raw_value: Option<&str>, fallback_bytes: i64) -> Result<i64> {
     const MIB: i64 = 1024 * 1024;
     // Deliberate site maximum for each per-board media cap. Aggregate public
@@ -125,18 +148,8 @@ pub(in crate::server) async fn update_board_settings(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(500)
         .clamp(1, 10_000);
-    let max_threads = form
-        .max_threads
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(150)
-        .clamp(1, 1_000);
-    let max_archived_threads = form
-        .max_archived_threads
-        .as_deref()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(150)
-        .clamp(1, 10_000);
+    let max_threads = parse_retention_setting(form.max_threads.as_deref(), false)?;
+    let max_archived_threads = parse_retention_setting(form.max_archived_threads.as_deref(), true)?;
     let post_cooldown_secs = form
         .post_cooldown_secs
         .as_deref()
@@ -160,9 +173,11 @@ pub(in crate::server) async fn update_board_settings(
         BoardBannerMode::from_db_str(form.banner_mode.as_deref().unwrap_or("inherit"))
             .ok_or_else(|| AppError::BadRequest("Invalid board banner mode.".into()))?;
 
+    let password_permit = state.password_work_gate.try_begin()?;
     let board_short = tokio::task::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
+            let _password_permit = password_permit;
             let mut conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let board_short: String = conn.query_row(
@@ -213,8 +228,8 @@ pub(in crate::server) async fn update_board_settings(
                 &description,
                 form.nsfw.as_deref() == Some("1"),
                 bump_limit,
-                max_threads,
-                max_archived_threads,
+                max_threads.unwrap_or(current_board.max_threads),
+                max_archived_threads.unwrap_or(current_board.max_archived_threads),
                 form.allow_images.as_deref() == Some("1"),
                 form.allow_video.as_deref() == Some("1"),
                 form.allow_audio.as_deref() == Some("1"),
@@ -261,4 +276,90 @@ pub(in crate::server) async fn update_board_settings(
         admin_panel_redirect_anchor_open("Board settings saved.", &board_anchor, &board_anchor)
             .into_response(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_retention_setting;
+    use anyhow::{ensure, Result};
+
+    #[test]
+    fn retention_settings_reject_invalid_values_and_preserve_omitted_limits() -> Result<()> {
+        for archived in [false, true] {
+            let upper = if archived { 10_000_i64 } else { 1_000_i64 };
+            ensure!(parse_retention_setting(None, archived)?.is_none());
+            ensure!(parse_retention_setting(Some(" 1 "), archived)? == Some(1));
+            ensure!(parse_retention_setting(Some(&upper.to_string()), archived)? == Some(upper));
+            for value in ["", "0", "-1", "garbage", "1.5", "9223372036854775808"] {
+                ensure!(parse_retention_setting(Some(value), archived).is_err());
+            }
+            ensure!(parse_retention_setting(Some(&(upper + 1_i64).to_string()), archived).is_err());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_retention_http_settings_cannot_reduce_saved_caps() -> Result<()> {
+        use super::{
+            db, update_board_settings, BoardSettingsForm, CookieJar, Form, HeaderMap, State,
+        };
+        use axum::http::{header, HeaderValue};
+        use axum_extra::extract::cookie::Cookie;
+        let state = crate::test_support::app_state();
+        let board_id = {
+            let conn = state.db.get()?;
+            let admin = db::create_admin(
+                &conn,
+                "archive-admin",
+                &crate::utils::crypto::hash_password("password")?,
+            )?;
+            db::create_session(
+                &conn,
+                "session123",
+                admin,
+                chrono::Utc::now().timestamp() + 3600,
+            )?;
+            let id = db::create_board(&conn, "settings", "Settings", "", false)?;
+            conn.execute(
+                "UPDATE boards SET max_threads=200,max_archived_threads=2000 WHERE id=?1",
+                [id],
+            )
+            .map(|_rows| ())?;
+            id
+        };
+        for value in [Some("0"), Some("-1"), Some("garbage"), None] {
+            let input = serde_json::json!({
+                "board_id": board_id, "name": "Settings", "description": "",
+                "max_archived_threads": value,
+                "_csrf": crate::test_support::admin_signed_csrf()
+            });
+            let form: BoardSettingsForm = serde_json::from_value(input)?;
+            let jar = CookieJar::new()
+                .add(Cookie::new(super::SESSION_COOKIE, "session123"))
+                .add(Cookie::new("csrf_token", "csrf123"));
+            let mut headers = HeaderMap::new();
+            let _host = headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+            let _origin =
+                headers.insert(header::ORIGIN, HeaderValue::from_static("http://localhost"));
+            let outcome = update_board_settings(
+                State(state.clone()),
+                jar,
+                headers,
+                crate::test_support::connect_info(),
+                Form(form),
+            )
+            .await;
+            if value.is_some() {
+                ensure!(matches!(outcome, Err(super::AppError::BadRequest(_))));
+            } else {
+                let response = outcome?;
+                ensure!(response.status() == axum::http::StatusCode::SEE_OTHER);
+            }
+            let conn = state.db.get()?;
+            let board = db::get_board_by_short(&conn, "settings")?
+                .ok_or_else(|| anyhow::anyhow!("saved board"))?;
+            ensure!(board.max_threads == 200 && board.max_archived_threads == 2000);
+        }
+        Ok(())
+    }
 }

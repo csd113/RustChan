@@ -892,7 +892,7 @@ fn capture_post_draft(
         "poll_question" => {
             return Err(AppError::BadRequest(
                 "Poll recovery question exceeds its limit.".into(),
-            ))
+            ));
         }
         _ => {}
     }
@@ -1029,6 +1029,7 @@ pub(crate) async fn parse_post_multipart(
     let mut captcha_answer = String::new();
     let mut budget = PublicMultipartBudget::default();
     let mut seen_upload_slots = HashSet::new();
+    let mut seen_scalar_fields = HashSet::new();
     let mut media_upload_guard = None;
 
     loop {
@@ -1040,6 +1041,29 @@ pub(crate) async fn parse_post_multipart(
             break;
         };
         budget.note_field()?;
+        if let Some(field_name) = field.name().filter(|control_name| {
+            matches!(
+                *control_name,
+                "_csrf"
+                    | "submission_token"
+                    | "name"
+                    | "subject"
+                    | "body"
+                    | "deletion_token"
+                    | "sage"
+                    | "captcha_id"
+                    | "captcha_answer"
+                    | "poll_question"
+                    | "poll_duration_value"
+                    | "poll_duration_unit"
+            )
+        }) {
+            if !seen_scalar_fields.insert(field_name.to_owned()) {
+                return Err(AppError::BadRequest(format!(
+                    "Duplicate posting field '{field_name}'."
+                )));
+            }
+        }
         match field.name() {
             Some("_csrf") => {
                 let v = read_text_field(field, &mut budget).await?;
@@ -1206,7 +1230,9 @@ pub(crate) async fn parse_post_multipart(
                     "hours" => v.saturating_mul(3600),
                     "days" => v.saturating_mul(86_400),
                     other => {
-                        return Err(AppError::BadRequest(format!("Invalid poll duration unit '{other}'. Use 'minutes', 'hours', or 'days'.")));
+                        return Err(AppError::BadRequest(format!(
+                            "Invalid poll duration unit '{other}'. Use 'minutes', 'hours', or 'days'."
+                        )));
                     }
                 };
                 Some(secs)
@@ -1241,7 +1267,8 @@ pub(crate) async fn parse_post_multipart(
 ///   • "Insufficient disk space" → 413 `UploadTooLarge`
 ///   • "File type not allowed"   → 415 `InvalidMediaType`
 ///   • "Not an audio file"       → 415 `InvalidMediaType`
-///   • anything else             → 400 `BadRequest`.
+///   • filesystem errors         → generic 500, with details retained for logging.
+///   • other decoder errors      → a generic 400, without tool output or paths.
 pub(crate) fn classify_upload_error(e: &anyhow::Error) -> AppError {
     let msg = e.to_string();
     // Compare lower-cased so minor wording changes in save_upload don't silently
@@ -1251,8 +1278,17 @@ pub(crate) fn classify_upload_error(e: &anyhow::Error) -> AppError {
         AppError::UploadTooLarge(msg)
     } else if lower.starts_with("file type not allowed") || lower.starts_with("not an audio file") {
         AppError::InvalidMediaType(msg)
+    } else if e
+        .chain()
+        .any(<dyn std::error::Error + 'static>::is::<std::io::Error>)
+    {
+        AppError::Internal(anyhow::anyhow!("Upload filesystem operation failed: {e:#}"))
+    } else if lower.contains("image header is malformed") {
+        AppError::BadRequest("The image header is malformed. Check that the image is valid.".into())
     } else {
-        AppError::BadRequest(msg)
+        AppError::BadRequest(
+            "The server could not validate this upload. Check that the file is valid and supported.".into(),
+        )
     }
 }
 
@@ -1313,22 +1349,22 @@ pub(crate) fn process_primary_upload(
         crate::models::MediaType::Image if !board.allow_images => {
             return Err(AppError::BadRequest(
                 "Image uploads are disabled on this board.".into(),
-            ))
+            ));
         }
         crate::models::MediaType::Video if !board.allow_video => {
             return Err(AppError::BadRequest(
                 "Video uploads are disabled on this board.".into(),
-            ))
+            ));
         }
         crate::models::MediaType::Audio if !board.allow_audio => {
             return Err(AppError::BadRequest(
                 "Audio uploads are disabled on this board.".into(),
-            ))
+            ));
         }
         crate::models::MediaType::Pdf if !board.allow_pdf => {
             return Err(AppError::BadRequest(
                 "PDF uploads are disabled on this board.".into(),
-            ))
+            ));
         }
         crate::models::MediaType::Other
             if ambiguous_webm && (!board.allow_video || !board.allow_audio) =>
@@ -1341,7 +1377,7 @@ pub(crate) fn process_primary_upload(
         crate::models::MediaType::Other if !ambiguous_webm && !allow_any_files => {
             return Err(AppError::BadRequest(
                 "This board only accepts image, video, audio, or PDF uploads.".into(),
-            ))
+            ));
         }
         crate::models::MediaType::Image
         | crate::models::MediaType::Video
@@ -1743,6 +1779,25 @@ mod tests {
         axum::extract::Multipart::from_request(request, &())
             .await
             .map_err(|rejection| anyhow::anyhow!(rejection.to_string()))
+    }
+
+    #[test]
+    fn upload_errors_do_not_disclose_paths_or_decoder_diagnostics() -> anyhow::Result<()> {
+        let io = anyhow::Error::new(std::io::Error::other(
+            "private /srv/rustchan/uploads/secret",
+        ));
+        ensure!(matches!(
+            super::classify_upload_error(&io),
+            crate::error::AppError::Internal(_)
+        ));
+        let decoder =
+            anyhow::anyhow!("decoder failed at /private/tmp/input; external tool diagnostic");
+        let crate::error::AppError::BadRequest(message) = super::classify_upload_error(&decoder)
+        else {
+            anyhow::bail!("decoder failure should be a client error");
+        };
+        ensure!(!message.contains("/private") && !message.contains("diagnostic"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -2788,9 +2843,6 @@ mod tests {
         };
         let uploads_dir = tempfile::tempdir().context("create uploads directory")?;
         let save_root = tempfile::tempdir().context("create save root")?;
-        let _override = crate::media::thumbnail::override_pdf_renderer_mode(
-            crate::media::thumbnail::TestPdfRendererMode::Unavailable,
-        );
         let (uploaded, _) = super::process_primary_upload(
             Some(temp_upload("doc.pdf", valid_pdf())?),
             &board,
@@ -2816,10 +2868,52 @@ mod tests {
         ensure!(uploaded.mime_type == "application/pdf");
         ensure!(uploaded.media_type == crate::models::MediaType::Pdf);
         ensure!(save_root.path().join(uploaded.file_path).exists());
-        ensure!(std::path::Path::new(&uploaded.thumb_path)
+        // Validate both documented PDF preview outcomes by their actual contents.
+        let thumbnail = std::fs::read(save_root.path().join(&uploaded.thumb_path))?;
+        let extension = std::path::Path::new(&uploaded.thumb_path)
             .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg")));
-        ensure!(save_root.path().join(&uploaded.thumb_path).exists());
+            .context("thumbnail extension")?;
+        ensure!(
+            (extension.eq_ignore_ascii_case("png") && thumbnail.starts_with(b"\x89PNG\r\n\x1a\n"))
+                || (extension.eq_ignore_ascii_case("svg")
+                    && String::from_utf8(thumbnail)?.contains("<svg"))
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn multipart_parser_rejects_ambiguous_scalar_fields() -> anyhow::Result<()> {
+        for field in [
+            "_csrf",
+            "body",
+            "sage",
+            "submission_token",
+            "captcha_id",
+            "poll_duration_unit",
+        ] {
+            let fields = [(field, "first"), (field, "second")];
+            let (boundary, bytes) = crate::test_support::multipart_body(&fields, None);
+            let multipart = multipart_from_bytes(&boundary, bytes).await?;
+            let gate = crate::middleware::MediaUploadGate::new();
+            let mut draft = crate::templates::forms::PostFormState::default();
+            let result = parse_post_multipart(
+                multipart,
+                Some("csrf123"),
+                1024,
+                1024,
+                1024,
+                1024,
+                super::PostMultipartContext {
+                    media_upload_gate: &gate,
+                    draft: &mut draft,
+                },
+            )
+            .await;
+            ensure!(
+                matches!(result, Err(crate::error::AppError::BadRequest(_))),
+                "duplicate {field} must be rejected"
+            );
+            drop(result);
+        }
         Ok(())
     }
 }

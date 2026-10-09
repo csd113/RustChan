@@ -1570,6 +1570,13 @@ impl Config {
         const MAX_VIDEO_MIB: usize = 2048;
         const MAX_AUDIO_MIB: usize = 512;
         self.operator.validate()?;
+        if !(1..=1_000_000).contains(&self.rate_limit_gets)
+            || !(1..=86_400).contains(&self.rate_limit_window)
+        {
+            anyhow::bail!(
+                "CONFIG ERROR: browsing request allowance must be 1..=1000000 and window 1..=86400 seconds."
+            );
+        }
         // cookie_secret is hex-encoded: 64 hex chars = 32 bytes of entropy.
         if self.cookie_secret.len() < 64 {
             anyhow::bail!(
