@@ -2,6 +2,18 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## RustChan 1.7.1 — 2026-10-09
+
+### Fixed
+
+- Fixed startup migration from earlier release databases, including 1.6.6, by recognizing the additive `idx_reports_reporter_created` index. The missing allowlist entry previously prevented all recognized 1.7.0 schema repairs and caused startup to fail.
+- Expanded the upgrade regression fixture to cover the earlier report index, thread ordering index and submission-receipt schema together, while verifying preserved live receipts, deletion history and repeated startup.
+
+### Upgrade notes
+
+- Back up the complete data directory before upgrading. Database schema versions continue to match the RustChan package release: successful 1.7.1 startup verifies the full schema before recording `1.7.1`. Existing content and administrator records are retained; unknown schema drift remains rejected.
+- This release replaces 1.7.0 as the stable release. The earlier 1.7.0 release is retained as a prerelease because of its upgrade migration failure.
+
 ## RustChan 1.7.0 — 2026-10-08
 
 ### Upgrade notes

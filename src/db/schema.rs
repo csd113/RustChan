@@ -396,7 +396,7 @@ const INDEX_SCHEMA_SQL: &str = "
 /// Obsolete theme index accepted only during the known legacy repair path.
 const LEGACY_THEME_SORT_INDEX: &str = "idx_themes_enabled_sort";
 /// Additive indexes introduced after the first package-version baseline.
-const ADDITIVE_BASELINE_INDEXES: [&str; 12] = [
+const ADDITIVE_BASELINE_INDEXES: [&str; 13] = [
     "idx_threads_active_order",
     "idx_posts_thread_live",
     "idx_posts_board_ip_created",
@@ -407,6 +407,7 @@ const ADDITIVE_BASELINE_INDEXES: [&str; 12] = [
     "idx_file_hashes_thumb_path",
     "idx_poll_options_poll_position",
     "idx_poll_votes_option_poll",
+    "idx_reports_reporter_created",
     "idx_ban_appeals_status_created",
     "idx_ban_appeals_ip_created",
 ];
@@ -3557,7 +3558,11 @@ mod tests {
             DROP INDEX idx_post_submissions_board;
             DROP INDEX idx_post_submissions_thread;
             DROP INDEX idx_post_submissions_post;
-            DROP TABLE post_submission_tombstones;")?;
+            DROP TABLE post_submission_tombstones;
+            DROP INDEX idx_reports_reporter_created;
+            DROP INDEX idx_threads_active_order;
+            CREATE INDEX idx_threads_board_sticky_bumped ON threads(board_id, sticky DESC, bumped_at DESC);
+            UPDATE schema_version SET version = '1.6.6';")?;
         install_or_migrate_schema(&conn)?;
         let receipt = crate::db::get_post_submission(&conn, "receipt", "actor", 1)?
             .context("preserved receipt")?;
