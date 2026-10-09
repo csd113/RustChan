@@ -43,6 +43,10 @@ Finish the browser setup at <http://localhost:8080/setup> as described above. Fo
 
 To upgrade the Compose deployment:
 
+Take a complete stopped-volume backup first, and retain the previous image
+revision. A failed schema upgrade needs the matching old data and image restored
+together; see [manual upgrade recovery](software-updates.md#manual-upgrade-of-a-source-install).
+
 ```bash
 docker compose pull
 docker compose up -d
@@ -55,10 +59,14 @@ The named volume survives `docker compose down`; avoid `docker compose down -v` 
 Stop RustChan before taking a filesystem copy of `/data` so the SQLite database and uploads are consistent. Back up the complete named volume, including `settings.toml`, `chan.db` and any journal files, `boards`, `backups`, and `runtime/tor/state`. For example, after `docker stop rustchan`:
 
 ```bash
-docker run --rm -v rustchan-data:/data:ro -v "$PWD":/backup \
-  debian:trixie-slim tar -C /data -czf /backup/rustchan-data.tar.gz .
+install -d -m 0700 "$PWD/rustchan-backups"
+docker run --rm -v rustchan-data:/data:ro -v "$PWD/rustchan-backups":/backup \
+  debian:trixie-slim sh -c 'umask 077; tar -C /data -czf /backup/rustchan-data.tar.gz .'
 docker start rustchan
 ```
+
+The archive contains secrets and may be owned by root on the host. Keep it private
+and use appropriate privileges when copying or restoring it.
 
 For Compose, use `docker compose stop` and `docker compose start` and replace `rustchan-data` in the backup command with the volume name shown by `docker volume ls` (normally `rustchan_rustchan-data`). Restore into a stopped instance's volume before starting it. RustChan also has application-level backup tools in the admin panel; keeping an independent copy of the entire volume covers the instance configuration and onion identity.
 

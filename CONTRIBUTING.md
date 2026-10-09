@@ -73,7 +73,7 @@ Rust checks are:
 ```sh
 cargo fmt --all --check
 cargo check --locked --workspace --all-targets --all-features
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo
 cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
@@ -126,6 +126,33 @@ backups, or moderation changes. Add a concise entry under the matching
 subsection in the top `CHANGELOG.md` section for notable changes. Do not promise
 anonymity, perfect security, availability, legal compliance, or protection from
 a malicious operator.
+
+Permanent documentation should describe the current software, supported
+workflows, or necessary design decisions. Each new document needs a continuing
+maintenance purpose. Update the authoritative guide when implementation changes;
+avoid duplicating the same system across files and prefer concise explanations.
+
+Keep AI activity summaries, completed audits and implementation plans, debugging
+transcripts, benchmark output, and temporary validation evidence out of version
+control. Incorporate useful, verified conclusions into the existing guide, then
+remove the completed report or plan. Use git history for past investigations;
+do not retain obsolete narratives in archives or giant consolidated reports.
+One-off work generally does not need a new Markdown file. Preserve required
+operational, security, licensing, compliance, and release records.
+
+Place disposable evidence under the ignored `output/` or `audit-output/`
+directories, or outside the checkout. Keep permanent test infrastructure separate
+from its generated results. Review links when moving or deleting documentation.
+`tools/check_local_tooling.py` checks that local instructions, browser tooling,
+and designated generated evidence remain untracked.
+
+The workspace lint tables in `Cargo.toml` are the authoritative Rust/Clippy
+policy; unsafe Rust is forbidden. New workspace packages must inherit it with
+`[lints] workspace = true`. The patched upstream AAC crate under `vendor/` is
+excluded from the workspace and keeps its upstream lint configuration. Keep
+lint expectations narrow, with an explicit reason at the affected code; review
+dependency exceptions in `deny.toml` rather than copying generated inventories
+into documentation.
 
 ### Generated files
 

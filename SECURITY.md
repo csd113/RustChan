@@ -43,6 +43,46 @@ content, secrets, backups, Tor identity, network boundaries, and infrastructure.
 RustChan does not promise anonymity, perfect security, uninterrupted
 availability, legal compliance, or protection from a malicious operator.
 
+## Operational security
+
+Run RustChan as an unprivileged account and keep configuration, databases,
+backups, TLS keys, and Tor identity private. Administrator accounts have full
+administrative privilege; the project has no separate limited moderator role.
+Passwords use Argon2id, client identities are hashed, and administrator actions
+require authenticated sessions with scoped signed CSRF and origin checks. These
+controls do not prevent an operator from observing or modifying their own site.
+
+Public deployments need HTTPS and a protected backend. Trust forwarded client
+headers only from configured proxy CIDRs. The application rejects
+`Transfer-Encoding`; proxies must dechunk bodies and forward `Content-Length`.
+Keep detailed readiness and metrics behind a trusted scrape/network boundary.
+See [deployment guidance](SETUP.md#reverse-proxy-notes).
+
+Upload/backup paths, media content, archive inventories, and restored database
+structures are validated before publication. Preserve recovery journals and
+snapshots after a failed restore/update. Use complete stopped data backups and
+matching executables for rollback; see [software updates](docs/software-updates.md).
+Application backups do not include every runtime or external persistent path.
+
+Request, socket, identity-table, search, and media-work bounds reduce resource
+abuse but do not guarantee availability against distributed traffic. Per-client
+fixed windows reset on process restart; shared NAT and Tor identities affect
+fairness. Search deadlines are cooperative and can be exceeded between SQLite
+checkpoints. Native media libraries run in-process with no process sandbox or
+universal forcible cancellation. There is no universal disk quota or hard log
+byte-retention ceiling: monitor storage, job queues, and retention policies.
+Catalog/preference collections cap at 1,000 threads; oversized legacy boards
+still have direct thread and index navigation. Current preview limits are in
+[media capabilities](docs/media-capabilities.md).
+
+Cargo dependency advisory exceptions are maintained in
+[deny.toml](deny.toml) and [.cargo/audit.toml](.cargo/audit.toml). Re-review the
+Arti-related RSA vulnerability and `paste` maintenance exceptions on Arti
+upgrades; do not treat an ignored advisory as permanently resolved. FFmpeg and
+the host/container environment need independent patch maintenance. Signed native
+update packages have their own verification contract; a signature does not
+establish all deployment or power-loss recovery guarantees.
+
 ## Private reporting status
 
 GitHub private vulnerability reporting is currently disabled for this

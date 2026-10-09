@@ -10,15 +10,6 @@ Desktop.ini
 *.orig
 *.rej
 
-# Local tests.
-tests/
-# Migration unit tests compile these sanitized fixtures into the binary.
-!tests/
-tests/*
-!tests/fixtures/
-tests/fixtures/*
-!tests/fixtures/media/
-
 # Build output, dependency caches, coverage, and profiling output.
 target/
 node_modules/
@@ -101,10 +92,13 @@ playwright_*_profile-*/
 /audit-output/
 /audit-reports/
 /.codex-pet-runs/
-
-# Local task handoff referencing ignored browser evidence and temporary logs.
-# Keep published security records and maintained policy ledgers in docs tracked.
-/docs/theme-system-audit-2026-09-06.md
+# Established generated documentation evidence and release staging outputs.
+/docs/sqlite-evidence/
+/docs/thumbnail-evidence/
+/docs/security-audit-evidence-*.json
+/RELEASE_NOTES.md
+/release-assets/
+# End generated evidence.
 
 # RustChan runtime trees (also next to copied binaries) and disposable instances.
 rustchan-data/

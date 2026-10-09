@@ -1,518 +1,204 @@
 # RustChan Setup Guide
 
-Current setup and deployment guide for Linux, macOS, and Windows.
+RustChan runs on Linux, macOS, and Windows as one executable with embedded
+SQLite, templates, and static assets. The source version is `1.7.1`.
+[README.md](README.md) covers downloads and the quick start;
+[the container guide](docs/containers.md) covers Docker and Compose.
 
-Current version: `1.7.1`.
+## Requirements
 
-This guide reflects the current RustChan architecture:
+- Rust 1.99 or newer and Git when building from source; CI uses Rust 1.99.0.
+- A writable data directory, next to the executable by default or selected with
+  an absolute `--data-dir` path.
+- Optional FFmpeg for video thumbnails/transcoding and uncovered audio codecs.
 
-- Tor onion hosting is built in via Arti. You do not install or manage a separate `tor` service.
-- Images, GIF/WebP animation, HEIC/HEIF, container metadata, common audio waveforms, and supported PDF previews run internally in Rust. Unsupported PDF previews use the built-in SVG placeholder.
-- `ffmpeg` is optional, but recommended for video thumbnails, WebM transcoding, and uncovered audio codecs. Standalone `ffprobe` and external PDF renderers are not required.
-- The post edit form and self-delete flow share a 60-second self-action window after posting.
+No separate database server, Tor daemon, native image library, standalone
+`ffprobe`, or external PDF renderer is required. Built-in Tor hosting uses Arti.
+See [media capabilities](docs/media-capabilities.md) for formats and limitations.
 
-## Contents
+## Build and run
 
-1. [What RustChan Needs](#what-rustchan-needs)
-2. [Quick Start](#quick-start)
-3. [Install Rust](#install-rust)
-4. [Install ffmpeg](#install-ffmpeg)
-5. [Verify WebP and WebM Support](#verify-webp-and-webm-support)
-6. [Build and Run](#build-and-run)
-7. [First-Run Files and Layout](#first-run-files-and-layout)
-8. [Important settings.toml Options](#important-settingstoml-options)
-9. [Tor Onion Service](#tor-onion-service)
-10. [HTTPS and TLS](#https-and-tls)
-11. [Linux Service Setup](#linux-service-setup)
-12. [Reverse Proxy Notes](#reverse-proxy-notes)
-13. [Admin Bootstrapping](#admin-bootstrapping)
-14. [Banner Artwork Requirements](#banner-artwork-requirements)
-15. [Updating](#updating)
-16. [Troubleshooting](#troubleshooting)
+Install Rust using [rustup](https://rustup.rs). On Linux and macOS:
 
-## What RustChan Needs
-
-RustChan is a single Rust binary. A basic install only needs:
-
-- Rust 1.99 or newer to build it
-- a writable runtime data directory (next to the binary by default, or selected with `--data-dir`)
-- `ffmpeg` for video processing and uncovered audio codecs
-
-RustChan does not require:
-
-- Docker
-- Postgres or MySQL
-- Redis
-- a separate Tor daemon
-
-## Quick Start
-
-```bash
-git clone https://github.com/csd113/RustChan.git
-cd RustChan
-cargo build --release
-./target/release/rustchan-cli
-```
-
-On first launch RustChan creates `rustchan-data/settings.toml`, `rustchan-data/logs/`, and the rest of its runtime directories next to the binary.
-
-Then in another terminal:
-
-```bash
-./target/release/rustchan-cli admin create-admin admin "ChangeThisPasswordNow"
-./target/release/rustchan-cli admin create-board b "Random" "General discussion"
-```
-
-Open:
-
-- `http://localhost:8080`
-- admin panel: `http://localhost:8080/admin`
-
-If TLS is enabled in `settings.toml`, RustChan also serves HTTPS on port `8443` by default.
-
-## Install Rust
-
-### Linux and macOS
-
-```bash
+```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 rustc --version
-cargo --version
 ```
 
-### Windows
+On Windows, install `rustup-init.exe` and open a new PowerShell terminal.
+Then build:
 
-Install Rust with `rustup-init.exe` from [rustup.rs](https://rustup.rs), then open a new PowerShell window and verify:
-
-```powershell
-rustc --version
-cargo --version
-```
-
-## Install ffmpeg
-
-`ffmpeg` is optional, but RustChan is significantly better with it.
-
-When `ffmpeg` is available, RustChan can:
-
-- extract video thumbnails
-- generate waveform thumbnails for uncovered audio codecs (for example AC-3 or Speex)
-- transcode MP4 uploads to WebM when VP9 and Opus are available
-
-Without `ffmpeg`, images, animation, metadata inspection, supported PDF previews, and common audio waveforms still work. Video processing and uncovered-codec waveform previews use their existing placeholders.
-
-### Debian / Ubuntu / Raspberry Pi OS
-
-```bash
-sudo apt update
-sudo apt install -y ffmpeg
-```
-
-### Fedora
-
-```bash
-sudo dnf install -y ffmpeg
-```
-
-If your base Fedora repos do not provide the codec-enabled build you want, use RPM Fusion.
-
-### macOS
-
-```bash
-brew install ffmpeg
-```
-
-### Windows
-
-```powershell
-winget install --id Gyan.FFmpeg -e
-```
-
-Then make sure the FFmpeg `bin` directory is on `PATH`.
-
-### Verify ffmpeg Exists
-
-```bash
-ffmpeg -version
-```
-
-If you want RustChan to refuse startup when `ffmpeg` is missing, set:
-
-```toml
-require_ffmpeg = true
-```
-
-## Verify WebP and WebM Support
-
-WebP images, GIF → animated WebP, and animated WebP validation are built into RustChan through Rust crates and remain available without FFmpeg. Video thumbnails use FFmpeg to extract a PNG frame and Rust to encode WebP.
-
-For video/WebM conversion, RustChan checks the installed decoder, encoder and muxer lists independently:
-
-- `libvpx-vp9` for WebM video encoding
-- `libopus` for WebM audio encoding
-- the `webm` muxer for output
-- AV1 decoders for AV1 inputs (AV1 encoder availability is reported separately; output remains VP9 + Opus)
-
-Use these commands:
-
-```bash
-ffmpeg -encoders | rg libvpx-vp9
-ffmpeg -encoders | rg libopus
-ffmpeg -muxers | rg webm
-ffmpeg -decoders | rg av1
-```
-
-If you do not have `rg`, use:
-
-```bash
-ffmpeg -encoders | grep libvpx-vp9
-ffmpeg -encoders | grep libopus
-```
-
-WebM conversion needs both selected encoders and the WebM muxer. AV1 input also needs an AV1 decoder; an AV1 encoder is optional and is not selected for RustChan output.
-
-### What Each Encoder Enables
-
-- `libvpx-vp9` + `libopus`: MP4/Matroska and WebM/AV1 to VP9/Opus WebM conversion. Compatible VP8/VP9 WebM with Opus/Vorbis audio is preserved.
-
-### Linux Notes
-
-On Debian-family systems, the usual install is:
-
-```bash
-sudo apt update
-sudo apt install -y ffmpeg libvpx-dev libopus-dev
-```
-
-The important part is still the actual `ffmpeg -encoders` output. Package names alone do not guarantee your installed FFmpeg binary was built with every encoder enabled.
-
-### macOS Notes
-
-Most Homebrew FFmpeg installs are fine, but verify with:
-
-```bash
-ffmpeg -encoders | rg 'libvpx-vp9|libopus'
-```
-
-If one is missing, reinstall FFmpeg from a build source that includes that codec set.
-
-### Windows Notes
-
-Use a full FFmpeg build rather than a minimal one, then verify with:
-
-```powershell
-ffmpeg -encoders | Select-String libvpx-vp9
-ffmpeg -encoders | Select-String libopus
-```
-
-### What RustChan Does If Support Is Missing
-
-RustChan will log warnings and continue:
-
-- missing VP9, Opus or the WebM muxer: video uploads retain their originals
-- missing an AV1 decoder: AV1 conversion fails with a useful diagnostic and retains the original
-- missing FFmpeg: Rust-native still and animated WebP continue to work
-
-These warnings appear in the console at startup and in `rustchan-data/logs/`.
-
-## Build and Run
-
-### Build
-
-```bash
-cargo build --release
-```
-
-Binary:
-
-- Linux/macOS: `target/release/rustchan-cli`
-- Windows: `target/release/rustchan-cli.exe`
-
-### Run
-
-```bash
+```sh
+git clone https://github.com/csd113/RustChan.git
+cd RustChan
+cargo build --locked --release
 ./target/release/rustchan-cli
 ```
 
-### Optional CLI Flags
+On Windows, run `./target/release/rustchan-cli.exe`. An interactive first run
+prompts for an administrator and optionally a board. A headless deployment can
+use the fresh-instance browser wizard at <http://localhost:8080/setup>. Complete
+setup before allowing public access. The site is at <http://localhost:8080> and
+administration is at <http://localhost:8080/admin>.
 
-```bash
-./target/release/rustchan-cli --port 9090
-./target/release/rustchan-cli --data-dir /absolute/path/to/rustchan-data
+Explicit service arguments:
+
+```sh
+./target/release/rustchan-cli --data-dir /absolute/path/to/rustchan-data serve
+./target/release/rustchan-cli --data-dir /absolute/path/to/rustchan-data --port 9090 serve
 ```
 
-## First-Run Files and Layout
+Running without a subcommand also starts the server. Use `--help` and
+`admin --help` for the current command reference.
 
-By default RustChan stores runtime state in `rustchan-data/` next to the binary.
-Pass `--data-dir` with an absolute, non-root path to place the complete runtime
-layout elsewhere. This is the supported layout for service installations; it
-includes `settings.toml`, the database, uploads, logs, backups, and runtime
-secrets. The selected data directory has this layout:
+## Install FFmpeg
+
+FFmpeg is optional unless `require_ffmpeg = true`. Install a codec-enabled build:
+
+| Platform | Installation |
+| --- | --- |
+| Debian / Ubuntu / Raspberry Pi OS | `sudo apt install ffmpeg` |
+| Fedora | `sudo dnf install ffmpeg` (codec availability depends on enabled repositories) |
+| macOS with Homebrew | `brew install ffmpeg` |
+| Windows with winget | `winget install --id Gyan.FFmpeg -e` |
+
+Ensure the executable is on the service account's `PATH`, or configure
+`ffmpeg_path` in `settings.toml`. Check the actual installed capabilities:
+
+```sh
+ffmpeg -version
+ffmpeg -encoders
+ffmpeg -muxers
+ffmpeg -decoders
+```
+
+VP9/Opus WebM output requires `libvpx-vp9`, `libopus`, and the `webm` muxer.
+AV1 inputs additionally need an AV1 decoder; output remains VP9/Opus, so no AV1
+encoder is required. Rust handles WebP encoding. Development packages such as
+`libvpx-dev` and `libopus-dev` are unnecessary for building RustChan.
+
+Missing tools/codecs leave valid original uploads available and use preview
+placeholders where needed. Image processing and supported audio/PDF previews
+continue to work without FFmpeg. Review capability warnings in startup logs.
+
+## First-run files and layout
+
+Settings are read from the data directory regardless of the working directory.
+Keep the entire directory when moving the site or replacing the executable:
 
 ```text
 rustchan-data/
 ├── settings.toml
-├── chan.db
-├── logs/
-│   └── rustchan.YYYY-MM-DD.log
+├── chan.db                 # SQLite WAL/SHM files may be present alongside it
+├── boards/                 # Uploads and thumbnails
 ├── backups/
 │   ├── full/
 │   └── boards/
+├── logs/
 ├── runtime/
 │   ├── tls/
 │   ├── tor/
-│   │   ├── state/
+│   │   ├── state/          # Persistent onion identity
 │   │   └── cache/
 │   ├── favicon/
 │   └── tmp/
-└── boards/
-
-## Banner Artwork Requirements
-
-RustChan `1.4.0` includes board banners plus a separate home-page announcement banner.
-
-Banner upload requirements:
-
-- exact `468x60` aspect ratio
-- minimum size `468x60`
-- recommended size `936x120`
-- input can be PNG, JPEG, or WebP
-- RustChan converts uploaded banner images to WebP automatically
-
-Board banner placement:
-
-- board index: under the board name/description, above `[Index] [Catalog] [Archive]`
-- catalog: under the board name/description, above `Sort By:` and `Show OP Comment:`
-- no banner on thread pages
-- no banner on archive pages
-- no banner on search pages
-
-Home page banner placement:
-
-- separate centered banner box on the home page
-- intended for MOTD/news/announcement use
-
-Banner link behavior:
-
-- internal board and internal-path links work directly
-- external links can be enabled in the admin panel
-- when enabled, external banner clicks go through an on-site warning page before redirecting
+└── .software-updates/       # Eligible native Linux update/recovery state
 ```
 
-Important notes:
+RustChan generates `settings.toml` and a random `cookie_secret` on first run.
+Keep the secret stable and private; rotation invalidates signed cookies.
+Daily log files live under `logs/`. Custom database, upload, backup, certificate,
+or other persistent paths outside this tree need their own backup and mounts.
 
-- `settings.toml` is generated automatically on first run
-- `cookie_secret` is generated automatically on first run
-- Tor state and onion keys live under `rustchan-data/runtime/tor/state/`
-- logs rotate daily under `rustchan-data/logs/`
+## Important settings.toml options
 
-## Important settings.toml Options
-
-The generated file documents every setting inline. Commonly tuned settings:
+The generated file is the complete setting reference. Matching `CHAN_*`
+environment overrides and launcher arguments affect the effective configuration.
+These common defaults apply to a generated native installation:
 
 ```toml
 forum_name = "RustChan"
 site_subtitle = "select board to proceed"
-default_theme = "forest"
-enabled_builtin_themes = ["forest", "blue-sky", "deep-orbit", "terminal", "dorfic", "chanclassic", "aero", "neoncubicle", "fluorogrid"]
 port = 8080
-
 max_image_size_mb = 8
 max_video_size_mb = 50
 max_audio_size_mb = 150
-
 enable_tor_support = true
-# tor_only = false
-# tor_bootstrap_timeout_secs = 120
-# tor_max_concurrent_streams = 512
-# tor_service_nickname = "rustchan"
-
+tor_only = false
 require_ffmpeg = false
-# ffmpeg_path = "/usr/local/bin/ffmpeg"
 ffmpeg_timeout_secs = 600
 
 [tls]
 enabled = false
 require_https = false
 port = 8443
-# redirect_http = true
-# http_port = 8080
+redirect_http = false
+http_port = 8080
 ```
 
-### A Few High-Impact Settings
+Most controls are available in the admin panel. Database-owned appearance and
+board settings apply live. File-backed runtime settings generally require a
+restart; saving never restarts the process automatically. The panel shows active,
+saved, and next-start values, including environment overrides.
+[Settings restarts](docs/settings-restarts.md) lists the classification and
+supported supervision/recovery contracts. Changing storage paths does not move data.
 
-- `enable_tor_support = true`: built-in onion service is on
-- `tor_only = true`: bind RustChan to loopback and serve only through Tor
-- `require_ffmpeg = true`: fail startup if ffmpeg is missing
-- `[tls].enabled = true`: explicitly enable RustChan's native HTTPS listener
-- `[tls].require_https = true`: opt into disabling public plaintext application access
-- `ffmpeg_timeout_secs = 600`: max runtime for a single ffmpeg job
+New boards allow images and video by default; audio, PDF, arbitrary files,
+CAPTCHA, and NSFW status are opt-in. Arbitrary uploads also require the global
+file gate. Self-edit/delete permissions are board-controlled; the global signed
+self-action window defaults to 60 seconds and can be set from 1 to 3,600 seconds.
 
-## Tor Onion Service
+## Tor onion service
 
-RustChan includes built-in Tor onion service hosting through Arti.
+Native generated settings enable the built-in onion service by default. Docker
+sets `CHAN_TOR_SUPPORT=false`. With Tor enabled, startup bootstraps Arti and
+creates or loads the persistent onion keypair. Outbound network access and write
+access to `runtime/tor/` are required.
 
-You do not need to:
+Back up `runtime/tor/state/` privately and preserve its permissions. Losing this
+state changes the onion address. A normal board backup does not preserve it.
+Automatic full backups include Tor keys according to the saved inclusion setting.
 
-- install `tor`
-- write a `torrc`
-- manage a hidden service directory manually
-
-### Default Behavior
-
-On current builds, the generated `settings.toml` enables Tor support by default:
-
-```toml
-enable_tor_support = true
-```
-
-On first startup with Tor enabled, RustChan:
-
-1. creates the Tor runtime directories
-2. bootstraps to the Tor network
-3. generates or loads the onion service keypair
-4. starts serving the site over `.onion`
-
-The first bootstrap usually takes longer than later boots because Tor directory data has to be downloaded and cached.
-
-### Where the Onion Key Lives
-
-Back up:
-
-```text
-rustchan-data/runtime/tor/state/
-```
-
-That directory contains the persistent onion identity. If you lose it, the next startup will generate a new onion address.
-
-### Tor-Only Mode
-
-If you want RustChan reachable only through Tor:
+For a loopback listener with onion access:
 
 ```toml
 enable_tor_support = true
 tor_only = true
 ```
 
-In this mode RustChan binds to loopback instead of `0.0.0.0`, so clearnet access is blocked.
-
-### Tor Permissions
-
-RustChan creates the Tor state directory with restricted permissions on Unix. If you move the data directory manually, preserve write access for the RustChan service user.
+Tor-only mode binds locally; it does not eliminate the operator's ability to
+observe or control the site. In containers it binds inside the container, so a
+published Docker port is unsuitable for this mode.
 
 ## HTTPS and TLS
 
-RustChan has built-in HTTPS support.
+Native HTTPS is disabled until `[tls].enabled = true`. Default builds include
+self-signed certificate support for local testing. Configure manual certificates
+or build with `--features tls-acme` and configure `[tls.acme]` for ACME.
 
-The generated `settings.toml` currently includes:
+Enabling TLS normally adds an HTTPS listener while keeping the main HTTP
+application listener. Set `require_https = true` to disable public plaintext
+application access. Separately, `redirect_http = true` makes `tls.http_port` a
+redirect listener. With built-in Tor, HTTPS-only mode retains a loopback backend
+restricted to connections registered by the in-process Tor proxy.
 
-```toml
-[tls]
-enabled = false
-port = 8443
-```
+For public access, use valid certificates and configure the intended public
+hosts. Administrator restarts and updates require a usable local readiness probe;
+review [settings restarts](docs/settings-restarts.md) before listener changes.
 
-This means:
+## Linux service setup
 
-- HTTP is available on the main app port
-- HTTPS support is configured but disabled until you turn it on
-- when enabled, RustChan can generate a local self-signed development certificate
+Use a dedicated unprivileged account. This example installs a root-owned binary;
+software replacement is handled by the operator. Built-in native installation
+requires the ownership layout in [software updates](docs/software-updates.md).
 
-## Observability Endpoints
-
-`/healthz` is public and intentionally minimal. `/readyz` returns only a readiness status by default, and `/metrics` returns `404` unless explicitly enabled.
-
-Only enable detailed readiness or metrics for a trusted scrape path:
-
-```toml
-public_readiness_details = true
-public_metrics_enabled = true
-```
-
-Detailed readiness and metrics include operational state such as database schema health, backup freshness, media backlog, maintenance state, and Tor readiness. If you expose them, use a reverse-proxy allowlist, private network, or equivalent network boundary. Tor-facing deployments should keep the defaults unless you intentionally monitor those endpoints externally.
-
-## Default Settings
-
-| # | Setting | Scope | Default | Enabled by default? | Admin? | Config? | Notes |
-|---|---|---|---|---|---|---|---|
-| 3 | Homepage board-card new-thread badges | site-wide | `true` | true | Yes | Yes | First boot seeds DB from `settings.toml`; later admin-owned. |
-| 4 | Board/catalog thread-card new-reply badges | site-wide | `true` | true | Yes | Yes | First boot seeds DB from `settings.toml`; later admin-owned. |
-| 9 | Allow external banner links after warning page | banner | `false` | false | Yes | No | DB-backed admin setting only. |
-| 12 | Board NSFW flag | per-board | `false` | false | Yes | No | New-board create form leaves this unchecked. |
-| 16 | Archive overflow threads | per-board | `true` | true | Yes | No | Global prune config can still override hard-delete behavior. |
-| 20 | CAPTCHA on threads and replies | per-board | `false` | false | Yes | No | Per-board admin toggle. |
-| 24 | Allow images | per-board | `true` | true | Yes | No | New boards start with image uploads enabled. |
-| 25 | Allow video | per-board | `true` | true | Yes | No | New boards start with video uploads enabled. |
-| 26 | Allow audio | per-board | `false` | false | Yes | No | New-board create form leaves this unchecked. |
-| 27 | Allow PDF uploads | per-board | `false` | false | Yes | No | Per-board admin toggle. |
-| 28 | Allow any file uploads | per-board | `false` | false | Yes | No | Only available when the global arbitrary-file gate is enabled. |
-| 29 | Allow tripcodes | per-board | `true` | true | Yes | No | Per-board admin toggle. |
-| 30 | Embed video links (YouTube) | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
-| 31 | Show thread-local poster IDs | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
-| 32 | Collapse long greentext | per-board | `false` | false | Yes | No | Per-board render behavior toggle. |
-| 33 | Allow users to edit their own posts during the 60-second grace window | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
-| 34 | Allow users to delete their own posts during the 60-second grace window | per-board | `true` | true | Yes | No | New-board default for fresh and existing installs. |
-| 38 | Master arbitrary-file upload gate | media | `false` | false | Indirect | Yes | When off, boards cannot enable generic file uploads. |
-| 39 | Require ffmpeg at startup | media | `false` | false | No | Yes | When off, RustChan degrades gracefully where possible. |
-| 46 | TLS enabled | TLS | `false` | false | No | Yes | Generated `settings.toml` keeps native HTTPS off until explicitly enabled. |
-| 48 | Redirect HTTP to HTTPS | TLS | `false` | false | No | Yes | Only relevant when native TLS is enabled. |
-| 50 | ACME enabled | TLS | `false` | false | No | Yes | The ACME section stays commented out by default. |
-| 51 | ACME staging | TLS | `true` | true | No | Yes | Applies if the ACME section is enabled and the field is omitted. |
-| 53 | Built-in Tor support | Tor | `true` | true | No | Yes | Generated config enables Tor support by default. |
-| 54 | Tor-only mode | Tor | `false` | false | No | Yes | Keeps clearnet access on unless you explicitly disable it. |
-| 55 | Public detailed readiness | observability | `false` | false | No | Yes | Keep off unless `/readyz` is behind a trusted scrape path. |
-| 56 | Public metrics | observability | `false` | false | No | Yes | Keep off unless `/metrics` is behind a trusted scrape path. |
-| 60 | Include Tor hidden-service keys in automatic full backups | backup / Tor | `true` | true | Yes | Yes | Admin saves rewrite `settings.toml`; existing installs keep their current configured value until changed. |
-| 66 | Archive before prune | maintenance / archive | `true` | true | No | Yes | Global override: prune archives instead of hard-deletes. |
-| 75 | New banner enabled flag | banner | `true` | true | Yes | No | Applies to newly uploaded global, board, and home banners. |
-| 76 | New global/board banner shows on board index | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |
-| 77 | New global/board banner shows on catalog | banner | `true` | true | Yes | No | Home banners do not use this placement flag. |
-
-### Common Modes
-
-#### Local or LAN Testing
-
-Keep built-in TLS enabled and use the self-signed certificate.
-
-#### Public Production Reverse Proxy
-
-Many operators still prefer putting nginx or Caddy in front and terminating TLS there.
-
-#### ACME / Let's Encrypt
-
-RustChan also supports ACME-based certificates when built with the `tls-acme` feature and configured in `[tls.acme]`.
-
-## Linux Service Setup
-
-Run RustChan as a dedicated unprivileged user.
-
-### 1. Create a Service User
-
-```bash
+```sh
 sudo useradd --system --home /var/lib/rustchan --create-home --shell /usr/sbin/nologin rustchan
-```
-
-### 2. Build and Install the Binary
-
-```bash
-cargo build --release
+cargo build --locked --release
 sudo install -o root -g root -m 0755 target/release/rustchan-cli /usr/local/bin/rustchan-cli
-sudo mkdir -p /var/lib/rustchan
-sudo chown -R rustchan:rustchan /var/lib/rustchan
+sudo install -d -o rustchan -g rustchan -m 0700 /var/lib/rustchan
 ```
-
-### 3. First Start as the Service User
-
-This creates `settings.toml` and the runtime layout:
-
-```bash
-sudo -u rustchan -H /usr/local/bin/rustchan-cli --data-dir /var/lib/rustchan
-```
-
-Stop it after the first start, edit `/var/lib/rustchan/settings.toml`, then continue.
-
-### 4. Create a systemd Unit
 
 Create `/etc/systemd/system/rustchan.service`:
 
@@ -531,6 +217,9 @@ StateDirectoryMode=0700
 ExecStart=/usr/local/bin/rustchan-cli --data-dir /var/lib/rustchan serve
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=90
+SendSIGKILL=no
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
@@ -540,27 +229,17 @@ ProtectHome=true
 WantedBy=multi-user.target
 ```
 
-`StateDirectory=rustchan` asks systemd to keep `/var/lib/rustchan` writable by
-the unprivileged service account. The explicit `--data-dir` keeps all runtime
-state there even though the root-owned executable lives under `/usr/local/bin`.
-
 Then:
 
-```bash
+```sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now rustchan
 sudo journalctl -u rustchan -f
 ```
 
-### 5. Optional Environment Overrides
-
-You can add overrides with:
-
-```bash
-sudo systemctl edit rustchan
-```
-
-Example:
+Complete the browser setup through trusted local access. `StateDirectory` keeps
+the selected data directory writable by the service account. For overrides, use
+`sudo systemctl edit rustchan`, for example:
 
 ```ini
 [Service]
@@ -568,197 +247,140 @@ Environment=CHAN_BIND=127.0.0.1:8080
 Environment=CHAN_REQUIRE_FFMPEG=true
 ```
 
-## Reverse Proxy Notes
+The separate updater/polkit files in `deploy/systemd/` describe older managed
+installations. Do not use them as the current single-executable service setup.
 
-If you put nginx or Caddy in front of RustChan:
+## Reverse proxy notes
 
-- point the proxy at the RustChan HTTP listener
-- set `CHAN_BEHIND_PROXY=true` if you want proxy headers trusted
-- set `CHAN_TRUSTED_PROXY_CIDRS` to the proxy's loopback or private CIDR when the proxy is not on localhost
-- decide whether TLS terminates at the proxy or inside RustChan
+Point nginx or Caddy at the local RustChan HTTP listener and terminate TLS at the
+proxy. Set `CHAN_BEHIND_PROXY=true` and `CHAN_TRUSTED_PROXY_CIDRS` to the proxy's
+actual network. Configure allowed public hosts. Keep the backend inaccessible
+from untrusted networks; forward client/protocol headers only through trusted
+proxies, and preserve private permissions on settings and runtime state.
 
-When RustChan's built-in TLS is enabled, HTTPS is an additional listener and the
-main HTTP application listener remains available by default. Set
-`require_https = true` under `[tls]` to opt into HTTPS-only access. Independently,
-`redirect_http = true` exposes `tls.http_port` as a redirect listener instead of
-serving application routes there. With the built-in Tor service enabled,
-HTTPS-only mode also keeps a loopback HTTP backend that accepts only connections
-registered by its in-process Tor proxy.
+RustChan accepts bounded `Content-Length` bodies and rejects `Transfer-Encoding`
+at its application boundary. Configure the proxy to dechunk requests before
+forwarding. Header limits are 32 KiB per value and 64 KiB in aggregate.
 
-RustChan accepts bounded `Content-Length` request bodies and rejects
-`Transfer-Encoding` at the application boundary. Configure a reverse proxy to
-dechunk request bodies before forwarding them. Request headers are limited to
-32 KiB per value and 64 KiB in aggregate.
+## Observability endpoints
 
-Typical loopback setup:
+`/healthz` is public and minimal. `/readyz` returns readiness status and the
+running package version. Detailed readiness is disabled, and `/metrics` returns
+404 unless enabled:
 
-```text
-internet -> nginx/caddy -> 127.0.0.1:8080 -> RustChan
+```toml
+public_readiness_details = true
+public_metrics_enabled = true
 ```
 
-If you use a reverse proxy and terminate TLS there, make sure your proxy forwards the usual headers and that RustChan is not accidentally exposed directly on the public interface.
+These expose database, backup, media, maintenance, and Tor operational state.
+Enable them only behind a trusted scrape/network boundary. They never expose
+software-update availability or transactions.
 
-## Admin Bootstrapping
+## Admin bootstrapping
 
-Create the first admin account:
+The terminal or browser wizard avoids putting passwords in command arguments.
+For scripted administration, use the same absolute data directory:
 
-```bash
-./target/release/rustchan-cli admin create-admin admin "UseAStrongPassword"
+```sh
+rustchan-cli --data-dir /var/lib/rustchan admin create-admin admin '<strong-password>'
+rustchan-cli --data-dir /var/lib/rustchan admin create-board tech 'Technology' 'Programming and hardware'
+rustchan-cli --data-dir /var/lib/rustchan admin list-admins
+rustchan-cli --data-dir /var/lib/rustchan admin list-boards
+rustchan-cli --data-dir /var/lib/rustchan admin reset-password admin '<new-strong-password>'
+rustchan-cli --data-dir /var/lib/rustchan admin db-status
 ```
 
-Create a board:
+Run these as the service account with its configuration environment. Command
+arguments may be visible to local process inspection and shell history. Creating
+an administrator disables the fresh-instance browser wizard.
 
-```bash
-./target/release/rustchan-cli admin create-board tech "Technology" "Programming and hardware"
-```
+## Terminal console
 
-Other useful commands:
+Interactive terminals show six destinations: Overview, Tasks, Content, Logs,
+System, and Configuration. Services without a terminal run without the console.
+Use `1`–`6` or Tab to navigate and `?`/`H` for the built-in key reference.
+`R` refreshes metrics; `/` filters lists; `S` changes sort/state/log level;
+Enter opens details; `P`/`F` pauses/follows logs. `C` creates a board, `A` creates
+an administrator, and `D`/`X` starts a confirmed thread deletion. `Q` prompts for
+graceful shutdown; Ctrl-C stops the server.
 
-```bash
-./target/release/rustchan-cli admin list-admins
-./target/release/rustchan-cli admin list-boards
-./target/release/rustchan-cli admin reset-password admin "NewStrongPassword"
-```
+The minimum terminal size is 44 columns by 14 rows. Configuration is read-only;
+use the web admin or settings file to change it. Request and active-IP counts are
+process-local observations, rather than user-session counts. Task ages do not
+provide an ETA, and the console has no general job-cancellation operation.
 
-## Updating
+## Banner artwork requirements
 
-```bash
-git pull
-cargo build --release
-sudo install -o root -g root -m 0755 target/release/rustchan-cli /usr/local/bin/rustchan-cli
-sudo systemctl restart rustchan
-```
+Board and home announcement banners accept supported bitmap formats, including
+PNG, JPEG, GIF, and WebP, with the exact 468:60 aspect ratio and a minimum of
+468×60 pixels; 936×120 is recommended. Animated GIF banners are limited to
+60 frames. Processing targets WebP, with validated GIF retention on a supported
+conversion fallback. The [offline banner maker](docs/rustchan-banner-maker.html)
+can generate artwork in a browser.
 
-Before major updates, back up:
+Board banners appear on the board index and catalog according to their placement
+settings, not on thread, archive, or search pages. Home announcements use a
+separate centered banner. External banner links are opt-in and use an on-site
+warning before redirecting.
 
-- `rustchan-data/chan.db`
-- `rustchan-data/boards/`
-- `rustchan-data/runtime/tor/state/`
-- `rustchan-data/settings.toml`
+## Backups and updating
 
-Or use the built-in backup tools from the admin panel.
+The admin panel creates full-site or per-board application backups and supports
+validated restore. Full-site backups include the database, settings, managed
+media and appearance assets, and optionally Tor keys. They do not replace a
+complete filesystem backup of runtime/TLS state and custom external paths.
 
-RustChan `1.5.0` retains the database structure introduced in `1.4.1`.
-Fresh installs create the current baseline directly. Existing structurally valid
-`1.4.1` databases are verified and stamped as schema version `1.5.0`; recognized
-older schema shapes use the existing compatibility repairs. Partial, unknown, or
-corrupt schemas are rejected without deleting data. Historical `chan_net_*`
-tables remain for database and backup compatibility, but ChanNet itself and the
-`--chan-net` option have been removed. Remove that option from service commands
-before upgrading. Obsolete ChanNet settings can remain in `settings.toml` and
-are ignored. Back up your data before upgrading. Future structural schema
-changes should add forward migrations tied to RustChan release versions.
+Stop the service before copying its data directory so SQLite and files are
+consistent. Preserve `chan.db` and any WAL/SHM files, settings, boards, runtime
+secrets, and configured external storage. Keep independent/offsite copies and
+exercise recovery on a disposable instance.
 
-## Troubleshooting
+Use [software updates](docs/software-updates.md#manual-upgrade-of-a-source-install)
+for stopped manual upgrades and matching data-and-binary rollback; containers use
+[their deployment guide](docs/containers.md). Current startup verifies and repairs
+recognized older schemas before recording the current package version. Unknown,
+partial, or corrupt layouts are rejected. Never lower `schema_version` or run an
+old executable against a migrated database. The [database guide](docs/sqlite-engineering.md)
+explains migrations and maintenance.
 
-### The TUI shows ffmpeg warnings
-
-Run:
-
-```bash
-ffmpeg -version
-ffmpeg -encoders | rg 'libvpx-vp9|libopus'
-```
-
-If one of those encoders is missing, RustChan will still run but some media features will be downgraded.
-
-### Tor never becomes ready
-
-Check:
-
-- outbound network connectivity
-- whether the RustChan service user can write to `rustchan-data/runtime/tor/`
-- whether `tor_bootstrap_timeout_secs` needs to be raised
-
-Also review:
-
-```text
-rustchan-data/logs/rustchan.YYYY-MM-DD.log
-```
-
-### HTTPS fails on startup
-
-Check:
-
-- whether `[tls] enabled = true` is intentional
-- whether the configured HTTPS port is available
-- whether your ACME or manual cert settings are correct if you use those modes
-
-### The service starts but uploads fail
-
-Make sure the RustChan user can write to:
-
-- `rustchan-data/`
-- the uploads directory
-- `rustchan-data/runtime/`
-
-### The onion address changed unexpectedly
-
-That usually means the Tor state directory was deleted, replaced, or not persisted:
-
-```text
-rustchan-data/runtime/tor/state/
-```
-
-Back that directory up if the onion address matters.
-
-### Optional administrator-controlled software updates
-
-Eligible native Linux installs use the same `rustchan-cli` executable for the application and update controller. Start with the existing account and data directory; see [Software Updates](docs/software-updates.md) for ownership requirements, verified backups, source adoption and exceptional reboot recovery. Protected installations and containers use their deployment's upgrade procedure.
-
-### Internal media processing
-
-RustChan handles JPEG/PNG/BMP/TIFF, static and animated WebP, GIF conversion,
-HEIC/HEIF still pictures, container metadata, and common audio waveforms in Rust.
-PDF previews cover a small bounded vector/text subset; compressed streams,
-embedded images/fonts and other unbudgeted features use the existing SVG preview
-while the original PDF remains available.
-
-FFmpeg remains the video backend. It also preserves waveform support for audio
-variants the internal decoders do not cover, including AC-3, Speex, unsupported
-AAC profiles and Opus multistream/surround. See the
-[media migration report](docs/non-video-media-migration.md) for format coverage,
-resource limits and verification.
-
-## Applying administrator configuration
-
-Live controls keep applying immediately. Other controls show their active, saved and next-start values. Saving never restarts RustChan; managed Linux and opted-in supervised containers expose **Restart RustChan** for pending settings. See [settings restarts](docs/settings-restarts.md) for the complete classification, supervisor setup, graceful shutdown and failure recovery.
+Change backup storage in Admin → Backups or `backup_directory`, then restart.
+Existing backups stay in the previous location; only the active location appears
+in the panel. Mount external storage before startup. A Docker backup path outside
+`/data` needs a separate persistent mount.
 
 ## Thread archives and retention
 
-Threads leave the active index when background maintenance finds more than the
-board's **Max threads** non-sticky active threads. It keeps the newest last-bump
-and thread-ID pairs; locked threads count, sticky active threads do not. New
-thread creation durably schedules maintenance, so overflow can be visible
-briefly. Startup and periodic reconciliation recover outstanding work.
+Background maintenance enforces each board's non-sticky active-thread cap.
+Threads are retained by most recent bump, then descending thread ID; locked
+threads count and sticky active threads do not. Overflow can be visible briefly
+while durable jobs run. Replies stop bumping at the bump limit; sage replies
+count toward it. There is no time-based thread expiry.
 
-Replies bump until the board's bump limit is reached. Sage replies count toward
-that limit without bumping. The bump limit stops bumps; it does not immediately
-archive the thread. There is no time-based thread expiry.
+Automatic archival occurs when the board's **Archive overflow threads** setting
+or global `archive_before_prune` safety net is enabled. Hard deletion requires
+both to be off. **Max archived threads** is a count cap of 1–10,000, including
+archived sticky threads; it retains recent bumps with ascending thread-ID ties.
+Lowering the cap can permanently delete archives. Archived threads keep their
+URLs/media and are read-only, including polls. Search includes them; active
+index/catalog views do not. There is no public unarchive/preservation control.
 
-**Archive overflow threads** controls automatic archival, with the global
-`archive_before_prune` safety net (default `true`) also enabling it. Hard deletion
-of active overflow occurs only when both are off. Existing archives and their
-navigation remain available even when automatic archival is disabled.
+Board settings apply live; changing the global file/environment safety net needs
+a restart. Failed media deletion stays queued for restart-safe retry. Monitor
+background-job failures when retention or cleanup is not progressing.
 
-**Max archived threads** is a count cap (1–10,000), not permanent retention.
-Maintenance keeps the most recently bumped archived threads, breaking ties by
-ascending thread ID. Archived sticky threads are also subject to the cap;
-sticky is not an archive preservation setting. Lowering the cap permanently
-removes overflow threads. Invalid retention values are rejected rather than
-clamped; omitted retention fields preserve the saved limits.
+## Troubleshooting
 
-Archival keeps the same `/{board}/thread/{id}` URL and media references. Archived
-threads are read-only, including polls; users can browse their results, quoting,
-spoilers and attachments. Board search includes archived posts. Board index,
-catalog and unread history show active threads. Administrators can manually
-archive or delete a thread using the existing authenticated, CSRF-protected
-controls. There is no public unarchive/preservation control.
+| Symptom | Check |
+| --- | --- |
+| FFmpeg warnings or missing video previews | Service `PATH`/`ffmpeg_path`, installed decoders/encoders/muxer, and logs |
+| Tor never becomes ready | Outbound connectivity, state-directory write permission, and bootstrap timeout |
+| Onion address changed | Persistent `runtime/tor/state/` was lost, replaced, or not mounted |
+| HTTPS startup fails | TLS enablement, port availability, certificate paths, and ACME settings/features |
+| Uploads fail | Data/upload/runtime write permission, free disk space, media limits, and worker errors |
+| Database startup fails | `admin db-status`, startup schema error, backup integrity; preserve data and investigate |
+| Settings saved but inactive | Restart status and environment/launcher overrides in the admin panel |
 
-The archive and prune transitions use one SQLite write transaction. Pruned
-media is removed only when no other database references remain, using durable,
-restart-replayable file cleanup. Failed filesystem cleanup stays queued and
-logged. Archive policy is read when maintenance executes, not from stale job
-payloads. Changing the global TOML/environment safety net requires restart;
-board settings are live. Monitor background-job failures if maintenance is
-unable to acquire the database lock or complete cleanup.
+Inspect `logs/rustchan.YYYY-MM-DD.log` in the selected data directory. Sanitize
+logs before sharing them; use [SUPPORT.md](SUPPORT.md) for help and
+[SECURITY.md](SECURITY.md) for vulnerabilities and operational security limits.

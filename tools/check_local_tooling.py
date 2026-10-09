@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject tracked files covered by the local-tooling blocks in .gitignore."""
+"""Reject tracked local tooling and generated evidence designated in .gitignore."""
 
 from pathlib import Path
 import subprocess
@@ -17,6 +17,10 @@ def main():
         (
             "# Local Playwright tooling: keep the complete browser harness on this machine.",
             "# End local Playwright tooling.",
+        ),
+        (
+            "# Generated browser evidence remains local too.",
+            "# End generated evidence.",
         ),
     ]
     patterns = ""
@@ -38,11 +42,11 @@ def main():
     paths = result.stdout.decode("utf-8", errors="replace").split("\0")
     tracked = [path for path in paths if path]
     if tracked:
-        print("Local AI and Playwright tooling must remain untracked:", file=sys.stderr)
+        print("Local tooling and generated evidence must remain untracked:", file=sys.stderr)
         for path in tracked:
             print(f"  {path!r}", file=sys.stderr)
         return 1
-    print("No local AI or Playwright tooling is tracked.")
+    print("No local tooling or generated evidence is tracked.")
     return 0
 
 

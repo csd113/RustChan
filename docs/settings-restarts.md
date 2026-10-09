@@ -127,13 +127,16 @@ attempted, database resources are released, the Tokio blocking pool has a furthe
 ten-second drain cap, and file logging guards flush queued output. SQLite's
 transaction/WAL recovery remains authoritative if an operation exceeds the budget.
 
-The supplied systemd unit has `TimeoutStopSec=90` and `SendSIGKILL=no`. A stuck
-service causes control/recovery to fail closed; the helper does not restore files
+The [service example](../SETUP.md#linux-service-setup) uses `TimeoutStopSec=90`
+and `SendSIGKILL=no`. A stuck service causes control/recovery to fail closed;
+the controller does not restore files
 under an unconfirmed stopped process. No process-name matching, pkill, kill -9,
 replacement spawning by the web process, or remote reboot operation is used.
 
-Standalone terminal invocations, macOS/Windows native runs and custom supervisors
-without the explicit container contract show why automatic restart is unavailable.
+Ineligible/protected native invocations, macOS/Windows native runs, and containers
+or custom supervisors without the explicit container contract show why automatic
+restart is unavailable. Eligible native Linux terminal invocations use the same
+controller and support administrator restarts.
 Saving still works and active/saved settings remain visible. Use a supported
 supervised deployment for administrator-triggered restart, or stop/start the
 standalone process through its normal launcher. No unsupported service name or
