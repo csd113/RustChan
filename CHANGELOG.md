@@ -2,6 +2,26 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## RustChan 1.7.0 — 2026-10-08
+
+### Upgrade notes
+
+- Back up the complete data directory before upgrading. Native Linux updates retain the signed-package verification, pre-upgrade snapshots and full data-and-binary rollback introduced in 1.6.6; the minimum updater remains 1.6.6. Containers, macOS, Windows and custom installations continue to use their deployment tools.
+- Rust 1.99 remains the minimum supported compiler.
+
+### Improved
+
+- Improved thumbnail delivery and caching while preserving board permissions, private-media access checks and existing preview formats.
+- Refined thread controls, post actions and archive navigation, including consistent handling of locked, archived, sticky and pruned threads.
+- Refreshed Frutiger Aero and refined the other themes, with focused readability improvements for Forest and Terminal.
+- Updated Rust dependencies within the existing dependency set.
+
+### Fixed
+
+- Hardened posting and thread lifecycle transactions, retry receipts, reply counters, retention and recoverable media publication/deletion. Posting checks current thread state and board policy before committing.
+- Hardened hostile input handling across uploads, paths, redirects, administrator authentication/settings, backups and restores.
+- Bounded expensive search, CAPTCHA and request work, strengthened rate limiting and connection handling, and expanded security and lifecycle regression coverage.
+
 ## RustChan 1.6.6 — 2026-10-03
 
 - Fixed migration of supported earlier package baselines, including 1.6.0 databases missing the two newer post-query indexes. Unknown schema drift remains rejected; upgrades preserve existing content and retain full data-and-binary rollback.
