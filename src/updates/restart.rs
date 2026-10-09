@@ -4,6 +4,7 @@ use super::{
     transaction::native::{Engine, Service},
     Operation, Phase, Status,
 };
+use crate::config::admin::SettingsLease;
 use crate::restart::{configuration_digest, Store};
 use anyhow::Context as _;
 use std::fs::File;
@@ -45,7 +46,7 @@ impl Engine {
         instance: Uuid,
         administrator: i64,
         service: &impl Service,
-    ) -> anyhow::Result<(Status, File, File)> {
+    ) -> anyhow::Result<(Status, File, SettingsLease)> {
         let update = self.lock()?;
         let settings = crate::config::admin::settings_lease(&self.config.settings_path)?;
         let mut status = self.status()?;

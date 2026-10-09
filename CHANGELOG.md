@@ -18,6 +18,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Fixed
 
+- Release settings locks explicitly when configuration operations finish, preventing duplicate process descriptors from delaying subsequent saves or restarts.
 - Hardened posting and thread lifecycle transactions, retry receipts, reply counters, retention and recoverable media publication/deletion. Posting checks current thread state and board policy before committing.
 - Hardened hostile input handling across uploads, paths, redirects, administrator authentication/settings, backups and restores.
 - Bounded expensive search, CAPTCHA and request work, strengthened rate limiting and connection handling, and expanded security and lifecycle regression coverage.
