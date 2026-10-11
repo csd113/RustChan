@@ -3787,12 +3787,6 @@ html[data-theme="aero"] body {
   background-attachment: fixed;
 }
 
-/* A light veil protects metadata and other text between the individual panels. */
-html[data-theme="aero"] main {
-  background: linear-gradient(rgba(244,251,254,0.76), rgba(244,251,254,0.88));
-  border-radius: 0 0 var(--radius-md) var(--radius-md);
-}
-
 /* A glossy sky ribbon; compact tabs keep the imageboard navigation rhythm. */
 html[data-theme="aero"] .site-header {
   background: linear-gradient(#effcff 0%, #c4eafa 48%, #9fd6ed 49%, #b9e5f4 100%);
