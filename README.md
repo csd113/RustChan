@@ -28,7 +28,7 @@ Choose the option that suits you:
 |---|---|---|
 | [Docker](#start-with-docker) | Running the ready-made app with its media tools included | Docker running on your computer or server |
 | [Download the app](#download-the-app) | Running RustChan directly, without Docker or compiling code | A supported Linux, macOS, or Windows computer |
-| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.99 or newer |
+| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.99.1 or newer |
 
 ### Start with Docker
 
@@ -93,7 +93,7 @@ RustChan creates a `rustchan-data` folder next to the app. Keep that folder when
 
 ### Build from source
 
-With Git and Rust **1.99 or newer** installed:
+With Git and Rust **1.99.1 or newer** installed:
 
 ```bash
 git clone https://github.com/csd113/RustChan.git
@@ -211,7 +211,7 @@ As a site owner, keep settings, secrets, databases, backups, TLS keys, and Tor i
 
 RustChan is written in Rust using Axum, Tokio, bundled SQLite, server-rendered templates, Rustls, and Arti. Docker is optional for development.
 
-Use Rust 1.99.0. [CONTRIBUTING.md](CONTRIBUTING.md) contains the validation commands,
+Use Rust 1.99.1. [CONTRIBUTING.md](CONTRIBUTING.md) contains the validation commands,
 workspace lint policy, and development workflow.
 The demonstration screenshots
 in `docs/screenshots/` are published documentation.

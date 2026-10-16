@@ -1344,7 +1344,10 @@ fn verify_split_zip_files(
             let mut zip_entry = archive.by_index(index).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Read split ZIP entry {index}: {error}"))
             })?;
-            let entry_name = zip_entry.name().to_owned();
+            let entry_name = zip_entry
+                .name()
+                .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+                .into_owned();
             verify_zip_entry_name(&entry_name)?;
             if !seen_entries.insert(entry_name.clone()) {
                 return Err(AppError::BadRequest(format!(

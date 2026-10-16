@@ -381,7 +381,10 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
         let mut entry = archive
             .by_index(i)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Zip[{i}]: {e}")))?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+            .into_owned();
         let Some(rel_path) = validate_entry_path_under_prefix(&name, "uploads/")? else {
             continue;
         };
@@ -411,6 +414,18 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
         .map(|_completed_value| ())?;
     }
     Ok(())
+}
+
+/// Scan ZIP names without decoding file contents, rejecting invalid encodings.
+pub(super) fn zip_contains_entry<R: std::io::Read + Seek>(
+    archive: &zip::ZipArchive<R>,
+    expected: &str,
+) -> Result<bool> {
+    archive.file_names().try_fold(false, |found, name| {
+        let name =
+            name.map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?;
+        Ok(found || name == expected)
+    })
 }
 
 /// Validates restore safe entry name.
@@ -499,7 +514,10 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
         let entry = archive.by_index(idx).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read backup entry #{idx}: {error}"))
         })?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+            .into_owned();
         validate_restore_safe_entry_name(&name)?;
         if entry.is_dir() {
             continue;
@@ -637,7 +655,10 @@ pub(super) fn verify_board_backup_zip(
         let entry = archive.by_index(idx).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read backup entry #{idx}: {error}"))
         })?;
-        validate_restore_safe_entry_name(entry.name())?;
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?;
+        validate_restore_safe_entry_name(&name)?;
     }
     Ok(manifest)
 }

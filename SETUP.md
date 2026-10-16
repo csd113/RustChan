@@ -7,7 +7,7 @@ SQLite, templates, and static assets. The source version is `1.7.1`.
 
 ## Requirements
 
-- Rust 1.99 or newer and Git when building from source; CI uses Rust 1.99.0.
+- Rust 1.99.1 or newer and Git when building from source; CI uses Rust 1.99.1.
 - A writable data directory, next to the executable by default or selected with
   an absolute `--data-dir` path.
 - Optional FFmpeg for video thumbnails/transcoding and uncovered audio codecs.

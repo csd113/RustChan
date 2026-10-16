@@ -2,7 +2,7 @@
 name = "rustchan"
 version = "1.7.1"
 edition = "2021"
-# Rust 1.99 is the supported minimum for the package and build tooling.
+# Rust 1.99.1 is the supported minimum for the package and build tooling.
 rust-version.workspace = true
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
@@ -12,14 +12,14 @@ categories = ["web-programming", "multimedia::images"]
 
 # Keep `cargo-msrv` metadata aligned with `rust-version`.
 [package.metadata]
-msrv = "1.99"
+msrv = "1.99.1"
 
 [workspace]
 resolver = "2"
 exclude = ["vendor/symphonia-codec-aac"]
 
 [workspace.package]
-rust-version = "1.99"
+rust-version = "1.99.1"
 
 [profile.release]
 opt-level      = 3
@@ -31,7 +31,7 @@ panic          = "abort"
 # Native startup verifies complete executable copies even in source/debug builds.
 # Keep the hashing backend fast without changing application debug checks or the
 # bounded lifecycle deadlines.
-[profile.dev.package."sha2:0.11.0"]
+[profile.dev.package."sha2:0.11.1"]
 opt-level = 3
 
 [[bin]]
@@ -52,8 +52,8 @@ axum       = { version = "0.8.9",  features = ["multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 tower      = "0.5.3"
 tower-http = { version = "0.7.1", features = ["fs", "set-header", "compression-full", "limit", "trace"] }
-tokio      = { version = "1.53.2", features = ["full"] }
-tokio-util = "0.7.19"
+tokio      = { version = "1.53.3", features = ["full"] }
+tokio-util = "0.7.20"
 captcha    = { version = "1.0.0", default-features = false }
 
 # Arti 0.47 permits rusqlite >=0.36,<0.41. Keep the latest application and
@@ -64,12 +64,12 @@ r2d2_sqlite = "0.35.0"
 time        = "0.3.55"
 
 serde      = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 # toml 1.0: serde parsing is built-in, no feature flag needed.
-toml  = "1.1.6"
+toml  = "1.1.8"
 
 argon2  = "0.6.0"
-sha2    = "0.11.0"
+sha2    = "0.11.1"
 # Signed update verification reuses the TLS provider and existing compression/semver crates.
 ring = "0.17.14"
 semver = "1.0.28"
@@ -91,17 +91,17 @@ symphonia = { version = "0.6.1", default-features = false, features = ["aac", "a
 # Symphonia supplies Opus packets; this decoder avoids native libopus.
 opus-pure = "0.2.2"
 # HEVC intra still pictures only; no native library or video framework.
-heic-rs = { version = "0.1.1", default-features = false, features = ["std"] }
+heic-rs = { version = "0.1.4", default-features = false, features = ["std"] }
 
 # Pure-Rust first-page PDF previews, with embedded standard fonts.
-hayro = { version = "0.7.1", default-features = false, features = ["embed-fonts"] }
+hayro = { version = "0.8.0", default-features = false, features = ["embed-fonts"] }
 
 # Apply JPEG Orientation tags before thumbnailing so phone photos display upright.
 kamadak-exif = "0.6.1"
 
 clap = { version = "4.6.7", features = ["derive"] }
 
-uuid      = { version = "1.27.0", features = ["v4", "serde"] }
+uuid      = { version = "1.28.0", features = ["v4", "serde"] }
 chrono    = { version = "0.4.45", features = ["serde"] }
 dashmap      = "6.2.1"
 parking_lot  = "0.12.5"
@@ -110,7 +110,7 @@ regex     = "1.13.1"
 ipnet     = "2.12.2"
 
 # Backup preflight scans use `file_names()` without decompressing entries.
-zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # URL validation for admin-supplied external banner links.
 url = "2.5.8"
@@ -162,7 +162,7 @@ rustls-pki-types = "1.15.1"
 # TLS consumer on that provider instead of also compiling the unused aws-lc-rs
 # defaults; logging, TLS 1.2, and the system-independent root set stay enabled.
 tokio-rustls   = { version = "0.26.6", default-features = false, features = ["logging", "ring", "tls12"] }
-rustls         = { version = "0.23.45", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls         = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 
 # Optional — gated by Cargo features
 rustls-acme    = { version = "0.15.4", default-features = false, features = ["ring", "tls12", "tokio", "webpki-roots"], optional = true }
@@ -172,7 +172,7 @@ x509-cert      = { version = "0.3.0", optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
 axum-server    = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
-hyper          = { version = "1.11.1", features = ["http1", "http2", "server"], optional = true }
+hyper          = { version = "1.12.0", features = ["http1", "http2", "server"], optional = true }
 hyper-util     = { version = "0.1.21", features = ["tokio", "server"] }
 
 # Terminal UI

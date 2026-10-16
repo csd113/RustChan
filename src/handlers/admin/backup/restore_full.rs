@@ -526,7 +526,10 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
         let mut entry = archive
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+            .into_owned();
         validate_restore_safe_entry_name(&name)?;
 
         if name == "chan.db" {

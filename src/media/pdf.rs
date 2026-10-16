@@ -5,6 +5,7 @@
 //! rendering. Recursive resources and inline images still use the placeholder.
 
 use anyhow::{ensure, Context as _, Result};
+use hayro::hayro_interpret::util::TransformExt as _;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::content::Operator;
 use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Name, Object, ObjectIdentifier};
@@ -85,21 +86,32 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
         render_annotations: false,
         ..InterpreterSettings::default()
     };
-    let pixmap = hayro::render(
+    let mut context = hayro::vello_cpu::RenderContext::new(pixel_width, pixel_height);
+    hayro::render_into(
         page,
         &RenderCache::new(),
         &settings,
-        &RenderSettings {
-            x_scale: scale,
-            y_scale: scale,
-            width: Some(pixel_width),
-            height: Some(pixel_height),
-            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-        },
+        &RenderSettings::default(),
+        &mut context,
+        page.initial_transform(true)
+            .to_kurbo()
+            .then_scale(f64::from(scale)),
     );
     ensure!(
         !warning.load(Ordering::Relaxed),
         "PDF renderer reported an unsupported feature"
+    );
+    context.flush();
+    let mut pixmap = hayro::vello_cpu::Pixmap::new(pixel_width, pixel_height);
+    context.render_with(
+        &mut pixmap,
+        &mut hayro::vello_cpu::Resources::default(),
+        hayro::vello_cpu::RasterizerSettings {
+            target_init: hayro::vello_cpu::TargetInit::Clear(
+                hayro::vello_cpu::color::palette::css::WHITE,
+            ),
+            ..hayro::vello_cpu::RasterizerSettings::default()
+        },
     );
     let image = image::RgbaImage::from_raw(
         u32::from(pixel_width),

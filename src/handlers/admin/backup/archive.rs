@@ -32,7 +32,7 @@ impl Drop for TempZipCleanupGuard {
 pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<board_manifest::BoardBackupManifest> {
-    if !archive.file_names().any(|name| name == "board.json") {
+    if !safety::zip_contains_entry(archive, "board.json")? {
         return Err(AppError::BadRequest(
             "Invalid board backup: zip must contain 'board.json'. \
              (Did you upload a full-site backup instead?)"
@@ -52,11 +52,11 @@ pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + Seek>(
 pub(super) fn validate_full_restore_archive_layout<R: std::io::Read + Seek>(
     archive: &zip::ZipArchive<R>,
 ) -> Result<()> {
-    if archive.file_names().any(|name| name == "chan.db") {
+    if safety::zip_contains_entry(archive, "chan.db")? {
         return Ok(());
     }
 
-    if archive.file_names().any(|name| name == "board.json") {
+    if safety::zip_contains_entry(archive, "board.json")? {
         return Err(AppError::BadRequest(
             "Invalid full backup: zip must contain 'chan.db' at the root. \
              This archive looks like a board backup; use Board restore instead."
@@ -173,7 +173,10 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + Seek, W: Write 
         let mut entry = archive
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+            .into_owned();
         validate_restore_safe_entry_name(&name)?;
         if !name.starts_with(&board_prefix) {
             continue;
@@ -251,7 +254,10 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
                 "Read Backup v4 transfer entry #{index}: {error}"
             ))
         })?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+            .into_owned();
         validate_restore_safe_entry_name(&name)?;
         if entry.is_dir() {
             continue;

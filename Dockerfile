@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.99.0-trixie AS builder
+FROM rust:1.99.1-trixie AS builder
 WORKDIR /build
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}

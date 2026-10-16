@@ -1253,10 +1253,13 @@ pub(in crate::server) async fn board_restore(
                     let entry_names = archive
                         .file_names()
                         .take(8)
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
+                        .map(|name| name.map(std::borrow::Cow::into_owned))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|error| {
+                            AppError::BadRequest(format!("Invalid ZIP entry name: {error}"))
+                        })?;
                     let has_board_json = entry_names.iter().any(|name| name == "board.json")
-                        || archive.file_names().any(|name| name == "board.json");
+                        || safety::zip_contains_entry(&archive, "board.json")?;
                     tracing::info!(
                         target: "admin",
                         route = RestoreKind::Board.route(),

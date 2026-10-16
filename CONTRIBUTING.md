@@ -51,7 +51,7 @@ has already been coordinated under [SECURITY.md](SECURITY.md).
 
 ## Rust and feature policy
 
-The workspace currently declares Rust `1.99` as its minimum supported Rust
+The workspace currently declares Rust `1.99.1` as its minimum supported Rust
 version (MSRV). Keep `rust-version` and the `cargo-msrv` metadata aligned; do not
 raise the MSRV incidentally.
 

@@ -36,7 +36,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: clippy, rustfmt
 
       - name: Cache Rust artifacts
@@ -93,7 +93,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           targets: ${{ matrix.target }}
 
       - name: Cache Rust artifacts
