@@ -34,15 +34,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
 
 mod access_preferences;
-#[cfg(test)]
-mod action_tests;
 mod catalog;
 mod create_thread;
 mod media;
 mod pages;
 mod reports;
-#[cfg(test)]
-mod tests;
 
 pub(in crate::server) use access_preferences::*;
 pub(in crate::server) use catalog::*;

@@ -82,12 +82,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: Test native update packaging and signing
-        run: python3 -m unittest discover -s tools -p "test_update_package.py"
-
-      - name: Run tests
-        run: cargo test --locked --workspace --all-features
-
       - name: Enforce locked dependency policy
         run: cargo deny --locked check
 

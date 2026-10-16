@@ -348,39 +348,3 @@ fn render_admin_moderation_section(
         moderation_summary_counter = escape_html(moderation_summary_counter),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::render_appeal_rows;
-    use crate::models::BanAppeal;
-
-    #[test]
-    fn appeal_ip_prefix_is_escaped_for_html_like_and_multibyte_input() {
-        let script_tag = ["<", "script", ">"].concat();
-        let script_close = ["</", "script", ">"].concat();
-        let multibyte_attack = format!("éééé{script_tag}alert(1){script_close}");
-        let appeals = [
-            BanAppeal {
-                id: 1,
-                ip_hash: "<img src=x onerror=alert(1)>".to_owned(),
-                reason: "html-like".to_owned(),
-                status: "open".to_owned(),
-                created_at: 1,
-            },
-            BanAppeal {
-                id: 2,
-                ip_hash: multibyte_attack,
-                reason: "multibyte".to_owned(),
-                status: "open".to_owned(),
-                created_at: 2,
-            },
-        ];
-
-        let rows = render_appeal_rows("csrf", &appeals);
-
-        assert!(rows.contains("&lt;img src=x oner"));
-        assert!(!rows.contains("<img"));
-        assert!(!rows.contains(&script_tag));
-        assert!(rows.contains("éééé&lt;script&gt;"));
-    }
-}

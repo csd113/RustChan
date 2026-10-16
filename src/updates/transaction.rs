@@ -278,7 +278,7 @@ pub(super) mod native {
         Ok(())
     }
 
-    /// Bounded artifact fetch seam for offline transaction fault tests.
+    /// Bounded artifact fetching for update transactions.
     trait ArtifactSource {
         /// Fetch bounded artifact bytes only from allowlisted HTTPS release sources.
         fn fetch(&self, manifest: &Manifest) -> anyhow::Result<Vec<u8>>;
@@ -294,7 +294,7 @@ pub(super) mod native {
         }
     }
 
-    /// Fixed service lifecycle seam for transaction and recovery tests.
+    /// Fixed service lifecycle for transactions and recovery.
     pub(in crate::updates) trait Service {
         /// Validate configuration, package compatibility, free space and service authority.
         fn preflight(&self) -> anyhow::Result<()> {
@@ -1596,10 +1596,5 @@ pub(super) mod native {
             File::open(destination.join("rustchan-cli"))?.sync_all()?;
         }
         sync_dir(destination)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        include!("transaction_tests.rs");
     }
 }

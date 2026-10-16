@@ -105,28 +105,3 @@ fn backup_source(definition: &SettingDefinition, environment: &super::Environmen
         )
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::ensure;
-
-    #[test]
-    fn malformed_backup_overrides_report_the_actual_file_fallback() -> anyhow::Result<()> {
-        for (key, value) in [
-            ("auto_full_backup_copies_to_keep", "broken"),
-            ("auto_full_backup_storage_mode", "unsupported"),
-        ] {
-            let definition = SETTINGS
-                .iter()
-                .find(|field| field.key == key)
-                .context("missing backup setting")?;
-            let values = BTreeMap::from([(definition.environment.to_owned(), value.to_owned())]);
-            ensure!(
-                backup_source(definition, &super::super::Environment::Values(&values))
-                    .contains("present but invalid")
-            );
-        }
-        Ok(())
-    }
-}

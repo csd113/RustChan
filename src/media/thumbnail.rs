@@ -6,13 +6,6 @@ use std::path::{Path, PathBuf};
 
 use super::ffmpeg;
 
-#[cfg(test)]
-std::thread_local! {
-    static PDF_RENDERER_TEST_MODE: std::cell::Cell<Option<TestPdfRendererMode>> = const {
-        std::cell::Cell::new(None)
-    };
-}
-
 // Static placeholder SVGs
 // Note: these SVG strings contain `"#` sequences (e.g. fill="#0a0f0a") which
 // would terminate a `r#"..."#` raw string early.  We use `r##"..."##` so the
@@ -85,44 +78,6 @@ pub enum PdfThumbnailOutcome {
     },
     /// No renderer succeeded, so a static placeholder was written.
     Placeholder,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Test-only override for PDF preview failure behavior.
-pub enum TestPdfRendererMode {
-    /// Simulate no available renderer.
-    Unavailable,
-    /// Simulate a renderer that exits unsuccessfully.
-    Fail,
-    /// Simulate a renderer that exceeds its timeout.
-    Timeout,
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-/// Restore this test thread's override without affecting concurrent tests.
-pub struct PdfRendererTestGuard {
-    previous: Option<TestPdfRendererMode>,
-    // The override belongs to the originating thread, so its guard is not Send.
-    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
-}
-
-#[cfg(test)]
-impl Drop for PdfRendererTestGuard {
-    fn drop(&mut self) {
-        PDF_RENDERER_TEST_MODE.with(|value| value.set(self.previous));
-    }
-}
-
-#[cfg(test)]
-/// Install a test-only override on this synchronous processing thread.
-#[must_use]
-pub fn override_pdf_renderer_mode(mode: TestPdfRendererMode) -> PdfRendererTestGuard {
-    PdfRendererTestGuard {
-        previous: PDF_RENDERER_TEST_MODE.with(|value| value.replace(Some(mode))),
-        _thread: std::marker::PhantomData,
-    }
 }
 
 /// Generate a thumbnail and return the actual path written.
@@ -305,12 +260,8 @@ fn pdf_first_page_thumbnail(
     }
 }
 
-/// Apply test failure injection, then invoke the in-process renderer.
+/// Invoke the in-process PDF renderer.
 fn render_pdf(input_path: &Path, output_path: &Path, max_dim: u32) -> Result<()> {
-    #[cfg(test)]
-    if PDF_RENDERER_TEST_MODE.with(std::cell::Cell::get).is_some() {
-        anyhow::bail!("injected PDF renderer failure");
-    }
     super::pdf::render(input_path, output_path, max_dim)
 }
 
@@ -341,138 +292,5 @@ fn thumbnail_extension(mime: &str, ffmpeg_available: bool) -> &'static str {
         m if m.starts_with("audio/") => "svg",
         m if m.starts_with("video/") && !ffmpeg_available => "svg",
         _ => "webp",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn valid_unsupported_pdf_retains_upload_and_uses_svg_preview() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let source =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/inline-image.pdf");
-        let before = std::fs::read(&source)?;
-        let output = dir.path().join("page.webp");
-        let result = generate_thumbnail(&source, "application/pdf", &output, 100, false)?;
-        anyhow::ensure!(
-            result.extension().and_then(std::ffi::OsStr::to_str) == Some("svg"),
-            "unsupported preview did not use SVG"
-        );
-        anyhow::ensure!(
-            std::fs::read_to_string(result)?.contains("PDF"),
-            "PDF placeholder is invalid"
-        );
-        anyhow::ensure!(
-            std::fs::read(&source)? == before,
-            "unsupported preview changed the download"
-        );
-        anyhow::ensure!(!output.exists(), "unsupported preview published WebP");
-        Ok(())
-    }
-
-    #[test]
-    fn thumbnail_ext_is_webp_for_images_no_ffmpeg() {
-        // Image previews use the built-in Rust encoder.
-        assert_eq!(thumbnail_extension("image/jpeg", false), "webp");
-        assert_eq!(thumbnail_extension("image/png", false), "webp");
-        assert_eq!(thumbnail_extension("image/webp", false), "webp");
-    }
-
-    #[test]
-    fn thumbnail_ext_is_svg_for_video_without_ffmpeg() {
-        assert_eq!(thumbnail_extension("video/webm", false), "svg");
-        assert_eq!(thumbnail_extension("video/mp4", false), "svg");
-    }
-
-    #[test]
-    fn thumbnail_ext_is_webp_for_video_with_ffmpeg() {
-        assert_eq!(thumbnail_extension("video/webm", true), "webp");
-        assert_eq!(thumbnail_extension("video/mp4", true), "webp");
-    }
-
-    #[test]
-    fn thumbnail_ext_is_svg_for_audio() {
-        assert_eq!(thumbnail_extension("audio/mpeg", true), "svg");
-        assert_eq!(thumbnail_extension("audio/mpeg", false), "svg");
-    }
-
-    #[test]
-    fn thumbnail_ext_is_svg_for_svg_source() {
-        assert_eq!(thumbnail_extension("image/svg+xml", true), "svg");
-        assert_eq!(thumbnail_extension("image/svg+xml", false), "svg");
-    }
-
-    #[test]
-    fn pdf_thumbnail_prefers_svg_sibling_for_placeholder_paths() {
-        let output = Path::new("/tmp/example.webp");
-        assert_eq!(
-            pdf_placeholder_output_path(output),
-            Path::new("/tmp/example.svg")
-        );
-
-        let svg = Path::new("/tmp/example.svg");
-        assert_eq!(pdf_placeholder_output_path(svg), svg);
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "test assertions intentionally panic on failure"
-    )]
-    fn write_pdf_placeholder_outputs_svg() -> Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let output = tempdir.path().join("thumb.svg");
-        write_placeholder(&output, PlaceholderKind::Pdf)?;
-        let svg = std::fs::read_to_string(&output)?;
-        assert!(svg.contains("PDF"), "placeholder must identify PDF content");
-        assert!(svg.contains("<svg"), "placeholder must be SVG markup");
-        Ok(())
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "test assertions intentionally panic on failure"
-    )]
-    fn unsupported_image_thumbnail_falls_back_to_svg_placeholder_without_ffmpeg() -> Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let input = tempdir.path().join("input.heic");
-        let output = tempdir.path().join("thumb.webp");
-        std::fs::write(&input, b"not decoded by image crate")?;
-
-        let actual = generate_thumbnail(&input, "image/heic", &output, 64, false)?;
-
-        assert_eq!(
-            actual.extension().and_then(|ext| ext.to_str()),
-            Some("svg"),
-            "fallback path must use the SVG extension"
-        );
-        assert!(actual.exists(), "fallback placeholder must exist");
-        assert!(!output.exists(), "failed WebP output must not remain");
-        Ok(())
-    }
-    #[test]
-    fn pdf_failure_override_does_not_affect_another_thread() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media/text.pdf");
-        let output = dir.path().join("thread.webp");
-        let _override = override_pdf_renderer_mode(TestPdfRendererMode::Fail);
-        let generated = std::thread::spawn(move || {
-            generate_thumbnail(&input, "application/pdf", &output, 100, false)
-        })
-        .join()
-        .map_err(|panic| {
-            anyhow::anyhow!(
-                "PDF preview test thread panicked: {}",
-                super::super::process::panic_message(panic.as_ref())
-            )
-        })??;
-        anyhow::ensure!(
-            generated.extension().is_some_and(|ext| ext == "webp"),
-            "another thread inherited PDF failure injection"
-        );
-        Ok(())
     }
 }

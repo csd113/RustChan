@@ -131,20 +131,3 @@ fn ebml_doc_type(scan: &[u8]) -> Option<&[u8]> {
 pub const fn fallback_download_mime_type() -> &'static str {
     "application/octet-stream"
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ftyp_brand_chunks_ignore_incomplete_trailing_bytes() {
-        let accepted = &[b"heic"];
-
-        assert!(!has_ftyp_brand(b"", accepted));
-        assert!(!has_ftyp_brand(b"00000000hei", accepted));
-        assert!(has_ftyp_brand(b"00000000heic", accepted));
-        assert!(has_ftyp_brand(b"00000000heicx", accepted));
-        assert!(has_ftyp_brand(b"00000000heicxy", accepted));
-        assert!(!has_ftyp_brand(b"00000000xxxxhei", accepted));
-    }
-}

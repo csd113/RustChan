@@ -35,7 +35,7 @@ Exceptional loss of complete writer-exit proof can require a host reboot. A
 missing PID, free lock, process restart, or container recreation is insufficient.
 After a changed kernel boot, the retained committed controller recovers the
 journal before migrations or public traffic. Native reboot/power-loss recovery
-still needs validation on disposable Linux staging; process-loss fixtures do not
+still needs validation on disposable Linux staging; process-loss checks alone do not
 establish these guarantees.
 
 ## Manual upgrade of a source install
@@ -160,12 +160,6 @@ packages. It obtains an immutable release ID through a draft, verifies/signs
 both targets, and publishes after signing succeeds. Failure leaves a draft.
 Prereleases omit native update artifacts and cannot advance stable latest.
 Platform ZIPs and container images use their separate deployment procedures.
-
-Run the offline package/signature regressions with:
-
-```sh
-python3 -m unittest discover -s tools -p test_update_package.py
-```
 
 ## Troubleshooting
 

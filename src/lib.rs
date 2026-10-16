@@ -17,52 +17,25 @@ pub mod captcha;
 pub mod config;
 /// SQLite persistence operations and models.
 pub mod db;
-#[cfg(test)]
-/// External-tool and in-process Tor detection used by crate-level tests.
-pub mod detect;
 /// Application error types and HTTP error responses.
 pub mod error;
 /// Favicon validation and storage.
 pub mod favicon;
-#[cfg(test)]
-/// Browser-facing and administration handlers used by crate-level tests.
-pub use server::handlers;
-#[cfg(test)]
-/// Structured application and console logging used by crate-level tests.
-pub mod logging;
 /// Uploaded-media inspection and conversion.
 pub mod media;
-#[cfg(test)]
-/// Request middleware and shared state used by crate-level tests.
-pub mod middleware;
 /// Shared application data models.
 pub mod models;
 /// Durable filesystem-operation journal and recovery.
 pub mod pending_fs;
-#[cfg(test)]
-/// HTTP runtime and administration CLI used by crate-level tests.
-pub mod server;
-/// Server-rendered HTML templates.
-pub mod templates;
-#[cfg(test)]
-/// Reusable fixtures for unit tests.
-pub mod test_fixtures;
-#[cfg(test)]
-/// Shared state and request builders for crate-local tests.
-pub(crate) use test_fixtures as test_support;
 /// Settings restart coordination and supervisor recovery.
 pub mod restart;
+/// Server-rendered HTML templates.
+pub mod templates;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.
 pub mod theme_builder;
-#[cfg(test)]
-/// TLS certificate handling used by crate-level tests.
-pub mod tls;
 /// Signed release discovery and isolated native update transactions.
 pub mod updates;
 /// Cryptographic, filesystem, sanitization, and redirect helpers.
 pub mod utils;
-#[cfg(test)]
-/// Background job processing used by crate-level tests.
-pub mod workers;

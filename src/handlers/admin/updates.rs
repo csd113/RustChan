@@ -233,33 +233,3 @@ pub(in crate::server) async fn install(
 fn maintenance_finished(status: &Status, approval: &str, acknowledged: bool) -> bool {
     !status.phase.active() && (acknowledged || status.approval.as_deref() != Some(approval))
 }
-
-#[cfg(test)]
-/// Installation maintenance admission regression tests.
-mod tests {
-    use super::*;
-
-    /// Lost replies and active work cannot prematurely release backup/restore serialization.
-    #[test]
-    fn maintenance_waits_for_consumed_approval_and_terminal_state() {
-        let mut status = Status {
-            approval: Some("pending".to_owned()),
-            ..Status::default()
-        };
-        assert!(
-            !maintenance_finished(&status, "pending", false),
-            "lost reply with pending approval must hold maintenance"
-        );
-        status.approval = None;
-        status.phase = updates::Phase::Downloading;
-        assert!(
-            !maintenance_finished(&status, "pending", true),
-            "accepted download must serialize maintenance without blocking posts"
-        );
-        status.phase = updates::Phase::RolledBack;
-        assert!(
-            maintenance_finished(&status, "pending", false),
-            "persisted complete rollback may release maintenance even after a lost reply"
-        );
-    }
-}

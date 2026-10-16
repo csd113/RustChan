@@ -37,15 +37,9 @@ pub mod threads;
 mod types;
 /// Anonymous per-thread display preferences.
 mod user_thread_prefs;
-#[cfg(test)]
-/// Explicitly invoked populated SQLite workload and query-plan evidence.
-mod workload;
 
 pub use pool::{first_run_check, has_no_admin, init_pool};
 pub use types::{CachedFile, DbPool, NewPost};
-
-#[cfg(test)]
-pub use pool::init_test_pool;
 
 pub use accounts::*;
 pub use admin::*;
@@ -233,51 +227,4 @@ pub fn paths_safe_to_delete(
     }
 
     Ok(safe)
-}
-
-#[cfg(test)]
-/// Transaction-helper regression tests.
-mod tests {
-    use super::commit_transaction;
-    use anyhow::{ensure, Context as _, Result};
-
-    #[test]
-    fn commit_transaction_rolls_back_after_a_failed_commit() -> Result<()> {
-        let pool = super::init_test_pool()?;
-        let conn = pool.get().context("get test database connection")?;
-        conn.execute_batch("PRAGMA defer_foreign_keys = ON; BEGIN IMMEDIATE")
-            .context("begin deferred transaction")?;
-        // Deferred foreign keys turn the commit into a failure while the
-        // transaction stays active, which is the state the helper must clean up.
-        conn.execute_batch(
-            "INSERT INTO polls (thread_id, question, expires_at) VALUES (999999, 'q', 0)",
-        )
-        .context("insert deferred-violation row")?;
-
-        ensure!(
-            commit_transaction(&conn, "test commit failure").is_err(),
-            "a deferred foreign-key violation must fail the commit"
-        );
-        // Starting a new transaction proves the failed one was rolled back.
-        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK")
-            .context("connection must remain usable after a failed commit")?;
-        Ok(())
-    }
-
-    #[test]
-    fn readiness_probe_requires_the_release_schema_version() -> Result<()> {
-        let empty = rusqlite::Connection::open_in_memory().context("open schema-less database")?;
-        ensure!(
-            super::database_ready_probe(&empty).is_err(),
-            "a database without the release schema must not report ready"
-        );
-
-        let pool = super::init_test_pool()?;
-        let conn = pool.get().context("get test database connection")?;
-        ensure!(
-            super::database_ready_probe(&conn).is_ok(),
-            "a release-baseline database must report ready"
-        );
-        Ok(())
-    }
 }

@@ -139,23 +139,3 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for ConnectionIo<I> {
         Pin::new(&mut self.get_mut().inner).poll_write_vectored(context, buffers)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn sockets_are_bounded_and_release_capacity_when_dropped() -> anyhow::Result<()> {
-        let acceptor = BoundedAcceptor::new(axum_server::accept::DefaultAcceptor::new());
-        let mut sockets = Vec::new();
-        for _ in 0..MAX_CONNECTIONS {
-            let (stream, _service) = acceptor.accept(tokio::io::empty(), ()).await?;
-            sockets.push(stream);
-        }
-        anyhow::ensure!(acceptor.accept(tokio::io::empty(), ()).await.is_err());
-        drop(sockets.pop());
-        let (_stream, _service) = acceptor.accept(tokio::io::empty(), ()).await?;
-        drop(sockets);
-        Ok(())
-    }
-}

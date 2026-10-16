@@ -67,31 +67,18 @@ been considered.
 
 ## Validation
 
-Start with the narrowest test that covers the change. The repository's baseline
-Rust checks are:
+The repository's baseline Rust checks are:
 
 ```sh
 cargo fmt --all --check
 cargo check --locked --workspace --all-targets --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo
-cargo test --locked --workspace --all-features
+cargo build --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
-When the local Playwright harness is available, use it under `tests/e2e/` for
-public UI, admin UI, media, backup and restore, moderation, Tor/proxy, and
-no-JavaScript changes. The complete harness, `playwright*.config.*`, `package.json`,
-and `package-lock.json` are intentionally ignored and must remain untracked.
-Do not remove these ignore rules or add exceptions to publish browser tests.
-Browser validation runs locally; no hosted browser CI is required.
-Keep reports, traces, screenshots, videos, storage state,
-runtime databases, preserved fixture roots, audit output, and other browser
-artifacts under the matching `.gitignore` rules and out of commits. See
-the local `tests/e2e/README.md` for the normal regression and deep audit commands.
-Run focused scenarios first and the available browser matrix for broad changes.
-Some media tests require `ffmpeg` and specific codecs; do not replace
-deterministic fixtures with private uploads from a live site. Permanent Rust
-unit and integration tests remain normal repository source.
+Use a small runtime smoke check with disposable local data when application
+startup or request handling changes. Keep generated evidence out of commits.
 
 Run the full Rust validation sequence before handoff for application changes.
 Documentation-only changes may use the repository's applicable documentation,
@@ -106,17 +93,23 @@ git diff --check
 ### Database and migrations
 
 Released schema changes need a forward migration tied to a RustChan release.
-Preserve data and fail closed on partial, unknown, or corrupt schemas. Add tests
-for fresh creation, supported upgrade paths, invalid input, rollback, and
-backup/restore interaction as applicable. Do not silently rewrite or discard an
-operator's database.
+Preserve data and fail closed on partial, unknown, or corrupt schemas. Validate
+fresh creation, supported upgrade paths, invalid input, rollback, and backup/restore
+interaction as applicable, subject to the essential-value test policy below.
+Do not silently rewrite or discard an operator's database.
 
 ### Tests and fixtures
 
-Keep tests close to the behavior they protect. Media fixtures must be small,
-synthetic or redistribution-safe, and stripped of metadata and identifying
-content. Include JavaScript-disabled coverage when changing an existing no-JS
-flow. Security-sensitive changes need negative tests and failure-path coverage.
+New tests are permitted only when absolutely needed to protect a concrete,
+important behavior or a confirmed regression. Before adding one, explain the
+failure it catches, why existing validation is insufficient, and its maintenance
+and execution cost. Prefer the smallest focused test. Do not add speculative
+coverage, duplicate assertions, trivial implementation-detail tests, or expensive
+full-application tests by default. Any future tests must live in a clearly named
+`tests` directory under their owning subsystem, with correct discovery wiring.
+
+Any essential fixtures must be small, synthetic or redistribution-safe, and
+free of private instance data and identifying metadata.
 
 ### Documentation and changelog
 
@@ -143,8 +136,8 @@ operational, security, licensing, compliance, and release records.
 Place disposable evidence under the ignored `output/` or `audit-output/`
 directories, or outside the checkout. Keep permanent test infrastructure separate
 from its generated results. Review links when moving or deleting documentation.
-`tools/check_local_tooling.py` checks that local instructions, browser tooling,
-and designated generated evidence remain untracked.
+`tools/check_local_tooling.py` checks that local instructions, reserved browser
+tooling paths, and designated generated evidence remain untracked.
 
 The workspace lint tables in `Cargo.toml` are the authoritative Rust/Clippy
 policy; unsafe Rust is forbidden. New workspace packages must inherit it with

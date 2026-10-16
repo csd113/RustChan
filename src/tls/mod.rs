@@ -107,7 +107,7 @@ pub(super) fn build_acceptor(cfg: &TlsConfig, data_dir: &Path) -> Result<Option<
 }
 
 // ---------------------------------------------------------------------------
-// Manual cert loader (shared by mod.rs; also called from tests)
+// Manual certificate loader
 // ---------------------------------------------------------------------------
 
 /// Load a PEM certificate chain + private key from disk and wrap them in a

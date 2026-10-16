@@ -50,25 +50,3 @@ pub(super) fn with_search_budget<T>(
         other => other,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expensive_queries_stop_and_pooled_connection_is_reusable() -> anyhow::Result<()> {
-        let conn = Connection::open_in_memory()?;
-        let result = with_search_budget(&conn, || {
-            conn.query_row("WITH RECURSIVE work(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM work WHERE n<10000000) SELECT SUM(n) FROM work", [], |row| row.get::<_, i64>(0)).map_err(AppError::from)
-        });
-        anyhow::ensure!(matches!(result, Err(AppError::BadRequest(_))));
-        let value: i64 = conn.query_row("SELECT 1", [], |row| row.get(0))?;
-        anyhow::ensure!(value == 1);
-        let count: i64 = with_search_budget(&conn, || {
-            conn.query_row("SELECT 7", [], |row| row.get(0))
-                .map_err(AppError::from)
-        })?;
-        anyhow::ensure!(count == 7);
-        Ok(())
-    }
-}

@@ -39,7 +39,7 @@ versions follow the package release version through
 Fresh installs create and verify the current structure. Recognized earlier
 baselines receive transactional compatibility repairs and are verified before
 being stamped. Unknown, partial, or corrupt schemas fail closed. Future schema
-changes require a forward migration and preservation/recovery tests. Never
+changes require a forward migration and preservation/recovery validation. Never
 manually lower the version stamp or add arbitrary objects to bypass verification.
 Legacy `chan_net_*` tables remain for database/backup compatibility; there is no
 active ChanNet service or `--chan-net` option.
@@ -111,16 +111,6 @@ together, rather than reverse-migrating the database. See
 [software updates](software-updates.md).
 
 ## Performance investigation
-
-The existing opt-in Rust workloads exercise production SQL and media ownership
-without adding a benchmark service. Run them serially and keep their output
-outside version control:
-
-```sh
-RUSTCHAN_DB_EVIDENCE=/tmp/rustchan-db-matrix.json cargo test --locked --lib db::workload::benchmark -- --ignored --exact
-RUSTCHAN_DB_QUERY_EVIDENCE=/tmp/rustchan-db-queries.json cargo test --locked --lib db::workload::query_profile -- --ignored --exact
-RUSTCHAN_DB_POST_EVIDENCE=/tmp/rustchan-db-media.json cargo test --locked --lib server::handlers::posting::performance::posting_connection_workload -- --ignored --exact
-```
 
 Measure the actual deployment's contention, queue growth, and resource use.
 Historical debug-build measurements are not capacity guarantees. Multiple

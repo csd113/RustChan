@@ -212,8 +212,8 @@ As a site owner, keep settings, secrets, databases, backups, TLS keys, and Tor i
 RustChan is written in Rust using Axum, Tokio, bundled SQLite, server-rendered templates, Rustls, and Arti. Docker is optional for development.
 
 Use Rust 1.99.0. [CONTRIBUTING.md](CONTRIBUTING.md) contains the validation commands,
-workspace lint policy, and development workflow. Browser tests run locally; their
-harness and npm files are intentionally ignored. The demonstration screenshots
+workspace lint policy, and development workflow.
+The demonstration screenshots
 in `docs/screenshots/` are published documentation.
 
 ## Documentation

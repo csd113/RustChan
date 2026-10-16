@@ -2,12 +2,9 @@
     unused_crate_dependencies,
     reason = "Cargo exposes the companion chan library and the transitive rustls-webpki security floor to this standalone binary target"
 )]
-#![cfg_attr(
-    not(test),
-    expect(
-        clippy::missing_docs_in_private_items,
-        reason = "private items are documented only when comments add rationale beyond their names and types"
-    )
+#![expect(
+    clippy::missing_docs_in_private_items,
+    reason = "private items are documented only when comments add rationale beyond their names and types"
 )]
 
 //! Single-binary `RustChan` entry point.
@@ -43,18 +40,12 @@ pub mod middleware;
 pub mod models;
 /// Durable filesystem-operation journal and recovery.
 pub mod pending_fs;
+/// Settings restart coordination and supervisor recovery.
+pub mod restart;
 /// HTTP runtime, terminal console, and administration CLI.
 pub mod server;
 /// Server-rendered HTML templates.
 pub mod templates;
-#[cfg(test)]
-/// Reusable fixtures for unit tests.
-pub mod test_fixtures;
-#[cfg(test)]
-/// Shared state and request builders for crate-local tests.
-pub(crate) use test_fixtures as test_support;
-/// Settings restart coordination and supervisor recovery.
-pub mod restart;
 /// Built-in theme metadata.
 pub mod theme;
 /// Custom theme configuration and CSS generation.

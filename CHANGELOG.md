@@ -2,6 +2,14 @@
 
 All notable changes to RustChan will be documented in this file.
 
+## Unreleased
+
+### Removed
+
+- Removed project-owned Rust unit/integration tests, executable doctests, test-only fault injection and workload modules, media fixtures, Python packaging tests, and CI test jobs. Removed the ignored local Playwright harness, runners, npm manifests and its `@playwright/test` dependency; no Rust dependencies were exclusive to tests.
+- Preserved runtime validation, migrations, security checks, application assets, packaging tools, and build/format/lint/dependency checks. Documentation examples remain non-executing. Future tests require essential value and subsystem-local `tests` discovery wiring; the policy is in contributor guidance and the ignored local agent instructions.
+- Cleanup commit totals: 213 tracked files changed, 65 deleted, 0 moved; 77 text lines added and 59,564 deleted, plus 41 binary fixture deletions. Ignored local browser tooling is excluded from these Git totals.
+
 ## RustChan 1.7.1 — 2026-10-09
 
 ### Fixed

@@ -61,9 +61,6 @@ Keep these authorization/cache boundaries when changing preview delivery in
 [`src/handlers/board/media.rs`](../src/handlers/board/media.rs).
 
 Backend routing lives in [`src/media/`](../src/media/) and
-[`src/workers/mod.rs`](../src/workers/mod.rs). Small synthetic fixtures and
-independent PCM references are maintained in
-[`tests/fixtures/media/`](../tests/fixtures/media/README.md). Preserve their
-provenance and license notices when replacing fixtures. Capability claims should
-follow source and regression coverage; successful processing of one fixture
-does not establish complete support for a format.
+[`src/workers/mod.rs`](../src/workers/mod.rs). Capability claims should
+follow the supported backend behavior; successful processing of one file
+does not establish support for every codec profile or container variant.

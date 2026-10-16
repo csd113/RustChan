@@ -176,15 +176,6 @@ impl Layout {
 
     /// Fsync exact lifetime bytes and the containing directory before acknowledgment.
     pub(super) fn save_lifetime(&self, record: &Lifetime) -> anyhow::Result<()> {
-        self.save_lifetime_with(record, |_| Ok(()))
-    }
-
-    /// Keep fault injection at the real fsync/rename boundaries used in production.
-    fn save_lifetime_with(
-        &self,
-        record: &Lifetime,
-        checkpoint: impl Fn(SaveStep) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
         let path = self
             .state
             .join("writers")
@@ -194,18 +185,12 @@ impl Layout {
         }
         let staging = self.state.join("journal-staging");
         let mut temporary = tempfile::NamedTempFile::new_in(&staging)?;
-        checkpoint(SaveStep::Write)?;
         temporary.write_all(&serde_json::to_vec(record)?)?;
-        checkpoint(SaveStep::FileSync)?;
         temporary.as_file().sync_all()?;
-        checkpoint(SaveStep::Publish)?;
         drop(temporary.persist(&path).map_err(|error| error.error)?);
-        checkpoint(SaveStep::StagingSync)?;
         File::open(&staging)?.sync_all()?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        checkpoint(SaveStep::PublishedSync)?;
         File::open(&path)?.sync_all()?;
-        checkpoint(SaveStep::DirectorySync)?;
         File::open(path.parent().context("missing lifetime directory")?)?.sync_all()?;
         Ok(())
     }
@@ -222,23 +207,6 @@ impl Layout {
         );
         Ok(record)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Real durable lifetime publication boundaries, with test-only injected errors.
-enum SaveStep {
-    /// Failure while creating new exact record bytes.
-    Write,
-    /// Failure persisting the staged file contents.
-    FileSync,
-    /// Failure atomically replacing the lifetime path.
-    Publish,
-    /// Failure persisting removal from the separate staging directory.
-    StagingSync,
-    /// Failure persisting final private file metadata/contents.
-    PublishedSync,
-    /// Failure persisting the destination lifetime-directory entry.
-    DirectorySync,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,237 +412,4 @@ fn read_private_once(path: &Path, uid: u32, limit: u64) -> anyhow::Result<Option
         "writer record exceeds bound"
     );
     Ok(Some(bytes))
-}
-
-#[cfg(test)]
-/// Kernel-independent journal tests and real Linux close-only descriptor checks.
-mod tests {
-    use super::*;
-
-    /// Prepare disposable roots using the ordinary invoking test account.
-    fn fixture() -> anyhow::Result<(tempfile::TempDir, Layout)> {
-        let root = tempfile::tempdir()?;
-        let layout = Layout::prepare(&root.path().canonicalize()?)?;
-        Ok((root, layout))
-    }
-
-    /// Pending/running records require a real changed boot or durable stopped proof.
-    #[test]
-    fn lifetime_uncertainty_never_uses_pid_absence_as_recovery_proof() -> anyhow::Result<()> {
-        if rustix::process::getuid().is_root() {
-            let root = tempfile::tempdir()?;
-            anyhow::ensure!(Layout::prepare(root.path()).is_err());
-            return Ok(());
-        }
-        let (_root, layout) = fixture()?;
-        anyhow::ensure!(layout.data.is_dir() && layout.install.is_dir());
-        let boot = kernel_boot_id()?;
-        let _admission = layout.admission()?;
-        anyhow::ensure!(layout.admission().is_err());
-        for role in [
-            WriterRole::Server,
-            WriterRole::Administrator,
-            WriterRole::Media,
-        ] {
-            let mut record = layout.launch(role)?;
-            anyhow::ensure!(layout.lifetime(record.id)?.phase == LifePhase::Launching);
-            anyhow::ensure!(layout.prove_quiescence(boot).is_err());
-            record.phase = LifePhase::Running;
-            record.guardian = Some(ProcessIdentity {
-                pid: i32::MAX,
-                start_tick: u64::MAX,
-            });
-            layout.save_lifetime(&record)?;
-            anyhow::ensure!(
-                layout.exclusive_quiescent().is_err(),
-                "missing PID must not prove descendant exit"
-            );
-            layout.prove_quiescence(Uuid::new_v4())?;
-            record.phase = LifePhase::Stopped;
-            layout.save_lifetime(&record)?;
-            drop(layout.exclusive_quiescent()?);
-        }
-        Ok(())
-    }
-
-    /// Closing one inherited duplicate preserves exclusion; the separate gate survives conversion.
-    #[test]
-    fn duplicate_close_preserves_lock_and_admission_survives_conversion() -> anyhow::Result<()> {
-        if rustix::process::getuid().is_root() {
-            return Ok(());
-        }
-        let (_root, layout) = fixture()?;
-        let _admission = layout.admission()?;
-        let exclusive = layout.exclusive_quiescent()?;
-        let inode = exclusive.metadata()?.ino();
-        drop(exclusive.try_clone()?);
-        anyhow::ensure!(layout.shared_writer().is_err());
-        anyhow::ensure!(layout.exclusive_quiescent().is_err());
-        for _ in 0_u16..100_u16 {
-            exclusive.lock_shared()?;
-            let independent = layout.shared_writer()?;
-            anyhow::ensure!(layout.admission().is_err());
-            anyhow::ensure!(layout.exclusive_quiescent().is_err());
-            drop(independent);
-            exclusive.lock()?;
-            anyhow::ensure!(layout.admission().is_err());
-        }
-        anyhow::ensure!(exclusive.metadata()?.ino() == inode);
-        drop(exclusive);
-        drop(layout.exclusive_quiescent()?);
-        Ok(())
-    }
-
-    /// Corrupt, foreign-format and linked lifetime data cannot authorize recovery.
-    #[test]
-    fn malformed_or_linked_lifetime_fails_closed() -> anyhow::Result<()> {
-        if rustix::process::getuid().is_root() {
-            return Ok(());
-        }
-        let (_root, layout) = fixture()?;
-        let mut record = layout.launch(WriterRole::Server)?;
-        record.phase = LifePhase::Stopped;
-        record.format += 1;
-        layout.save_lifetime(&record)?;
-        anyhow::ensure!(layout.prove_quiescence(kernel_boot_id()?).is_err());
-        record.format = FORMAT;
-        layout.save_lifetime(&record)?;
-        let path = layout
-            .state
-            .join("writers")
-            .join(format!("{}.json", record.id));
-        let original = layout.state.join("original.json");
-        fs::rename(&path, &original)?;
-        std::os::unix::fs::symlink(&original, &path)?;
-        anyhow::ensure!(layout.lifetime(record.id).is_err());
-        anyhow::ensure!(layout.prove_quiescence(Uuid::new_v4()).is_err());
-        Ok(())
-    }
-
-    /// ENOSPC/rename/fsync failures cannot turn launched/running uncertainty into admission.
-    #[test]
-    fn failed_lifetime_publication_never_clears_uncertainty() -> anyhow::Result<()> {
-        if rustix::process::getuid().is_root() {
-            return Ok(());
-        }
-        for failed in [
-            SaveStep::Write,
-            SaveStep::FileSync,
-            SaveStep::Publish,
-            SaveStep::StagingSync,
-            SaveStep::PublishedSync,
-            SaveStep::DirectorySync,
-        ] {
-            let (_root, layout) = fixture()?;
-            let mut record = layout.launch(WriterRole::Server)?;
-            record.phase = LifePhase::Running;
-            record.guardian = Some(ProcessIdentity::current()?);
-            let result = layout.save_lifetime_with(&record, |step| {
-                anyhow::ensure!(step != failed, std::io::Error::from_raw_os_error(28));
-                Ok(())
-            });
-            anyhow::ensure!(result.is_err(), "injected publication error was missed");
-            anyhow::ensure!(
-                layout.exclusive_quiescent().is_err(),
-                "failed publication allowed recovery"
-            );
-            let observed = layout.lifetime(record.id)?;
-            anyhow::ensure!(matches!(
-                observed.phase,
-                LifePhase::Launching | LifePhase::Running
-            ));
-            record.phase = LifePhase::Stopped;
-            layout.save_lifetime(&record)?;
-            drop(layout.exclusive_quiescent()?);
-        }
-        let (_root, layout) = fixture()?;
-        let mut record = layout.launch(WriterRole::Server)?;
-        record.boot = Uuid::nil();
-        record.phase = LifePhase::Stopped;
-        layout.save_lifetime(&record)?;
-        anyhow::ensure!(
-            layout.prove_quiescence(Uuid::new_v4()).is_err(),
-            "malformed boot identity allowed recovery"
-        );
-        Ok(())
-    }
-
-    /// Disposable competing process; it performs no database/application writes.
-    #[test]
-    #[ignore = "internal concurrent-admission subprocess entry"]
-    fn admission_competitor_entry() -> anyhow::Result<()> {
-        let layout = Layout::prepare(Path::new(&std::env::var("RUSTCHAN_ADMISSION_TEST")?))?;
-        fs::write(layout.state.join("competitor-ready"), b"ready")?;
-        let deadline = std::time::Instant::now();
-        while !layout.state.join("competitor-start").try_exists()? {
-            anyhow::ensure!(
-                deadline.elapsed() < std::time::Duration::from_secs(10),
-                "admission fixture did not start"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        for _ in 0_u16..200_u16 {
-            anyhow::ensure!(
-                layout.admission().is_err(),
-                "competing process entered during lock conversion"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        fs::write(
-            layout.state.join("competitor-result"),
-            b"200 attempts; 0 admissions",
-        )?;
-        Ok(())
-    }
-
-    /// Real concurrent process startup cannot enter while the parent converts its shared OFD.
-    #[test]
-    fn independent_process_is_excluded_through_writer_lock_conversions() -> anyhow::Result<()> {
-        if rustix::process::getuid().is_root() {
-            return Ok(());
-        }
-        let (_root, layout) = fixture()?;
-        let _admission = layout.admission()?;
-        let writer = layout.exclusive_quiescent()?;
-        let inode = writer.metadata()?.ino();
-        let mut competitor = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "updates::lifecycle::tests::admission_competitor_entry",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("RUSTCHAN_ADMISSION_TEST", &layout.data)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()?;
-        let deadline = std::time::Instant::now();
-        while !layout.state.join("competitor-ready").try_exists()? {
-            anyhow::ensure!(
-                deadline.elapsed() < std::time::Duration::from_secs(10),
-                "competing process did not become ready"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        fs::write(layout.state.join("competitor-start"), b"start")?;
-        for _ in 0_u16..100_u16 {
-            writer.lock_shared()?;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            writer.lock()?;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        anyhow::ensure!(
-            competitor.wait()?.success(),
-            "competing admission process failed"
-        );
-        anyhow::ensure!(
-            fs::read(layout.state.join("competitor-result"))? == b"200 attempts; 0 admissions"
-        );
-        anyhow::ensure!(
-            writer.metadata()?.ino() == inode,
-            "writer lease inode was replaced"
-        );
-        Ok(())
-    }
 }

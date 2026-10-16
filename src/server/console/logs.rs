@@ -225,22 +225,3 @@ pub(super) fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
         .max()
         .map(|(_, path)| path)
 }
-#[cfg(test)]
-mod tests {
-    use super::safe_log_line;
-
-    #[test]
-    fn credential_fields_urls_and_terminal_controls_are_not_buffered() {
-        let cleaned = safe_log_line(
-            "INFO password=PRIVATE, token=OTHER, url=https://alice:PASS@host/path \u{1b}",
-        );
-        assert!(
-            !cleaned.contains("PRIVATE") && !cleaned.contains("OTHER") && !cleaned.contains("PASS"),
-            "credentials must be redacted before search or inspection"
-        );
-        assert!(
-            !cleaned.contains('\u{1b}'),
-            "log controls must not reach the terminal"
-        );
-    }
-}

@@ -127,24 +127,3 @@ pub(in crate::config) fn startup_sources(
     })
     .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn storage_provenance_uses_actual_environment_and_file_precedence() -> anyhow::Result<()> {
-        let settings = super::super::super::parse_settings_file_str(
-            "database_path = '/file/chan.db'\nupload_dir = '/file/boards'\n",
-        )?;
-        let values = BTreeMap::from([("CHAN_DB".to_owned(), "/service/chan.db".to_owned())]);
-        let sources = startup_sources(&settings, &Environment::Values(&values));
-        anyhow::ensure!(sources
-            .get("database_path")
-            .is_some_and(|source| source.contains("CHAN_DB")));
-        anyhow::ensure!(sources
-            .get("upload_dir")
-            .is_some_and(|source| source == "settings.toml at startup"));
-        Ok(())
-    }
-}

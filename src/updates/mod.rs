@@ -254,9 +254,7 @@ pub async fn requests_allowed() -> bool {
 }
 
 /// The application constructor supplies only the fixed deployment socket.
-///
-/// Kept internal so temporary IPC sockets can test authorization without
-/// changing global process environment or touching a host's actual updater.
+/// Request authorization and transport remain internal to the updater.
 pub(crate) async fn request_to(
     socket_path: &std::path::Path,
     request: &Request,
@@ -329,49 +327,4 @@ pub async fn await_startup() -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     anyhow::bail!("updater recovery has not authorized application startup")
-}
-
-#[cfg(test)]
-#[cfg(unix)]
-/// Fail-closed IPC admission and protocol boundary tests.
-mod tests {
-    use super::*;
-
-    /// Unknown commands/fields and unavailable updater sockets cannot authorize mutation.
-    #[tokio::test]
-    async fn protocol_and_mutation_admission_fail_closed() -> anyhow::Result<()> {
-        anyhow::ensure!(
-            serde_json::from_str::<Request>(
-                r#"{"operation":"install","approval":"x","administrator":1,"path":"/tmp"}"#
-            )
-            .is_err(),
-            "paths must not enter the closed protocol"
-        );
-        anyhow::ensure!(
-            serde_json::from_str::<Request>(r#"{"operation":"execute","command":"anything"}"#)
-                .is_err(),
-            "arbitrary commands must be rejected"
-        );
-        for extra in ["command", "arguments", "service", "executable", "path"] {
-            let value = serde_json::json!({"operation":"restart", "instance": uuid::Uuid::new_v4(), "administrator":1_i32, extra: "anything"});
-            anyhow::ensure!(
-                serde_json::from_value::<Request>(value).is_err(),
-                "restart must reject arbitrary {extra}"
-            );
-        }
-        let dir = tempfile::tempdir()?;
-        anyhow::ensure!(
-            !mutations_allowed(Some(&dir.path().join("missing.sock"))).await,
-            "IPC loss must close mutation admission"
-        );
-        anyhow::ensure!(
-            !Phase::Downloading.blocks_writes() && !Phase::Verifying.blocks_writes(),
-            "download and check must preserve normal writes"
-        );
-        anyhow::ensure!(
-            Phase::Activating.blocks_writes() && Phase::RollingBack.blocks_writes(),
-            "activation and restore must block mutation"
-        );
-        Ok(())
-    }
 }

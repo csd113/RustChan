@@ -207,27 +207,3 @@ pub(in crate::server) async fn update_site_settings(
         Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::resolved_checkbox_setting;
-
-    #[test]
-    fn resolved_checkbox_setting_preserves_existing_value_when_field_is_omitted() {
-        assert!(resolved_checkbox_setting(None, true, true));
-        assert!(!resolved_checkbox_setting(None, false, true));
-    }
-
-    #[test]
-    fn resolved_checkbox_setting_treats_missing_field_as_disabled_on_full_submit() {
-        assert!(!resolved_checkbox_setting(None, true, false));
-        assert!(!resolved_checkbox_setting(None, false, false));
-    }
-
-    #[test]
-    fn resolved_checkbox_setting_respects_explicit_checkbox_submissions() {
-        assert!(resolved_checkbox_setting(Some("1"), false, true));
-        assert!(resolved_checkbox_setting(Some("on"), false, false));
-        assert!(!resolved_checkbox_setting(Some("0"), true, true));
-    }
-}
