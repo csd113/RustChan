@@ -12,6 +12,7 @@ All notable changes to RustChan will be documented in this file.
 
 ### Improved
 
+- Enabled manual CI validation and added a native Linux x86_64 build alongside the existing ARM64, Apple Silicon, and Windows builds.
 - Updated the supported Rust toolchain, CI and container builds to Rust 1.99.1.
 - Updated direct dependencies and refreshed the dependency lockfile, including Hayro 0.8 and ZIP 9. Preserved bounded PDF preview dimensions and propagated ZIP filename decoding errors with the updated APIs. Arti remains on 0.47.0.
 

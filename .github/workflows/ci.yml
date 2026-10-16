@@ -6,6 +6,7 @@ on:
   push:
     branches: [main, master]
   merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -76,6 +77,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
           - name: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
