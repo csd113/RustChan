@@ -42,9 +42,14 @@ pub mod admin;
 mod backup_storage;
 /// Additional bounded operator policies.
 pub mod operator;
+/// Cross-process settings coordination and atomic replacement.
+mod persistence;
 /// Settings-file template rendering.
 mod template;
 pub use backup_storage::{prepare_backup_directory, update_settings_file_backup_directory};
+#[cfg(unix)]
+pub(crate) use persistence::SettingsLease;
+pub(crate) use persistence::{atomic_replace, settings_lease};
 
 /// Explicit process-wide data-directory override.
 static DATA_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
