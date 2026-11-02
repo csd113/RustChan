@@ -17,11 +17,13 @@ pub mod boards;
 mod diagnostics;
 /// Durable filesystem-operation records.
 mod fs_ops;
+/// Durable background-job persistence.
+mod jobs;
 /// Database schema-version bookkeeping.
 mod migrations;
 /// `SQLite` connection-pool creation and startup checks.
 mod pool;
-/// Post persistence, search, deletion, and background-job state.
+/// Post persistence, search, deletion, polling, and media state.
 pub mod posts;
 /// Baseline schema installation, repair, and verification.
 mod schema;
@@ -46,6 +48,15 @@ pub use admin::*;
 pub use banners::*;
 pub use boards::*;
 pub use fs_ops::*;
+pub use jobs::{
+    acknowledge_failed_background_jobs, background_job_summary, claim_next_job, complete_job,
+    complete_media_job_without_output_in_tx, complete_stale_media_job_in_tx, enqueue_job, fail_job,
+    fail_media_job_in_tx, finish_video_media_job_in_tx, finish_waveform_media_job_in_tx,
+    pending_job_count, persist_media_job, persist_thread_prune_intent, recent_background_jobs,
+    recover_interrupted_background_jobs, reject_media_job_at_capacity, BackgroundJobSummary,
+    InterruptedJobRecovery, JobFailureState, MediaJobFinish, MediaJobSchedule, RecentBackgroundJob,
+    ThreadPruneSchedule,
+};
 pub use posts::*;
 pub use setup::*;
 pub use themes::*;
