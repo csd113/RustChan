@@ -822,32 +822,8 @@ async fn run_server_lifecycle(
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
         let data_access = state.data_access.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_hours(1));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let purge_pool = bg.clone();
-                        let Some(access) = data_access.try_read() else { continue; };
-                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-                            let _access = access;
-                            let conn = purge_pool.get()?;
-                            crate::db::purge_expired_sessions(&conn)
-                        }).await;
-                        match result {
-                            Ok(Ok(n)) if n > 0 => tracing::info!(target: "sessions", purged = n, "Expired sessions purged"),
-                            Ok(Ok(_)) => {},
-                            Ok(Err(error)) => tracing::error!(error = %error, "Session purge error"),
-                            Err(error) => tracing::error!(error = %error, "Session purge blocking task failed"),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Session purge task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_session_purge(bg, cancel_clone, data_access));
     }
 
     // Background: WAL checkpoint — prevent WAL files growing unbounded.
@@ -912,23 +888,8 @@ async fn run_server_lifecycle(
     // Background: prune stale IPs from ACTIVE_IPS every 5 min
     {
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_mins(5));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let cutoff = Instant::now()
-                            .checked_sub(Duration::from_mins(5))
-                            .unwrap_or_else(Instant::now);
-                        ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Active IP prune task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_active_ip_prune(cancel_clone));
     }
 
     // Background: prune expired entries from ADMIN_LOGIN_FAILS every 5 min.
@@ -937,20 +898,8 @@ async fn run_server_lifecycle(
     // opportunistic prune path inside clear_login_fails).
     {
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_mins(5));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        crate::handlers::admin::prune_login_fails();
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Login fail prune task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_login_fail_prune(cancel_clone));
     }
 
     // Scheduled VACUUM reclaims disk space from deleted posts

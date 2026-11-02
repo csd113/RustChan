@@ -1,14 +1,15 @@
 //! Concrete background tasks owned and drained by the parent server lifecycle.
 
 use std::sync::{atomic::Ordering, Arc};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::DbPool;
 use crate::middleware::{data_access::DataAccess, AppState};
 
 use super::{
-    configured_timer_interval, should_run_background_maintenance, ACTIVE_UPLOADS, IN_FLIGHT,
+    configured_timer_interval, should_run_background_maintenance, ACTIVE_IPS, ACTIVE_UPLOADS,
+    IN_FLIGHT,
 };
 
 /// Initial retry delay for a failed scheduled full backup.
@@ -159,6 +160,73 @@ pub(super) async fn run_scheduled_full_backups(
             }
             () = cancel_clone.cancelled() => {
                 tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Scheduled full-backup task shutting down");
+                return;
+            }
+        }
+    }
+}
+
+/// Purge expired sessions hourly while retaining shared admission in blocking work.
+pub(super) async fn run_session_purge(
+    bg: DbPool,
+    cancel_clone: CancellationToken,
+    data_access: DataAccess,
+) {
+    let mut iv = tokio::time::interval(Duration::from_hours(1));
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                let purge_pool = bg.clone();
+                let Some(access) = data_access.try_read() else { continue; };
+                let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+                    let _access = access;
+                    let conn = purge_pool.get()?;
+                    crate::db::purge_expired_sessions(&conn)
+                }).await;
+                match result {
+                    Ok(Ok(n)) if n > 0 => tracing::info!(target: "sessions", purged = n, "Expired sessions purged"),
+                    Ok(Ok(_)) => {},
+                    Ok(Err(error)) => tracing::error!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), error = %error, "Session purge error"),
+                    Err(error) => tracing::error!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), error = %error, "Session purge blocking task failed"),
+                }
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Session purge task shutting down");
+                return;
+            }
+        }
+    }
+}
+
+/// Prune stale entries from the parent server's shared active-IP map.
+pub(super) async fn run_active_ip_prune(cancel_clone: CancellationToken) {
+    let mut iv = tokio::time::interval(Duration::from_mins(5));
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                let cutoff = Instant::now()
+                    .checked_sub(Duration::from_mins(5))
+                    .unwrap_or_else(Instant::now);
+                ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Active IP prune task shutting down");
+                return;
+            }
+        }
+    }
+}
+
+/// Run the existing administrator login-failure pruning policy every five minutes.
+pub(super) async fn run_login_fail_prune(cancel_clone: CancellationToken) {
+    let mut iv = tokio::time::interval(Duration::from_mins(5));
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                crate::handlers::admin::prune_login_fails();
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Login fail prune task shutting down");
                 return;
             }
         }
