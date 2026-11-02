@@ -444,56 +444,9 @@ pub struct AdminPanelFlash<'a> {
     pub message: &'a str,
 }
 
-/// Renders backup creation and restore actions for one board.
-fn render_board_backup_actions(board: &Board, csrf_token: &str) -> String {
-    format!(
-        r#"<div class="board-card-footer-actions">
-  <form method="POST" action="/admin/board/backup/create" class="board-backup-download-form" data-board="{short}">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="board_short" value="{short}">
-    <input type="hidden" name="download_after_create" value="1">
-    <button type="submit">&#8659; download /{short}/ backup</button>
-  </form>
-  <form method="POST" action="/admin/board/backup/create" class="board-backup-create-form" data-board="{short}">
-    <input type="hidden" name="_csrf" value="{csrf}">
-    <input type="hidden" name="board_short" value="{short}">
-    <button type="submit">&#128190; save /{short}/ backup to server</button>
-  </form>
-</div>"#,
-        short = escape_html(&board.short_name),
-        csrf = escape_html(csrf_token),
-    )
-}
-
 /// Builds the settings form id shared by the board settings and appearance cards.
 fn board_settings_form_id(board_id: i64) -> String {
     format!("board-settings-form-{board_id}")
-}
-
-/// Renders the backup tools card for one board.
-fn render_board_backup_card(board: &Board, csrf_token: &str, open_section: Option<&str>) -> String {
-    let backup_section = format!("board-backup-{}", board.short_name);
-    let open_attr = if open_section.is_some_and(|section| section == backup_section) {
-        " open"
-    } else {
-        ""
-    };
-    format!(
-        r#"<details class="board-settings-card" id="board-backup-{short}"{open_attr}>
-<summary>/{short}/ — {name}</summary>
-<div class="admin-subsection">
-  <div class="admin-card-header board-card-edge-header">
-    <h3>// board backup tools</h3>
-    <p>Create a fresh board-only package for immediate download or save one to the server for later restores.</p>
-  </div>
-  {board_backup_actions}
-</div>
-</details>"#,
-        short = escape_html(&board.short_name),
-        name = escape_html(&board.name),
-        open_attr = open_attr,
-        board_backup_actions = render_board_backup_actions(board, csrf_token),
-    )
 }
 
 #[must_use]
