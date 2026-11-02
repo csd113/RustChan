@@ -232,3 +232,134 @@ pub(super) async fn run_login_fail_prune(cancel_clone: CancellationToken) {
         }
     }
 }
+
+/// Run staggered WAL checkpoint and planner maintenance on one pooled connection.
+pub(super) async fn run_wal_maintenance(
+    bg: DbPool,
+    maintenance_state: AppState,
+    wal_interval: Duration,
+    interval_secs: u64,
+    cancel_clone: CancellationToken,
+    data_access: DataAccess,
+) {
+    // Stagger the first run by half the interval so it doesn't fire
+    // immediately at startup alongside the session purge.
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_secs((interval_secs / 2).saturating_add(1))) => {}
+        () = cancel_clone.cancelled() => { return; }
+    }
+    let mut iv = tokio::time::interval(wal_interval);
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                if !should_run_background_maintenance(&maintenance_state, 3) {
+                    tracing::debug!(
+                        target: "db",
+                        in_flight = IN_FLIGHT.load(Ordering::Relaxed),
+                        active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
+                        maintenance_active = maintenance_state.maintenance_gate.is_active(),
+                        "Skipping WAL checkpoint while server is busy"
+                    );
+                    continue;
+                }
+                let checkpoint_pool = bg.clone();
+                let Some(access) = data_access.try_read() else { continue; };
+                let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let _access = access;
+                    let conn = checkpoint_pool.get()?;
+                    let (log_pages, checkpointed_pages, busy) = crate::db::run_wal_checkpoint(&conn)?;
+                    tracing::debug!(target: "db", log_pages, checkpointed_pages, busy,
+                        "WAL checkpoint completed");
+                    // Reuse the connection so a one-connection pool cannot
+                    // deadlock on a nested checkout. Both operations can
+                    // wait for SQLite and must stay off async workers.
+                    conn.execute_batch("PRAGMA optimize;")?;
+                    Ok(())
+                }).await;
+                match result {
+                    Ok(Ok(())) => {},
+                    Ok(Err(error)) => tracing::warn!(target: "db", error = %error, "WAL checkpoint or planner maintenance failed"),
+                    Err(error) => tracing::warn!(target: "db", error = %error, "WAL maintenance blocking task failed"),
+                }
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "WAL checkpoint task shutting down");
+                return;
+            }
+        }
+    }
+}
+
+/// Run staggered scheduled VACUUM while retaining its separate maintenance guard.
+pub(super) async fn run_scheduled_vacuum(
+    bg: DbPool,
+    maintenance_state: AppState,
+    vacuum_interval: Duration,
+    interval_secs: u64,
+    cancel_clone: CancellationToken,
+    data_access: DataAccess,
+) {
+    // Stagger the first run by half the interval to avoid hammering the
+    // DB immediately at startup alongside WAL checkpoint and session purge.
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_secs((interval_secs / 2).saturating_add(7))) => {}
+        () = cancel_clone.cancelled() => { return; }
+    }
+    let mut iv = tokio::time::interval(vacuum_interval);
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                if !should_run_background_maintenance(&maintenance_state, 0) {
+                    tracing::info!(
+                        target: "db",
+                        in_flight = IN_FLIGHT.load(Ordering::Relaxed),
+                        active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
+                        maintenance_active = maintenance_state.maintenance_gate.is_active(),
+                        "Skipping scheduled VACUUM because the server is busy"
+                    );
+                    continue;
+                }
+                let Ok(maintenance_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled VACUUM") else {
+                    tracing::debug!(target: "db", "Skipping scheduled VACUUM because maintenance is already running");
+                    continue;
+                };
+                let bg2 = bg.clone();
+                let Some(access) = data_access.try_read() else { continue; };
+                let task_result = tokio::task::spawn_blocking(move || {
+                    let access_guard = access;
+                    let _maintenance_guard = maintenance_guard;
+                    if let Ok(conn) = bg2.get() {
+                        let before = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
+                        match crate::db::run_vacuum(&conn) {
+                            Ok(()) => {
+                                let after = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
+                                let saved = before.saturating_sub(after);
+                                tracing::info!(
+                                    target: "db",
+                                    before_bytes = before,
+                                    after_bytes  = after,
+                                    saved_bytes  = saved,
+                                    "VACUUM complete"
+                                );
+                            }
+                            Err(e) => tracing::warn!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Scheduled VACUUM failed: {e}"),
+                        }
+                    }
+                    drop(access_guard);
+                })
+                .await;
+                if let Err(error) = task_result {
+                    tracing::warn!(
+                        target: "db",
+                        error = %error,
+                        "Scheduled VACUUM blocking task failed"
+                    );
+                }
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "VACUUM task shutting down");
+                return;
+            }
+        }
+    }
+}
