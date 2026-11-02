@@ -1,6 +1,11 @@
 //! Report, appeal, ban, and word-filter sections of the admin panel.
 
-use super::{escape_html, fmt_ts, AdminPanelViewModel};
+use super::{
+    base_layout, escape_html, fmt_ts, fmt_ts_short, render_pagination, urlencoding_simple,
+    AdminPanelViewModel,
+};
+use crate::models::Board;
+use std::collections::BTreeSet;
 
 /// Renders the complete moderation tab of the admin panel.
 pub(super) fn render(view: &AdminPanelViewModel<'_>) -> String {
@@ -346,5 +351,350 @@ fn render_admin_moderation_section(
         ban_badge = ban_badge,
         filter_badge = filter_badge,
         moderation_summary_counter = escape_html(moderation_summary_counter),
+    )
+}
+
+// Moderation log
+#[must_use]
+/// Renders the paginated moderation log.
+pub fn mod_log_page(
+    entries: &[crate::models::ModLogEntry],
+    pagination: &crate::models::Pagination,
+    csrf_token: &str,
+    boards: &[Board],
+    current_theme: Option<&str>,
+) -> String {
+    let mut rows = String::new();
+    if entries.is_empty() {
+        rows.push_str(r#"<tr><td colspan="6" class="admin-table-empty">no entries yet</td></tr>"#);
+    }
+    for e in entries {
+        let target = e.target_id.map_or_else(
+            || e.target_type.clone(),
+            |id| format!("{} #{id}", e.target_type),
+        );
+        let board_link = if e.board_short.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<a href="/{s}">{s}</a>"#, s = escape_html(&e.board_short))
+        };
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                r#"<tr>
+<td style="white-space:nowrap;font-size:0.78rem">{time}</td>
+<td class="admin-log-user">{admin}</td>
+<td><code>{action}</code></td>
+<td style="font-size:0.82rem">{target}</td>
+<td>{board}</td>
+<td><details class="admin-log-detail"><summary>View detail</summary><p>{detail}</p></details></td>
+</tr>"#,
+                time = escape_html(&fmt_ts(e.created_at)),
+                admin = escape_html(&e.admin_name),
+                action = escape_html(&e.action),
+                target = escape_html(&target),
+                board = board_link,
+                detail = escape_html(&e.detail)
+            ),
+        );
+    }
+
+    let pagination_html = render_pagination(pagination, "/admin/mod-log");
+
+    let body = format!(
+        r#"<div class="page-box admin-detail-page">
+<div class="board-header">
+  <a href="/admin/panel">[ back to panel ]</a>
+  <h2 style="margin:0.5rem 0 0.25rem">// moderation log</h2>
+  <p style="color:var(--text-dim);font-size:0.82rem">{total} total entries</p>
+</div>
+<div class="admin-table-wrap" tabindex="0" role="region" aria-label="Moderation log">
+<table class="admin-table admin-log-table">
+<thead><tr>
+  <th>time</th><th>admin</th><th>action</th><th>target</th><th>board</th><th>detail</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</div>
+{pagination}
+</div>"#,
+        total = pagination.total,
+        rows = rows,
+        pagination = pagination_html,
+    );
+
+    base_layout(
+        "mod log — admin",
+        None,
+        &body,
+        csrf_token,
+        boards,
+        current_theme,
+        None,
+        false,
+        "/admin/log",
+    )
+}
+
+// IP history
+#[expect(
+    clippy::too_many_lines,
+    reason = "the investigation page keeps its summary, results, and controls together"
+)]
+#[must_use]
+/// Renders posts and identity hints associated with a hashed IP.
+pub fn admin_ip_history_page(
+    ip_hash: &str,
+    posts_with_boards: &[(crate::models::Post, String)],
+    pagination: &crate::models::Pagination,
+    all_boards: &[Board],
+    csrf_token: &str,
+    return_to: Option<&str>,
+    current_theme: Option<&str>,
+) -> String {
+    use crate::models::MediaType;
+
+    let mut rows = String::new();
+    let mut seen_names = BTreeSet::new();
+    let mut seen_tripcodes = BTreeSet::new();
+
+    for (post, _) in posts_with_boards {
+        let name = post.name.trim();
+        if !name.is_empty() && name != "Anonymous" {
+            let _was_new_name = seen_names.insert(name.to_owned());
+        }
+
+        if let Some(tripcode) = post
+            .tripcode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let _was_new_tripcode = seen_tripcodes.insert(tripcode.to_owned());
+        }
+    }
+
+    if posts_with_boards.is_empty() {
+        rows.push_str(r#"<tr><td colspan="8" style="color:var(--text-dim);text-align:center">no posts found for this hashed IP</td></tr>"#);
+    }
+
+    for (post, board_short) in posts_with_boards {
+        let media_badge = match &post.media_type {
+            Some(MediaType::Image) => r#"<span style="color:var(--green-bright)">[img]</span>"#,
+            Some(MediaType::Video) => r#"<span style="color:var(--text-dim)">[vid]</span>"#,
+            Some(MediaType::Audio) => r#"<span style="color:var(--text-dim)">[aud]</span>"#,
+            Some(MediaType::Pdf) => r#"<span style="color:var(--text-dim)">[pdf]</span>"#,
+            Some(MediaType::Other) => r#"<span style="color:var(--text-dim)">[file]</span>"#,
+            None => "",
+        };
+        let thread_link = format!(
+            r#"<a class="quotelink crosslink" href="/{board}/thread/{tid}#p{pid}" data-crossboard="{board}" data-pid="{pid}" title="hover to preview">/{board}/ No.{pid}</a>"#,
+            board = escape_html(board_short),
+            tid = post.thread_id,
+            pid = post.id,
+        );
+        let op_badge = if post.is_op {
+            r#" <span style="color:var(--green-bright);font-size:0.75rem">OP</span>"#
+        } else {
+            ""
+        };
+        let body_preview: String = post.body.chars().take(120).collect();
+        // test character count, not byte count.  post.body.len()
+        // measures UTF-8 bytes so multi-byte characters (emoji, CJK, …) can
+        // cause the ellipsis to be added even when nothing was truncated, or
+        // omitted even when content was.
+        let body_preview = if post.body.chars().count() > 120 {
+            format!("{}…", escape_html(&body_preview))
+        } else {
+            escape_html(&body_preview)
+        };
+        let name_html = {
+            let name = post.name.trim();
+            if name.is_empty() || name == "Anonymous" {
+                String::from("&mdash;")
+            } else {
+                escape_html(name)
+            }
+        };
+        let tripcode_html = post
+            .tripcode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| String::from("&mdash;"), escape_html);
+
+        let del_form = format!(
+            r#"<form method="POST" action="/admin/post/delete" style="display:inline">
+<input type="hidden" name="_csrf"   value="{csrf}">
+<input type="hidden" name="post_id" value="{pid}">
+<input type="hidden" name="board"   value="{board}">
+<button type="submit" class="admin-del-btn"
+        data-confirm="Admin delete post No.{pid}?">&#x2715;</button>
+</form>"#,
+            csrf = escape_html(csrf_token),
+            pid = post.id,
+            board = escape_html(board_short),
+        );
+        let report_form = post
+            .ip_hash
+            .as_deref()
+            .map_or_else(String::new, |post_ip_hash| {
+                format!(
+                    r#"<button type="button" class="admin-toolbar-btn" data-action="open-report"
+        data-pid="{pid}" data-tid="{tid}" data-board="{board}" data-csrf="{csrf}"
+        data-report-action="/admin/ip/report" data-report-ip-hash="{ip_hash}"
+        data-report-title="Report Hashed IP Post"
+        data-report-submit-label="Submit Admin Report"
+        data-report-reason-required="1"
+        data-report-label="Report post No.{pid} for hashed IP {ip_hash}">report</button>
+<noscript><form method="POST" action="/admin/ip/report" class="admin-ip-report-fallback">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <input type="hidden" name="post_id" value="{pid}">
+  <input type="hidden" name="thread_id" value="{tid}">
+  <input type="hidden" name="board" value="{board}">
+  <input type="hidden" name="ip_hash" value="{ip_hash}">
+  <label>Report reason<input type="text" name="reason" required maxlength="512"></label>
+  <button type="submit" class="admin-toolbar-btn">report</button>
+</form></noscript>"#,
+                    csrf = escape_html(csrf_token),
+                    pid = post.id,
+                    tid = post.thread_id,
+                    board = escape_html(board_short),
+                    ip_hash = escape_html(post_ip_hash),
+                )
+            });
+
+        crate::templates::append_html(
+            &mut rows,
+            format_args!(
+                r#"<tr>
+<td style="white-space:nowrap;font-size:0.8rem">{time}</td>
+<td>{link}{op}</td>
+<td style="font-size:0.8rem">{name}</td>
+<td style="font-size:0.8rem">{tripcode}</td>
+<td style="font-size:0.8rem">{media}</td>
+<td style="max-width:480px;word-break:break-word;font-size:0.85rem">{body}</td>
+<td>{report}</td>
+<td>{del}</td>
+</tr>"#,
+                time = fmt_ts_short(post.created_at),
+                link = thread_link,
+                op = op_badge,
+                name = name_html,
+                tripcode = tripcode_html,
+                media = media_badge,
+                body = body_preview,
+                report = report_form,
+                del = del_form
+            ),
+        );
+    }
+
+    let identity_summary = {
+        let mut parts = Vec::new();
+        if !seen_names.is_empty() {
+            parts.push(format!(
+                "names: {}",
+                seen_names
+                    .iter()
+                    .map(|name| format!(r"<code>{}</code>", escape_html(name)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !seen_tripcodes.is_empty() {
+            parts.push(format!(
+                "tripcodes: {}",
+                seen_tripcodes
+                    .iter()
+                    .map(|tripcode| format!(r"<code>{}</code>", escape_html(tripcode)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if parts.is_empty() {
+            String::from(
+                r#"<span style="color:var(--text-dim)">no alternate names or tripcodes found on these posts.</span>"#,
+            )
+        } else {
+            format!(
+                r#"<span style="color:var(--text-dim)">{}</span>"#,
+                parts.join(" | ")
+            )
+        }
+    };
+
+    let mut pag_base = format!("/admin/ip/{}", escape_html(ip_hash));
+    if let Some(return_to) = return_to.filter(|value| !value.is_empty()) {
+        let sep = if pag_base.contains('?') { "&" } else { "?" };
+        crate::templates::append_html(
+            &mut pag_base,
+            format_args!("{sep}return_to={}", urlencoding_simple(return_to)),
+        );
+    }
+    let pag_html = render_pagination(pagination, &pag_base);
+
+    let return_buttons = return_to.filter(|value| !value.is_empty()).map_or_else(
+        || String::from(r#"<a class="admin-toolbar-btn" href="/admin/panel">Go to admin pannel</a>"#),
+        |return_to| {
+            format!(
+                r#"<a class="admin-toolbar-btn" href="{thread}">Back to thread</a> <a class="admin-toolbar-btn" href="/admin/panel">Go to admin pannel</a>"#,
+                thread = escape_html(return_to)
+            )
+        },
+    );
+
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ IP history ]</h1>
+<section class="admin-section">
+<h2>// posts by Hashed IP <code style="font-size:0.9rem;overflow-wrap:anywhere">{hash_display}</code></h2>
+<p style="color:var(--text-dim);font-size:0.85rem">
+  {total} post{plural} found across all boards.
+</p>
+<p style="color:var(--text-dim);font-size:0.82rem">{identity_summary}</p>
+<p style="margin:0.35rem 0 1rem 0">{return_buttons}</p>
+<div class="admin-table-wrap" tabindex="0" role="region" aria-label="IP history">
+<table class="admin-table" style="width:100%">
+<thead><tr>
+  <th style="text-align:left">time</th>
+  <th style="text-align:left">post</th>
+  <th style="text-align:left">name</th>
+  <th style="text-align:left">tripcode</th>
+  <th>media</th>
+  <th style="text-align:left">body</th>
+  <th>report</th>
+  <th>del</th>
+</tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</div>
+{pagination}
+</section>
+</div>
+{report_modal}"#,
+        hash_display = escape_html(ip_hash),
+        total = pagination.total,
+        plural = if pagination.total == 1 { "" } else { "s" },
+        rows = rows,
+        pagination = pag_html,
+        identity_summary = identity_summary,
+        return_buttons = return_buttons,
+        report_modal = super::report_modal_script(),
+    );
+
+    base_layout(
+        &format!(
+            "Hashed IP — {}",
+            ip_hash.get(..ip_hash.len().min(12)).unwrap_or(ip_hash)
+        ),
+        None,
+        &body,
+        csrf_token,
+        all_boards,
+        current_theme,
+        None,
+        false,
+        &pag_base,
     )
 }
