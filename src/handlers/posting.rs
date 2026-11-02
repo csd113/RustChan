@@ -85,6 +85,39 @@ fn existing_submission_result(
     })
 }
 
+/// Schedule best-effort spam analysis after the post commits.
+///
+/// Capacity and enqueue failures are logged without failing the committed post.
+fn enqueue_spam_check(
+    job_queue: &crate::workers::JobQueue,
+    post_id: i64,
+    ip_hash: &str,
+    body_len: usize,
+) {
+    match job_queue.enqueue(&crate::workers::Job::SpamCheck {
+        post_id,
+        ip_hash: ip_hash.to_owned(),
+        body_len,
+    }) {
+        Ok(crate::workers::EnqueueOutcome::Enqueued(_)) => {}
+        Ok(crate::workers::EnqueueOutcome::DroppedAtCapacity) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                "spam-check job rejected at capacity; post remains committed without spam analysis"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "workers",
+                post_id,
+                %error,
+                "spam-check job could not be enqueued; post remains committed without spam analysis"
+            );
+        }
+    }
+}
+
 struct UploadConfig<'a> {
     pub upload_dir: &'a str,
     pub thumb_size: u32,
@@ -932,17 +965,7 @@ pub(super) fn submit_post(
     };
 
     finalize_pending_uploads(pool, &upload_dir, &uploads);
-    if let Err(error) = crate::handlers::enqueue_post_jobs(
-        job_queue,
-        pool,
-        post_id,
-        &ip_hash,
-        body_text.len(),
-        None,
-        &board.short_name,
-    ) {
-        tracing::warn!(target: "workers", post_id, %error, "post committed; auxiliary scheduling failed");
-    }
+    enqueue_spam_check(job_queue, post_id, &ip_hash, body_text.len());
     if prune_board_id.is_some() || pending_media_board.is_some() {
         if let Err(error) = pool
             .get()

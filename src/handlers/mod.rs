@@ -19,7 +19,6 @@ pub(crate) mod thread;
 
 use crate::error::{AppError, Result};
 use crate::middleware::validate_csrf;
-use crate::workers::JobQueue;
 use axum::{
     body::Body,
     extract::{Multipart, Request},
@@ -1633,87 +1632,4 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
         }
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-/// Enqueue background media-processing and spam-check jobs for a newly created
-/// post.  Shared by `create_thread` and `post_reply`.
-pub(crate) fn enqueue_post_jobs(
-    job_queue: &JobQueue,
-    pool: &crate::db::DbPool,
-    post_id: i64,
-    ip_hash: &str,
-    body_len: usize,
-    uploaded: Option<&crate::utils::files::UploadedFile>,
-    board_short: &str,
-) -> Result<()> {
-    // 1. Media post-processing (video transcode / audio waveform)
-    if let Some(up) = uploaded {
-        if up.processing_pending {
-            let job = match up.media_type {
-                crate::models::MediaType::Video => Some(crate::workers::Job::VideoTranscode {
-                    post_id,
-                    file_path: up.file_path.clone(),
-                    board_short: board_short.to_owned(),
-                }),
-                crate::models::MediaType::Audio => Some(crate::workers::Job::AudioWaveform {
-                    post_id,
-                    file_path: up.file_path.clone(),
-                    board_short: board_short.to_owned(),
-                }),
-                crate::models::MediaType::Image
-                | crate::models::MediaType::Pdf
-                | crate::models::MediaType::Other => None,
-            };
-            if let Some(j) = job {
-                let conn = pool.get()?;
-                let enqueued = job_queue.enqueue_media(&conn, &j);
-                match enqueued {
-                    Ok(crate::workers::EnqueueOutcome::Enqueued(job_id)) => tracing::debug!(
-                        target: "workers",
-                        post_id,
-                        job_id,
-                        job_type = j.type_str(),
-                        board = board_short,
-                        "atomically scheduled post media processing"
-                    ),
-                    Ok(crate::workers::EnqueueOutcome::DroppedAtCapacity) => {
-                        tracing::warn!(
-                            target: "workers",
-                            post_id,
-                            job_type = j.type_str(),
-                            board = board_short,
-                            "media job rejected at capacity with terminal post state"
-                        );
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-    }
-
-    // 2. Spam analysis. A dropped job degrades spam coverage but must not fail
-    // the already-committed post, so record why it was not scheduled.
-    match job_queue.enqueue(&crate::workers::Job::SpamCheck {
-        post_id,
-        ip_hash: ip_hash.to_owned(),
-        body_len,
-    }) {
-        Ok(crate::workers::EnqueueOutcome::Enqueued(_)) => {}
-        Ok(crate::workers::EnqueueOutcome::DroppedAtCapacity) => {
-            tracing::warn!(
-                target: "workers",
-                post_id,
-                "spam-check job rejected at capacity; post remains committed without spam analysis"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "workers",
-                post_id,
-                %error,
-                "spam-check job could not be enqueued; post remains committed without spam analysis"
-            );
-        }
-    }
-    Ok(())
 }
