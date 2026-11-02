@@ -6,7 +6,8 @@
 //   2. All /admin/* routes → check session cookie → get session from DB → proceed
 //   3. POST /admin/logout → delete session from DB → clear cookie
 //
-// Session cookie: HTTPOnly (not readable by JS), SameSite=Strict (prevents CSRF).
+// Session cookie: HTTPOnly (not readable by JS), SameSite=Lax for top-level
+// login redirects. Same-origin and CSRF checks protect admin mutations.
 // Secure=true when CHAN_HTTPS_COOKIES=true (default: enabled for proxy or direct TLS).
 //
 // + All admin handlers now wrap DB and file I/O in

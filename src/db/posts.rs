@@ -108,9 +108,8 @@ pub struct RecentBackgroundJob {
 /// Map a full post row (25 columns, selected in the canonical order used
 /// throughout this module) into a Post struct.
 ///
-/// The expected column count is asserted here so any future change
-/// to the SELECT list that shifts column indices produces a compile-time error
-/// rather than silent data corruption at runtime.
+/// Callers must keep their SELECT lists in this order. Dynamic `row.get` calls
+/// check column indices and types at runtime, not at compile time.
 ///
 /// Column layout:
 ///   0  id            8  `ip_hash`        16 `is_op`

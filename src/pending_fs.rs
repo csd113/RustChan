@@ -82,14 +82,14 @@ pub struct BannerAssetCleanupPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Paths involved in atomically publishing a full restore.
 pub struct FullRestoreSwapPayload {
-    /// Prepared database staged for publication.
+    /// Prepared upload root staged for publication.
     pub staged: String,
-    /// Current live database path.
+    /// Current live upload-root path.
     pub live: String,
-    /// Temporary path that receives the previous live database.
+    /// Temporary path that receives the previous live upload root.
     pub previous: String,
     #[serde(default)]
-    /// Additional runtime directories swapped with the database.
+    /// Additional runtime directories swapped with the upload root.
     pub additional_swaps: Vec<RestorePathSwapPayload>,
 }
 

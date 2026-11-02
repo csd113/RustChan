@@ -12,8 +12,8 @@ use std::os::unix::fs::PermissionsExt as _;
 // Public entry point
 // ---------------------------------------------------------------------------
 /// Configure Let's Encrypt certificate provisioning via rustls-acme and
-/// return a [`tokio_rustls::TlsAcceptor`] that will serve valid certificates once the ACME
-/// challenge has completed.
+/// return a shared [`AcmeAcceptor`] and [`ServerConfig`] for serving valid
+/// certificates once the ACME challenge has completed.
 ///
 /// A background task is spawned to run the ACME event loop, which handles:
 /// - Initial certificate issuance

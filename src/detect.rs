@@ -488,13 +488,11 @@ async fn run_arti(
 }
 
 // Onion address publication
-/// Log the active onion address, write it to the shared state, and print the
-/// TTY banner. Extracted from `run_arti` to keep that function under the
-/// clippy line-count limit.
+/// Announce service activation, write the onion address to shared state, and
+/// print the TTY banner when the full-screen TUI is inactive.
 ///
-/// plaintext in JSON log files forwarded to aggregators. Set
-/// `RUST_LOG=detect=debug` to see it in logs; the TTY banner and admin panel
-/// always show the full address.
+/// Activation logs omit the address at every level. The terminal dashboard,
+/// eligible TTY banner and admin panel display the full address from shared state.
 async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<String>>) {
     tracing::debug!(target: "rustchan::detect", "Tor: hidden service active");
     tracing::info!(target: "rustchan::detect", "Tor: hidden service active");

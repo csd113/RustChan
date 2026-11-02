@@ -33,7 +33,7 @@ pub fn ensure_pending_fs_ops_table(conn: &rusqlite::Connection) -> Result<()> {
     super::schema::ensure_pending_fs_op_invariants(conn)
 }
 
-/// Insert or replace a durable pending filesystem operation.
+/// Insert a new durable pending filesystem operation.
 ///
 /// # Errors
 /// Returns an error if the pending operation table cannot be prepared or the

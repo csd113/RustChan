@@ -40,12 +40,11 @@ static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
 // Non-blocking file writer guard
 // `tracing_appender::non_blocking()` spawns a background thread that drains a
 // channel and flushes writes to disk after every batch.  The returned
-// `WorkerGuard` MUST stay alive for the entire process lifetime — dropping it
-// stops the background thread, which silently discards any buffered log lines
-// that have not yet been flushed, producing blank or truncated log files.
+// `WorkerGuard` must stay alive while logging is active. `shutdown()` takes and
+// drops both guards to drain queued output at the end of the executable lifecycle.
 //
-// Using a module-level OnceLock means the guard is stored here without
-// requiring callers to thread it through their own state, and without changing
+// Module-level mutex-held Options own the guards without requiring callers
+// to thread them through their own state, and without changing
 // the public `init_logging(&Path)` signature.
 /// Keeps the main log writer's background worker alive for the process lifetime.
 static MAIN_FILE_GUARD: parking_lot::Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
@@ -1084,7 +1083,7 @@ where
 ///   `2026-03-18 14:22:01.456 [ERROR] [error   ] DB query failed  err=no such table  (src/db/posts.rs:79)`.
 ///
 /// Differences from the terminal format:
-///   • Always UTC with the full date — the file is an archive, not a live view.
+///   • Local time with the full date; the terminal shows local time without the date.
 ///   • No ANSI colour codes — clean for `grep`, `less`, and text editors.
 ///   • WARN and ERROR lines append `(file:line)` at the end so you can jump
 ///     directly to the call site without having to search the source tree.

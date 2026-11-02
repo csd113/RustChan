@@ -73,10 +73,13 @@ The updater retains the last ready configuration in its own private state direct
 After gracefully stopping the service it starts the same executable, requires the
 fixed loopback `/readyz` to report the expected version, healthy database and a new
 process identity in the nonsecret `X-RustChan-Instance` readiness header, and checks that the replacement loaded the requested settings.
-Startup and health checks are bounded to 60 seconds. Keep the effective HTTP port reachable at 127.0.0.1. Original launcher port
-overrides continue to apply to replacement processes. Changes that remove that probe path cannot
-commit, including HTTPS-only configurations without a suitable local backend.
-Use a reverse proxy when public TLS would otherwise remove the local probe path.
+Startup and health checks are bounded to 60 seconds. The automatic Linux controller
+probes `https://127.0.0.1:<tls.port>/readyz` when the replacement configuration enables
+TLS, including HTTPS-only mode; otherwise it uses the effective HTTP health port.
+Keep the selected listener reachable at 127.0.0.1. Original launcher port overrides
+continue to apply to replacement processes. The legacy service adapter uses a fixed
+loopback HTTP probe and still requires that HTTP backend; the container contract
+below also uses HTTP.
 
 Failed or interrupted settings startup enters the existing updater recovery
 barrier, stops the application before restoring the verified last healthy file,
