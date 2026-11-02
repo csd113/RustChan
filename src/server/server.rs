@@ -648,58 +648,15 @@ async fn run_server_lifecycle(
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
         let data_access = state.data_access.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut job_cursor = startup_media_reconciliation.next_job_id;
-            let mut post_cursor = startup_media_reconciliation.next_post_id;
-            let mut interval = tokio::time::interval(Duration::from_mins(1));
-            let _completed_value = interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let pass_pool = reconcile_pool.clone();
-                        let Some(access) = data_access.try_read() else { continue; };
-                        let pass = tokio::task::spawn_blocking(move || {
-                            let _access = access;
-                            crate::workers::reconcile_media_job_states(
-                                &pass_pool,
-                                job_cursor,
-                                post_cursor,
-                                crate::workers::MEDIA_RECONCILE_BATCH,
-                            )
-                        }).await;
-                        match pass {
-                            Ok(Ok(report)) => {
-                                job_cursor = report.next_job_id;
-                                post_cursor = report.next_post_id;
-                                if report.jobs_resolved > 0 || report.posts_repaired > 0 {
-                                    tracing::info!(
-                                        target: "workers",
-                                        jobs_scanned = report.jobs_scanned,
-                                        posts_scanned = report.posts_scanned,
-                                        jobs_resolved = report.jobs_resolved,
-                                        posts_repaired = report.posts_repaired,
-                                        malformed_jobs = report.malformed_jobs,
-                                        "periodic media reconciliation repaired legacy state"
-                                    );
-                                    reconcile_queue.notify.notify_waiters();
-                                }
-                            }
-                            Ok(Err(error)) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic media reconciliation failed"
-                            ),
-                            Err(error) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic media reconciliation task failed"
-                            ),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => break,
-                }
-            }
-        });
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_worker_media_reconciliation(
+                reconcile_pool,
+                reconcile_queue,
+                cancel_clone,
+                data_access,
+                startup_media_reconciliation.next_job_id,
+                startup_media_reconciliation.next_post_id,
+            ));
     }
 
     // Managed-media auditing advances one bounded filesystem page per interval.
@@ -709,51 +666,13 @@ async fn run_server_lifecycle(
         let reconcile_pool = pool.clone();
         let cancel_clone = worker_cancel.clone();
         let data_access = state.data_access.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut cursor = startup_managed_media_cursor;
-            let mut interval = tokio::time::interval(media_reconcile_interval);
-            let _completed_value = interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let pass_pool = reconcile_pool.clone();
-                        let upload_dir = CONFIG.upload_dir.clone();
-                        let pass_cursor = cursor.clone();
-                        let Some(access) = data_access.try_read() else { continue; };
-                        let pass = tokio::task::spawn_blocking(move || {
-                            let _access = access;
-                            crate::media::reconcile::reconcile_managed_media(
-                                &pass_pool,
-                                &upload_dir,
-                                crate::media::reconcile::configured_mode(),
-                                &pass_cursor,
-                                crate::media::reconcile::configured_limits(),
-                            )
-                        }).await;
-                        match pass {
-                            Ok(Ok(report)) => cursor = report.next_cursor,
-                            Ok(Err(error)) => tracing::warn!(
-                                target: "media_reconcile",
-                                error = %error,
-                                "periodic managed-media audit failed"
-                            ),
-                            Err(error) => tracing::warn!(
-                                target: "media_reconcile",
-                                error = %error,
-                                "periodic managed-media audit task failed"
-                            ),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!(
-                            target: "media_reconcile",
-                            "managed-media audit task shutting down"
-                        );
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle = background_tasks.spawn(background::run_managed_media_audit(
+            reconcile_pool,
+            cancel_clone,
+            data_access,
+            media_reconcile_interval,
+            startup_managed_media_cursor,
+        ));
     }
 
     // Required thread-retention work is repaired independently of new posts.
@@ -764,57 +683,14 @@ async fn run_server_lifecycle(
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
         let data_access = state.data_access.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut cursor = startup_prune_reconciliation.next_board_id;
-            let mut interval = tokio::time::interval(Duration::from_mins(1));
-            let _completed_value = interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let pass_pool = reconcile_pool.clone();
-                        let Some(access) = data_access.try_read() else { continue; };
-                        let pass = tokio::task::spawn_blocking(move || {
-                            let _access = access;
-                            crate::workers::reconcile_thread_prune_intents(
-                                &pass_pool,
-                                cursor,
-                                crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
-                            )
-                        }).await;
-                        match pass {
-                            Ok(Ok(report)) => {
-                                cursor = report.next_board_id;
-                                if report.inserted > 0 {
-                                    reconcile_queue.notify.notify_waiters();
-                                }
-                                if report.failures > 0 {
-                                    tracing::warn!(
-                                        target: "workers",
-                                        boards_scanned = report.scanned,
-                                        failures = report.failures,
-                                        "periodic thread-retention reconciliation had board failures"
-                                    );
-                                }
-                            }
-                            Ok(Err(error)) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic thread-retention reconciliation failed"
-                            ),
-                            Err(error) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic thread-retention reconciliation task failed"
-                            ),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Thread-retention reconciliation task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_thread_retention_reconciliation(
+                reconcile_pool,
+                reconcile_queue,
+                cancel_clone,
+                data_access,
+                startup_prune_reconciliation.next_board_id,
+            ));
     }
 
     // Background: purge expired sessions hourly
