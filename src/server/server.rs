@@ -779,47 +779,13 @@ async fn run_server_lifecycle(
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
         let data_access = state.data_access.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(poll_cleanup_interval);
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let bg2 = bg.clone();
-                        let Some(access) = data_access.try_read() else { continue; };
-                        let task_result = tokio::task::spawn_blocking(move || {
-                            let access_guard = access;
-                            if let Ok(conn) = bg2.get() {
-                                let cutoff = chrono::Utc::now().timestamp().saturating_sub(poll_retention_cutoff_secs);
-                                match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
-                                    Ok(n) if n > 0 => {
-                                        tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => tracing::warn!("Poll vote cleanup failed: {e}"),
-                                }
-                            }
-                            drop(access_guard);
-                        })
-                        .await;
-                        if let Err(error) = task_result {
-                            tracing::warn!(
-                                target: "polls",
-                                error = %error,
-                                "Poll vote cleanup blocking task failed"
-                            );
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Poll vote cleanup task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle = background_tasks.spawn(background::run_poll_vote_cleanup(
+            bg,
+            cancel_clone,
+            data_access,
+            poll_cleanup_interval,
+            poll_retention_cutoff_secs,
+        ));
     }
 
     // Retry durable filesystem operations independently of request traffic.
@@ -829,50 +795,12 @@ async fn run_server_lifecycle(
         let cancel_clone = worker_cancel.clone();
         let data_access = state.data_access.clone();
         let maintenance_gate = state.maintenance_gate.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_mins(5)) => {}
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(Duration::from_mins(15));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let retry_pool = bg.clone();
-                        let upload_dir = CONFIG.upload_dir.clone();
-                        let Ok(maintenance) = maintenance_gate.try_begin("Filesystem reconciliation") else { continue; };
-                        let Some(access) = data_access.exclusive().await else { continue; };
-                        let task_result = tokio::task::spawn_blocking(move || {
-                            let access_guard = access;
-                            let _maintenance = maintenance;
-                            if let Err(error) = crate::pending_fs::reconcile_pending_fs_ops(
-                                &retry_pool,
-                                &upload_dir,
-                            ) {
-                                tracing::warn!(
-                                    target: "pending_fs",
-                                    error = %error,
-                                    "periodic filesystem reconciliation left quarantined operations"
-                                );
-                            }
-                            drop(access_guard);
-                        })
-                        .await;
-                        if let Err(error) = task_result {
-                            tracing::warn!(
-                                target: "pending_fs",
-                                error = %error,
-                                "Periodic filesystem reconciliation blocking task failed"
-                            );
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Filesystem reconciliation task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle = background_tasks.spawn(background::run_pending_fs_replay(
+            bg,
+            cancel_clone,
+            data_access,
+            maintenance_gate,
+        ));
     }
 
     // Keep the waveform and thumbnail cache
@@ -883,48 +811,12 @@ async fn run_server_lifecycle(
         let cancel_clone = worker_cancel.clone();
         let bg = pool.clone();
         let data_access = state.data_access.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(Duration::from_hours(1));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let upload_dir = CONFIG.upload_dir.clone();
-                        let eviction_pool = bg.clone();
-                        let Some(access) = data_access.try_read() else { continue; };
-                        let task_result = tokio::task::spawn_blocking(move || {
-                            let _access = access;
-                            let Ok(conn) = eviction_pool.get() else {
-                                return;
-                            };
-                            let eviction_result = crate::workers::evict_thumb_cache(
-                                &conn,
-                                &upload_dir,
-                                max_bytes,
-                            );
-                            if let Err(error) = eviction_result {
-                                tracing::warn!(error = %error, "Thumbnail cache eviction failed");
-                            }
-                        })
-                        .await;
-                        if let Err(error) = task_result {
-                            tracing::warn!(
-                                target: "workers",
-                                error = %error,
-                                "Thumbnail cache eviction blocking task failed"
-                            );
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Waveform cache eviction task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle = background_tasks.spawn(background::run_thumb_cache_eviction(
+            max_bytes,
+            cancel_clone,
+            bg,
+            data_access,
+        ));
     }
 
     let plaintext_server = match plaintext_app_listener(

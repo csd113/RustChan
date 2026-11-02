@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::CONFIG;
 use crate::db::DbPool;
 use crate::media::reconcile::ReconcileCursor;
-use crate::middleware::{data_access::DataAccess, AppState};
+use crate::middleware::{data_access::DataAccess, AppState, MaintenanceGate};
 use crate::workers::JobQueue;
 
 use super::{
@@ -534,6 +534,155 @@ pub(super) async fn run_thread_retention_reconciliation(
             }
             () = cancel_clone.cancelled() => {
                 tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Thread-retention reconciliation task shutting down");
+                return;
+            }
+        }
+    }
+}
+
+/// Purge expired poll votes after the initial delay with shared data admission.
+pub(super) async fn run_poll_vote_cleanup(
+    bg: DbPool,
+    cancel_clone: CancellationToken,
+    data_access: DataAccess,
+    poll_cleanup_interval: Duration,
+    poll_retention_cutoff_secs: i64,
+) {
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
+        () = cancel_clone.cancelled() => { return; }
+    }
+    let mut iv = tokio::time::interval(poll_cleanup_interval);
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                let bg2 = bg.clone();
+                let Some(access) = data_access.try_read() else { continue; };
+                let task_result = tokio::task::spawn_blocking(move || {
+                    let access_guard = access;
+                    if let Ok(conn) = bg2.get() {
+                        let cutoff = chrono::Utc::now().timestamp().saturating_sub(poll_retention_cutoff_secs);
+                        match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
+                            Ok(n) if n > 0 => {
+                                tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Poll vote cleanup failed: {e}"),
+                        }
+                    }
+                    drop(access_guard);
+                })
+                .await;
+                if let Err(error) = task_result {
+                    tracing::warn!(
+                        target: "polls",
+                        error = %error,
+                        "Poll vote cleanup blocking task failed"
+                    );
+                }
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Poll vote cleanup task shutting down");
+                return;
+            }
+        }
+    }
+}
+
+/// Replay the finite pending-filesystem queue under maintenance and exclusive access.
+pub(super) async fn run_pending_fs_replay(
+    bg: DbPool,
+    cancel_clone: CancellationToken,
+    data_access: DataAccess,
+    maintenance_gate: MaintenanceGate,
+) {
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_mins(5)) => {}
+        () = cancel_clone.cancelled() => { return; }
+    }
+    let mut iv = tokio::time::interval(Duration::from_mins(15));
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                let retry_pool = bg.clone();
+                let upload_dir = CONFIG.upload_dir.clone();
+                let Ok(maintenance) = maintenance_gate.try_begin("Filesystem reconciliation") else { continue; };
+                let Some(access) = data_access.exclusive().await else { continue; };
+                let task_result = tokio::task::spawn_blocking(move || {
+                    let access_guard = access;
+                    let _maintenance = maintenance;
+                    if let Err(error) = crate::pending_fs::reconcile_pending_fs_ops(
+                        &retry_pool,
+                        &upload_dir,
+                    ) {
+                        tracing::warn!(
+                            target: "pending_fs",
+                            error = %error,
+                            "periodic filesystem reconciliation left quarantined operations"
+                        );
+                    }
+                    drop(access_guard);
+                })
+                .await;
+                if let Err(error) = task_result {
+                    tracing::warn!(
+                        target: "pending_fs",
+                        error = %error,
+                        "Periodic filesystem reconciliation blocking task failed"
+                    );
+                }
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Filesystem reconciliation task shutting down");
+                return;
+            }
+        }
+    }
+}
+
+/// Evict unreferenced thumbnail and waveform cache files with shared data admission.
+pub(super) async fn run_thumb_cache_eviction(
+    max_bytes: u64,
+    cancel_clone: CancellationToken,
+    bg: DbPool,
+    data_access: DataAccess,
+) {
+    tokio::select! {
+        () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
+        () = cancel_clone.cancelled() => { return; }
+    }
+    let mut iv = tokio::time::interval(Duration::from_hours(1));
+    loop {
+        tokio::select! {
+            _ = iv.tick() => {
+                let upload_dir = CONFIG.upload_dir.clone();
+                let eviction_pool = bg.clone();
+                let Some(access) = data_access.try_read() else { continue; };
+                let task_result = tokio::task::spawn_blocking(move || {
+                    let _access = access;
+                    let Ok(conn) = eviction_pool.get() else {
+                        return;
+                    };
+                    let eviction_result = crate::workers::evict_thumb_cache(
+                        &conn,
+                        &upload_dir,
+                        max_bytes,
+                    );
+                    if let Err(error) = eviction_result {
+                        tracing::warn!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), error = %error, "Thumbnail cache eviction failed");
+                    }
+                })
+                .await;
+                if let Err(error) = task_result {
+                    tracing::warn!(
+                        target: "workers",
+                        error = %error,
+                        "Thumbnail cache eviction blocking task failed"
+                    );
+                }
+            }
+            () = cancel_clone.cancelled() => {
+                tracing::debug!(target: concat!(env!("CARGO_CRATE_NAME"), "::server::server"), "Waveform cache eviction task shutting down");
                 return;
             }
         }
