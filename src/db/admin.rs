@@ -949,26 +949,10 @@ fn rebuild_posts_fts(conn: &rusqlite::Connection) -> Result<()> {
         DROP TRIGGER IF EXISTS posts_ad;
         DROP TRIGGER IF EXISTS posts_au;
         DROP TABLE IF EXISTS posts_fts;
-
-        CREATE VIRTUAL TABLE posts_fts
-        USING fts5(body, content='posts', content_rowid='id', tokenize='unicode61');
-
-        CREATE TRIGGER posts_ai AFTER INSERT ON posts BEGIN
-            INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
-        END;
-
-        CREATE TRIGGER posts_ad AFTER DELETE ON posts BEGIN
-            INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
-        END;
-
-        CREATE TRIGGER posts_au AFTER UPDATE OF body ON posts BEGIN
-            INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
-            INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
-        END;
-
-        INSERT INTO posts_fts(posts_fts) VALUES('rebuild');
         ",
     )
+    .and_then(|()| super::schema::create_posts_search_objects(conn, false))
+    .and_then(|()| conn.execute_batch("INSERT INTO posts_fts(posts_fts) VALUES('rebuild');"))
     .context("Failed to recreate posts_fts search index")
 }
 

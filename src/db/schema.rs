@@ -773,28 +773,37 @@ fn create_indexes(conn: &rusqlite::Connection) -> Result<()> {
         .context("Schema index creation failed")
 }
 
-/// Create and synchronize the posts full-text-search index.
-fn ensure_posts_search_index(conn: &rusqlite::Connection) -> Result<()> {
-    conn.execute_batch(
+/// Create the canonical posts FTS5 table and synchronization triggers.
+/// `if_not_exists` preserves tolerant installation versus strict repair creation.
+pub(super) fn create_posts_search_objects(
+    conn: &rusqlite::Connection,
+    if_not_exists: bool,
+) -> rusqlite::Result<()> {
+    let if_not_exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    conn.execute_batch(&format!(
         r"
-        CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts
+        CREATE VIRTUAL TABLE {if_not_exists}posts_fts
         USING fts5(body, content='posts', content_rowid='id', tokenize='unicode61');
 
-        CREATE TRIGGER IF NOT EXISTS posts_ai AFTER INSERT ON posts BEGIN
+        CREATE TRIGGER {if_not_exists}posts_ai AFTER INSERT ON posts BEGIN
             INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS posts_ad AFTER DELETE ON posts BEGIN
+        CREATE TRIGGER {if_not_exists}posts_ad AFTER DELETE ON posts BEGIN
             INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
         END;
 
-        CREATE TRIGGER IF NOT EXISTS posts_au AFTER UPDATE OF body ON posts BEGIN
+        CREATE TRIGGER {if_not_exists}posts_au AFTER UPDATE OF body ON posts BEGIN
             INSERT INTO posts_fts(posts_fts, rowid, body) VALUES('delete', old.id, old.body);
             INSERT INTO posts_fts(rowid, body) VALUES (new.id, new.body);
         END;
         ",
-    )
-    .context("Search index creation failed")?;
+    ))
+}
+
+/// Create and synchronize the posts full-text-search index.
+fn ensure_posts_search_index(conn: &rusqlite::Connection) -> Result<()> {
+    create_posts_search_objects(conn, true).context("Search index creation failed")?;
 
     let post_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))
