@@ -1991,8 +1991,8 @@ fn verify_db_snapshot_schema(
             crate::db::baseline_schema_version()
         ))
     })?;
-    super::restore_full::validate_full_restore_db_trust_boundary(&conn)?;
-    super::restore_full::recompute_restored_post_body_html(&conn)?;
+    super::database::validate_full_restore_db_trust_boundary(&conn)?;
+    super::database::recompute_restored_post_body_html(&conn)?;
     let mut statement = conn.prepare("SELECT file_path, thumb_path, audio_file_path FROM posts")?;
     let rows = statement.query_map([], |row| {
         Ok([row.get::<_, Option<String>>(0)?, row.get(1)?, row.get(2)?])

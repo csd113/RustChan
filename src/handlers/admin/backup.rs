@@ -45,6 +45,7 @@ use super::{
 mod archive;
 mod board_manifest;
 mod create;
+mod database;
 mod downloads;
 mod http;
 mod limits;
