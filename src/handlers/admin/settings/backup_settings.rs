@@ -89,7 +89,7 @@ pub(in crate::server) async fn update_full_backup_settings(
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
     if let Some(directory) = form.backup_directory {
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        crate::middleware::data_access::spawn_blocking(move || -> Result<()> {
             let conn = state.db.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             crate::config::update_settings_file_backup_directory(std::path::Path::new(&directory))
@@ -112,7 +112,7 @@ pub(in crate::server) async fn update_full_backup_settings(
     let split_zip_part_size = settings.split_zip_part_size;
     let split_zip_part_size_gib = settings.split_zip_part_size_gib;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let auto_backup_settings = state.auto_full_backup_settings.clone();
         move || -> Result<()> {

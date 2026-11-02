@@ -46,7 +46,7 @@ pub(super) async fn authorize(state: &AppState, jar: &CookieJar) -> Result<i64> 
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let pool = state.db.clone();
-    tokio::task::spawn_blocking(move || {
+    crate::middleware::data_access::spawn_blocking(move || {
         let conn = pool.get()?;
         require_admin_session_sid(&conn, session.as_deref())
     })
@@ -63,7 +63,7 @@ pub(super) async fn snapshot() -> Status {
             ..Status::default()
         }, |reply| reply.status);
     }
-    tokio::task::spawn_blocking(|| {
+    crate::middleware::data_access::spawn_blocking(|| {
         let path = crate::config::runtime_dir().join("software-updates.json");
         let status = std::fs::File::open(path)
             .ok()
@@ -111,7 +111,7 @@ pub(in crate::server) async fn check(
             Ok(())
         })
     } else {
-        tokio::task::spawn_blocking(|| -> anyhow::Result<()> {
+        crate::middleware::data_access::spawn_blocking(|| -> anyhow::Result<()> {
             let status = Status {
                 installed: updates::VERSION.to_owned(),
                 discovery: Some(updates::discover_official(updates::VERSION)),
@@ -164,7 +164,7 @@ pub(in crate::server) async fn install(
     let confirmation = form.confirmation;
     let approval_valid = uuid::Uuid::parse_str(&approval).is_ok();
     let password_permit = state.password_work_gate.try_begin()?;
-    let administrator = tokio::task::spawn_blocking(move || -> Result<i64> {
+    let administrator = crate::middleware::data_access::spawn_blocking(move || -> Result<i64> {
         let _password_permit = password_permit;
         let conn = state.db.get()?;
         let actor = require_admin_session_sid(&conn, session.as_deref())?;
@@ -202,7 +202,7 @@ pub(in crate::server) async fn install(
     })
     .await;
     let acknowledged = outcome.is_ok();
-    drop(tokio::spawn(async move {
+    drop(crate::middleware::data_access::spawn(async move {
         let _guard = guard;
         loop {
             if updates::request(&Request::Status)

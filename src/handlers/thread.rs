@@ -97,7 +97,7 @@ pub(in crate::server) async fn view_thread(
         can_post,
         can_view: _,
     } = access_context;
-    let page_data = tokio::task::spawn_blocking({
+    let page_data = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<ThreadViewLoadResult> {
             let conn = pool.get()?;
@@ -244,7 +244,7 @@ pub(in crate::server) async fn view_thread(
         _ => None,
     };
     // HTML assembly is CPU work on already-owned data; keep it off the async workers.
-    let html = tokio::task::spawn_blocking(move || {
+    let html = crate::middleware::data_access::spawn_blocking(move || {
         render::render_thread_page(
             &page_data,
             &csrf,
@@ -394,7 +394,7 @@ pub(in crate::server) async fn post_reply(
         captcha_id,
         captcha_answer,
     } = form;
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
@@ -456,7 +456,7 @@ pub(in crate::server) async fn post_reply(
             }
             let db_pool = state.db.clone();
             let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+            let html = crate::middleware::data_access::spawn_blocking(move || -> Result<String> {
                 let conn = db_pool.get()?;
                 // Error re-render only: resolve the board for this request.
                 let board = db::get_board_by_short(&conn, &board_short_err)?.ok_or_else(|| {
@@ -547,7 +547,7 @@ async fn load_self_action_post_context(
     admin_session_id: Option<String>,
     access_cookie: Option<String>,
 ) -> Result<SelfActionPostContext> {
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.to_owned();
         move || -> Result<SelfActionPostContext> {
@@ -759,7 +759,7 @@ pub(in crate::server) async fn edit_post_post(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
-    let can_post = tokio::task::spawn_blocking({
+    let can_post = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -791,7 +791,7 @@ pub(in crate::server) async fn edit_post_post(
 
     let raw_body = form.body;
     let board_short_for_edit = board_short.clone();
-    let outcome = tokio::task::spawn_blocking({
+    let outcome = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let admin_session_id = admin_session_id.clone();
         let raw_body = raw_body.clone();
@@ -1032,7 +1032,7 @@ pub(in crate::server) async fn delete_own_post(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
-    let can_post = tokio::task::spawn_blocking({
+    let can_post = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -1061,7 +1061,7 @@ pub(in crate::server) async fn delete_own_post(
 
     let deletion_token = owned_grant.deletion_token;
     let board_short_for_delete = board_short.clone();
-    let outcome = tokio::task::spawn_blocking({
+    let outcome = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(i64, db::posts::SelfDeleteOutcome)> {
             let conn = pool.get()?;
@@ -1190,7 +1190,7 @@ pub(in crate::server) async fn vote_handler(
         return Err(AppError::BadRequest("Invalid poll option.".into()));
     }
 
-    let context = tokio::task::spawn_blocking({
+    let context = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(i64, i64, String)> {
             let conn = pool.get()?;
@@ -1205,7 +1205,7 @@ pub(in crate::server) async fn vote_handler(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
-    let can_post = tokio::task::spawn_blocking({
+    let can_post = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -1237,7 +1237,7 @@ pub(in crate::server) async fn vote_handler(
         .get("csrf_token")
         .map(|cookie| cookie.value().to_owned())
         .unwrap_or_default();
-    let redirect_url = tokio::task::spawn_blocking({
+    let redirect_url = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -1369,7 +1369,7 @@ pub(in crate::server) async fn thread_updates(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = crate::handlers::board::board_access_cookie_from_jar(&jar, &board_short);
-    let can_view = tokio::task::spawn_blocking({
+    let can_view = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -1397,7 +1397,7 @@ pub(in crate::server) async fn thread_updates(
             .into_response());
     }
 
-    let updates = tokio::task::spawn_blocking({
+    let updates = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let refresh_post_ids = refresh_post_ids.clone();
         move || -> Result<ThreadUpdatesRender> {

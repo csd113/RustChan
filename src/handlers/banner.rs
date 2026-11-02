@@ -72,7 +72,7 @@ pub(in crate::server) async fn serve_banner_asset(
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
 
-    let asset = tokio::task::spawn_blocking({
+    let asset = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let jar = jar.clone();
         move || -> Result<(crate::models::BannerAsset, bool)> {
@@ -148,7 +148,7 @@ pub(in crate::server) async fn external_banner_warning_page(
     let current_theme = current_theme_from_jar(&jar);
     let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
     let return_to = banner::safe_return_to(query.return_to.as_deref().unwrap_or("/"));
-    let asset = tokio::task::spawn_blocking({
+    let asset = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let jar = jar.clone();
         move || -> Result<crate::models::BannerAsset> {
@@ -218,7 +218,7 @@ pub(in crate::server) async fn external_banner_continue(
     let admin_session_id = jar
         .get(crate::handlers::board::ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    let target = tokio::task::spawn_blocking({
+    let target = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let jar = jar.clone();
         move || -> Result<String> {

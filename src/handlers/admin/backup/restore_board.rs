@@ -6,13 +6,12 @@ use super::{
     parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive, read_limited_bytes,
     redirect_page_response, remap_body_quotelinks, remove_path_if_exists,
     render_restored_body_html, require_admin_post_origin_and_csrf, require_admin_session_sid,
-    restore_auth_preflight, restore_db_from_snapshot, restore_error_redirect_target,
-    restore_failure_response, restore_start_response, restore_success_redirect_target,
-    restore_upload_parse_response, safety, sanitize_board_short_value,
-    stream_restore_upload_to_tempfile, temp_board_download_dir, validate_board_short_name,
-    validate_saved_backup_reference, validate_streamed_restore_upload, verify_password,
-    write_temp_board_download_token, AppError, AppState, BoardAccessMode, CookieJar, Form,
-    HeaderMap, Multipart, Path, PathBuf, Redirect, Request, Response, RestoreKind,
+    restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
+    restore_start_response, restore_success_redirect_target, restore_upload_parse_response, safety,
+    sanitize_board_short_value, stream_restore_upload_to_tempfile, temp_board_download_dir,
+    validate_board_short_name, validate_saved_backup_reference, validate_streamed_restore_upload,
+    verify_password, write_temp_board_download_token, AppError, AppState, BoardAccessMode,
+    CookieJar, Form, HeaderMap, Multipart, Path, PathBuf, Redirect, Request, Response, RestoreKind,
     RestoreSavedForm, Result, State, BOARD_BACKUP_RESTORE_SECTION, BOARD_MANIFEST_MAX_BYTES,
     CONFIG, SESSION_COOKIE,
 };
@@ -310,12 +309,15 @@ struct BoardRestoreWorkspace {
     pending_restore_id: String,
     pending_restore_payload: crate::pending_fs::BoardRestoreSwapPayload,
     pending_restore_op: crate::pending_fs::PendingFsOpInsert,
+    cleanup: super::recovery_files::StagingDirectories,
 }
 
 impl BoardRestoreWorkspace {
     fn prepare(upload_dir: &str, board_short: &str) -> Result<Self> {
         let upload_root = PathBuf::from(upload_dir);
         let staged_upload_root = create_staging_dir(&upload_root, "board-restore-stage")?;
+        let mut cleanup = super::recovery_files::StagingDirectories::default();
+        cleanup.track(&staged_upload_root);
         let staged_board_dir = staged_upload_root.join(board_short);
         std::fs::create_dir_all(&staged_board_dir).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Create staged board dir: {error}"))
@@ -346,6 +348,7 @@ impl BoardRestoreWorkspace {
             pending_restore_id,
             pending_restore_payload,
             pending_restore_op,
+            cleanup,
         })
     }
 }
@@ -355,7 +358,7 @@ impl BoardRestoreWorkspace {
     reason = "board replacement and media staging share one transaction and rollback boundary"
 )]
 pub(super) fn execute_board_restore<F>(
-    conn: &mut rusqlite::Connection,
+    conn: &rusqlite::Connection,
     upload_dir: &str,
     mut manifest: board_manifest::BoardBackupManifest,
     mut extract_uploads: F,
@@ -371,7 +374,7 @@ where
     validate_board_short_name(&board_short)?;
     validate_board_restore_media_metadata(&manifest)?;
     validate_board_backup_access_settings(&mut manifest)?;
-    let workspace = BoardRestoreWorkspace::prepare(upload_dir, &board_short)?;
+    let mut workspace = BoardRestoreWorkspace::prepare(upload_dir, &board_short)?;
     extract_uploads(&workspace.staged_upload_root)?;
 
     let existing_id: Option<i64> = conn
@@ -384,20 +387,22 @@ where
     if existing_id.is_some() {
         run_restore_db_quick_check(conn, restore_label, &board_short)?;
     }
-    let temp_dir = std::env::temp_dir();
-    let db_snapshot = temp_dir.join(format!(
-        "board_restore_live_before_{}.db",
-        uuid::Uuid::new_v4().simple()
-    ));
-    let db_snapshot_str = db_snapshot
-        .to_str()
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Snapshot path is non-UTF-8")))?
-        .replace('\'', "''");
-    conn.execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot board DB: {error}")))?;
-    conn.execute("BEGIN IMMEDIATE", [])
-        .map_err(|error| AppError::Internal(anyhow::anyhow!("Begin tx: {error}")))
-        .map(|_completed_value| ())?;
+    let paths = super::restore_full::prepare_full_restore_temp_paths(
+        &uuid::Uuid::new_v4().simple().to_string(),
+    )?;
+    let mut snapshot_cleanup = super::restore_full::FullRestoreTempCleanupGuard::new(&paths);
+    let db_snapshot = paths.db_snapshot;
+    super::restore_full::create_live_restore_snapshot(conn, &db_snapshot)?;
+    super::recovery::sync_staged_tree(&workspace.staged_upload_root)?;
+    workspace.cleanup.retain(true);
+    snapshot_cleanup.retain_snapshot(true);
+    super::recovery::begin_restore(&workspace.pending_restore_id, &db_snapshot)?;
+    if let Err(error) = conn.execute("BEGIN IMMEDIATE", []) {
+        super::recovery::finish_restore()?;
+        snapshot_cleanup.retain_snapshot(false);
+        workspace.cleanup.retain(false);
+        return Err(AppError::Internal(anyhow::anyhow!("Begin tx: {error}")));
+    }
 
     let restore_result = (|| -> Result<()> {
         let live_board_id: i64 = if let Some(existing_id) = existing_id {
@@ -860,37 +865,34 @@ where
 
     match restore_result {
         Ok(()) => {
-            conn.execute("COMMIT", [])
-                .map_err(|error| AppError::Internal(anyhow::anyhow!("Commit tx: {error}")))
-                .map(|_completed_value| ())?;
-            if let Err(error) = crate::pending_fs::finalize_board_restore_payload(
+            db::commit_transaction(conn, "Commit board restore")?;
+            // Once the DB is committed, retain its pending swap and safety
+            // snapshot on failure. Reverting only the DB could disagree with a
+            // filesystem swap that had already completed before an I/O error.
+            crate::pending_fs::finalize_board_restore_payload(
                 &workspace.pending_restore_payload,
                 Path::new(upload_dir),
-            ) {
-                if let Err(restore_err) =
-                    restore_db_from_snapshot(conn, &db_snapshot, restore_label)
-                {
-                    drop(std::fs::remove_file(&db_snapshot));
-                    return Err(AppError::Internal(anyhow::anyhow!(
-                        "{restore_label} filesystem swap failed: {error}; DB rollback error: {restore_err}"
-                    )));
-                }
-                drop(std::fs::remove_file(&db_snapshot));
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "{restore_label} filesystem swap failed: {error}"
-                )));
-            }
+            ).map_err(|error| AppError::Internal(anyhow::anyhow!(
+                "{restore_label} filesystem swap remains pending for recovery: {error}; safety snapshot retained at {}", db_snapshot.display()
+            )))?;
             db::delete_pending_fs_op(conn, &workspace.pending_restore_id)?;
+            super::recovery::finish_restore()?;
+            snapshot_cleanup.retain_snapshot(false);
+            workspace.cleanup.retain(false);
         }
         Err(error) => {
-            drop(conn.execute("ROLLBACK", []));
+            if let Err(rollback_error) = conn.execute("ROLLBACK", []) {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "{restore_label} failed: {error}; rollback failed: {rollback_error}; safety snapshot retained at {}", db_snapshot.display()
+                )));
+            }
+            super::recovery::finish_restore()?;
+            snapshot_cleanup.retain_snapshot(false);
+            workspace.cleanup.retain(false);
             drop(remove_path_if_exists(&workspace.staged_upload_root));
-            drop(std::fs::remove_file(&db_snapshot));
             return Err(error);
         }
     }
-
-    drop(std::fs::remove_file(&db_snapshot));
     drop(remove_path_if_exists(&workspace.staged_upload_root));
 
     tracing::info!(target: "admin", board = %board_short, "{completion_log}");
@@ -939,49 +941,46 @@ pub(in crate::server) async fn extract_board_from_full_backup(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let _maintenance_guard = if form.action == "restore" {
-        Some(
-            state
-                .maintenance_gate
-                .try_begin(RestoreKind::Board.maintenance_label())?,
-        )
-    } else {
-        None
-    };
+    let maintenance_guard =
+        super::recovery::begin_operation(&state, &jar, "Extract board from full backup").await?;
 
     let safe_filename = validate_saved_backup_reference(&form.filename)?;
     let safe_board = sanitize_board_short_value(&form.board_short)?;
     let action = form.action.clone();
     let upload_dir = CONFIG.upload_dir.clone();
 
-    let outcome_result = tokio::task::spawn_blocking({
+    let outcome_result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<ExtractBoardFromFullBackupOutcome> {
-            let mut conn = pool.get()?;
+            let _operation_guard = maintenance_guard;
+            let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
             let full_backup_dir_path = crate::config::backups_dir().join(&safe_filename);
             let full_backup_path = full_backup_dir().join(&safe_filename);
-            let (temp_board_backup_path, temp_board_backup_filename) = if full_backup_dir_path
-                .is_dir()
-            {
-                let (temp_zip_path, filename) = extract_board_archive_from_saved_full_backup(
-                    &full_backup_dir_path,
-                    &safe_board,
-                )?;
-                let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip_path.clone());
-                let staged_path = temp_board_download_dir().join(&filename);
-                std::fs::rename(&temp_zip_path, &staged_path).map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!(
-                        "Stage extracted board backup {}: {error}",
-                        staged_path.display()
-                    ))
-                })?;
-                temp_zip_guard.disarm();
-                (staged_path, filename)
-            } else {
-                extract_board_archive_from_full_backup(&full_backup_path, &safe_board)?
-            };
+            let (temp_board_backup_path, temp_board_backup_filename, restore_budget) =
+                if full_backup_dir_path.is_dir() {
+                    let (temp_zip_path, filename, budget) =
+                        extract_board_archive_from_saved_full_backup(
+                            &full_backup_dir_path,
+                            &safe_board,
+                        )?;
+                    let mut temp_zip_guard =
+                        archive::TempZipCleanupGuard::new(temp_zip_path.clone());
+                    let staged_path = temp_board_download_dir().join(&filename);
+                    std::fs::rename(&temp_zip_path, &staged_path).map_err(|error| {
+                        AppError::Internal(anyhow::anyhow!(
+                            "Stage extracted board backup {}: {error}",
+                            staged_path.display()
+                        ))
+                    })?;
+                    temp_zip_guard.disarm();
+                    (staged_path, filename, budget)
+                } else {
+                    let (path, filename) =
+                        extract_board_archive_from_full_backup(&full_backup_path, &safe_board)?;
+                    (path, filename, safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES)
+                };
 
             match action.as_str() {
                 "download" => Ok(ExtractBoardFromFullBackupOutcome::Download {
@@ -1009,10 +1008,16 @@ pub(in crate::server) async fn extract_board_from_full_backup(
                         .map_err(|error| AppError::BadRequest(format!("Invalid zip: {error}")))?;
 
                         execute_board_restore(
-                            &mut conn,
+                            &conn,
                             &upload_dir,
                             manifest,
-                            |staged_root| extract_uploads_to_dir(&mut extract_archive, staged_root),
+                            |staged_root| {
+                                safety::extract_uploads_with_budget(
+                                    &mut extract_archive,
+                                    staged_root,
+                                    restore_budget,
+                                )
+                            },
                             "Board restore-from-full",
                             "Board restore-from-full completed",
                         )
@@ -1081,55 +1086,72 @@ pub(in crate::server) async fn restore_saved_board_backup(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let _maintenance_guard = state
-        .maintenance_gate
-        .try_begin(RestoreKind::Board.maintenance_label())?;
+    let maintenance_guard =
+        super::recovery::begin_operation(&state, &jar, RestoreKind::Board.maintenance_label())
+            .await?;
 
     let safe_filename = validate_saved_backup_reference(&form.filename)?;
 
     let upload_dir = CONFIG.upload_dir.clone();
 
-    let board_short_result: Result<Result<String>> = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        move || -> Result<String> {
-            let mut conn = pool.get()?;
-            require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
-            let root_dir = crate::config::backups_dir().join(&safe_filename);
-            let legacy_zip_path = board_backup_dir().join(&safe_filename);
-            let restore_archive_path = if root_dir.is_dir() {
-                let (path, _filename) = prepare_saved_board_restore_archive(&root_dir, None)?;
-                Some(path)
-            } else {
-                None
-            };
-            let _restore_archive_guard = restore_archive_path
-                .as_ref()
-                .map(|path| archive::TempZipCleanupGuard::new(path.clone()));
-            let archive_path = restore_archive_path.as_deref().unwrap_or(&legacy_zip_path);
+    let board_short_result: Result<Result<String>> =
+        crate::middleware::data_access::spawn_blocking({
+            let pool = state.db.clone();
+            move || -> Result<String> {
+                let _operation_guard = maintenance_guard;
+                let conn = pool.get()?;
+                require_admin_session_sid(&conn, session_id.as_deref())
+                    .map(|_completed_value| ())?;
+                let root_dir = crate::config::backups_dir().join(&safe_filename);
+                let legacy_zip_path = board_backup_dir().join(&safe_filename);
+                let restore_archive_path = if root_dir.is_dir() {
+                    let (path, _filename, budget) =
+                        prepare_saved_board_restore_archive(&root_dir, None)?;
+                    Some((path, budget))
+                } else {
+                    None
+                };
+                let _restore_archive_guard = restore_archive_path
+                    .as_ref()
+                    .map(|(path, _)| archive::TempZipCleanupGuard::new(path.clone()));
+                let restore_budget = restore_archive_path
+                    .as_ref()
+                    .map_or(safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES, |(_, budget)| {
+                        *budget
+                    });
+                let archive_path = restore_archive_path
+                    .as_ref()
+                    .map_or(legacy_zip_path.as_path(), |(path, _)| path.as_path());
 
-            let zip_file = std::fs::File::open(archive_path)
-                .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
-            let mut manifest_archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
-                .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
-            let manifest = parse_board_backup_manifest_from_zip(&mut manifest_archive)?;
-            let extract_file = std::fs::File::open(archive_path)
-                .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
-            let mut extract_archive =
-                zip::ZipArchive::new(std::io::BufReader::new(extract_file))
+                let zip_file = std::fs::File::open(archive_path)
+                    .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
+                let mut manifest_archive = zip::ZipArchive::new(std::io::BufReader::new(zip_file))
                     .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
+                let manifest = parse_board_backup_manifest_from_zip(&mut manifest_archive)?;
+                let extract_file = std::fs::File::open(archive_path)
+                    .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
+                let mut extract_archive =
+                    zip::ZipArchive::new(std::io::BufReader::new(extract_file))
+                        .map_err(|e| AppError::BadRequest(format!("Invalid zip: {e}")))?;
 
-            execute_board_restore(
-                &mut conn,
-                &upload_dir,
-                manifest,
-                |staged_root| extract_uploads_to_dir(&mut extract_archive, staged_root),
-                "Board restore-saved",
-                "Board restore-saved completed",
-            )
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)));
+                execute_board_restore(
+                    &conn,
+                    &upload_dir,
+                    manifest,
+                    |staged_root| {
+                        safety::extract_uploads_with_budget(
+                            &mut extract_archive,
+                            staged_root,
+                            restore_budget,
+                        )
+                    },
+                    "Board restore-saved",
+                    "Board restore-saved completed",
+                )
+            }
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)));
 
     match board_short_result {
         Ok(Ok(board_short)) => Ok(admin_panel_redirect_anchor_open(
@@ -1167,9 +1189,16 @@ pub(in crate::server) async fn board_restore(
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
-    let _maintenance_guard = match state
-        .maintenance_gate
-        .try_begin(RestoreKind::Board.maintenance_label())
+    let session_id = match restore_auth_preflight(&state, &headers, &jar, Some(peer)).await {
+        Ok(session) => session,
+        Err(error) => return restore_start_response(RestoreKind::Board, xhr_request, &error),
+    };
+    let maintenance_guard = match super::recovery::reserve_operation(
+        &state,
+        &jar,
+        RestoreKind::Board.maintenance_label(),
+    )
+    .await
     {
         Ok(guard) => guard,
         Err(error) => return restore_start_response(RestoreKind::Board, xhr_request, &error),
@@ -1189,7 +1218,6 @@ pub(in crate::server) async fn board_restore(
         }
     };
     let result: Result<String> = async {
-        let session_id = restore_auth_preflight(&state, &headers, &jar, Some(peer)).await?;
         let upload_dir = CONFIG.upload_dir.clone();
 
         let upload = stream_restore_upload_to_tempfile(RestoreKind::Board, &mut multipart).await?;
@@ -1197,12 +1225,14 @@ pub(in crate::server) async fn board_restore(
         let zip_tmp = upload.temp_file;
         let uploaded_filename = upload.uploaded_filename;
 
-        let restore_result = tokio::task::spawn_blocking({
+        let maintenance_guard = super::recovery::drain_operation(&state, maintenance_guard).await?;
+        let restore_result = crate::middleware::data_access::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<String> {
                 use std::io::Read as _;
+                let _operation_guard = maintenance_guard;
 
-                let mut conn = pool.get()?;
+                let conn = pool.get()?;
                 require_admin_session_sid(&conn, session_id.as_deref())
                     .map(|_completed_value| ())?;
 
@@ -1323,7 +1353,7 @@ pub(in crate::server) async fn board_restore(
                     (manifest, None)
                 };
                 execute_board_restore(
-                    &mut conn,
+                    &conn,
                     &upload_dir,
                     manifest,
                     |staged_root| {

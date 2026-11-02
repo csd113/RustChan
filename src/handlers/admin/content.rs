@@ -64,7 +64,7 @@ pub(in crate::server) async fn create_board(
         .take(256)
         .collect::<String>();
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -132,7 +132,7 @@ pub(in crate::server) async fn delete_board(
 
     let upload_dir = CONFIG.upload_dir.clone();
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -232,7 +232,7 @@ pub(in crate::server) async fn reorder_board(
     let return_to = safe_return_to(form.return_to.as_deref()).to_owned();
     let board_id = form.board_id;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
@@ -277,7 +277,7 @@ pub(in crate::server) async fn thread_action(
     let action = form.action.clone();
     let thread_id = form.thread_id;
     let submitted_board = form.board.clone();
-    let board_name = tokio::task::spawn_blocking({
+    let board_name = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -352,7 +352,7 @@ pub(in crate::server) async fn admin_delete_post(
     let upload_dir = CONFIG.upload_dir.clone();
     let post_id = form.post_id;
 
-    let redirect_board = tokio::task::spawn_blocking({
+    let redirect_board = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -412,7 +412,7 @@ pub(in crate::server) async fn admin_delete_thread(
     let upload_dir = CONFIG.upload_dir.clone();
     let thread_id = form.thread_id;
 
-    let redirect_board = tokio::task::spawn_blocking({
+    let redirect_board = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;

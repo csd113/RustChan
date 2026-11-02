@@ -17,7 +17,7 @@ pub(in crate::server) async fn serve_captcha_image(
     Query(query): Query<CaptchaImageQuery>,
 ) -> Result<Response> {
     let permit = state.captcha_work_gate.try_begin()?;
-    let png = tokio::task::spawn_blocking(move || {
+    let png = crate::middleware::data_access::spawn_blocking(move || {
         let _captcha_permit = permit;
         crate::captcha::generate_captcha_image(&query.board, &captcha_id)
     })

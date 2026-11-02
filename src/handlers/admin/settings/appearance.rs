@@ -26,7 +26,7 @@ pub(in crate::server) async fn clear_board_favicon_override(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let board_short = tokio::task::spawn_blocking({
+    let board_short = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -92,7 +92,7 @@ pub(in crate::server) async fn update_site_favicon(
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
-    let favicon_result = tokio::task::spawn_blocking({
+    let favicon_result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let _media_permit = media_permit;
@@ -167,7 +167,7 @@ pub(in crate::server) async fn update_board_favicon(
     let favicon_bytes =
         favicon_bytes.ok_or_else(|| AppError::BadRequest("No favicon file uploaded.".into()))?;
 
-    let favicon_result = tokio::task::spawn_blocking({
+    let favicon_result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let _media_permit = media_permit;

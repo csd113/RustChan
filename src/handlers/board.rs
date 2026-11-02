@@ -538,7 +538,7 @@ pub(super) async fn board_access_preflight(
     requirement: BoardAccessRequirement,
     return_to: String,
 ) -> Result<BoardAccessDecision> {
-    let access_context = tokio::task::spawn_blocking({
+    let access_context = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.to_owned();
         move || -> Result<BoardAccessContext> {

@@ -96,6 +96,7 @@ pub(in crate::server) fn create_full_backup_to_server(
         .saturating_add(tor_hidden_service_key_file_count);
     let backup_id = storage::build_backup_id(storage::BackupScope::FullSite, "full-site");
     let root_dir = storage::create_backup_root(&backup_id)?;
+    let mut incomplete = storage::IncompleteBackup::new(&root_dir);
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
     ensure_backup_dir(&db_dir)?;
@@ -274,6 +275,7 @@ pub(in crate::server) fn create_full_backup_to_server(
     drop(export_conn);
 
     let backup_ref = finalize_saved_backup(&root_dir, manifest)?;
+    incomplete.publish();
     invalidate_backup_list_cache(&full_backup_dir(), BackupListKind::Full);
 
     match enforce_full_backup_retention(copies_to_keep) {
@@ -326,6 +328,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
 ) -> Result<String> {
     let backup_id = storage::build_backup_id(storage::BackupScope::PreMaintenance, "pre-repair-db");
     let root_dir = storage::create_backup_root(&backup_id)?;
+    let mut incomplete = storage::IncompleteBackup::new(&root_dir);
     let db_dir = root_dir.join("db");
     let config_dir = root_dir.join("config");
     let maintenance_dir = root_dir.join("maintenance");
@@ -533,7 +536,9 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         }),
     };
 
-    finalize_saved_backup(&root_dir, manifest)
+    let reference = finalize_saved_backup(&root_dir, manifest)?;
+    incomplete.publish();
+    Ok(reference)
 }
 
 /// Counts required private files.
@@ -656,9 +661,10 @@ fn copy_regular_file_to_backup(source: &Path, destination: &Path) -> Result<(u64
     if let Some(parent) = destination.parent() {
         ensure_backup_dir(parent)?;
     }
-    let mut output = std::fs::File::create(destination).map_err(|error| {
-        AppError::Internal(anyhow::anyhow!("Create {}: {error}", destination.display()))
-    })?;
+    let mut output =
+        super::recovery_files::open_private_file_new(destination).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Create {}: {error}", destination.display()))
+        })?;
     restrict_backup_file(destination)?;
     storage::copy_file_and_hash(source, &mut output)
 }
@@ -749,11 +755,12 @@ pub(in crate::server) async fn create_full_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<FullBackupCreateForm>,
 ) -> Result<Response> {
-    let _maintenance_guard = state.maintenance_gate.try_begin("Full backup creation")?;
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let maintenance_guard =
+        super::recovery::begin_operation(&state, &jar, "Full backup creation").await?;
     let progress = std::sync::Arc::clone(&state.backup_progress);
     let copies_to_keep = state.auto_full_backup_settings.snapshot().copies_to_keep;
     let include_tor_hidden_service_keys = form.include_tor_hidden_service_keys;
@@ -764,9 +771,10 @@ pub(in crate::server) async fn create_full_backup(
         DEFAULT_SPLIT_ZIP_PART_SIZE
     };
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
+            let _operation_guard = maintenance_guard;
             create_full_backup_to_server(
                 &pool,
                 session_id.as_deref(),
@@ -809,12 +817,12 @@ pub(in crate::server) async fn create_board_backup(
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Form(form): Form<BoardBackupCreateForm>,
 ) -> Result<Response> {
-    let _maintenance_guard = state.maintenance_gate.try_begin("Board backup creation")?;
-
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    let maintenance_guard =
+        super::recovery::begin_operation(&state, &jar, "Board backup creation").await?;
 
     let board_short = form
         .board_short
@@ -831,9 +839,10 @@ pub(in crate::server) async fn create_board_backup(
     let upload_dir = CONFIG.upload_dir.clone();
     let progress = std::sync::Arc::clone(&state.backup_progress);
 
-    let filename = tokio::task::spawn_blocking({
+    let filename = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
+            let _operation_guard = maintenance_guard;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
@@ -841,6 +850,9 @@ pub(in crate::server) async fn create_board_backup(
             let manifest = build_board_backup_manifest(&conn, &board_short)?;
             let manifest_json = serde_json::to_vec_pretty(&manifest)
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("JSON: {error}")))?;
+            if u64::try_from(manifest_json.len()).unwrap_or(u64::MAX) > safety::BOARD_MANIFEST_MAX_BYTES {
+                return Err(AppError::BadRequest("Board export exceeds the 64 MiB manifest restore limit; use a full-site backup.".into()));
+            }
             tracing::info!(
                 target: "admin",
                 board = %manifest.board.short_name,
@@ -939,6 +951,7 @@ pub(in crate::server) async fn create_board_backup(
                 &format!("board-{board_short}"),
             );
             let root_dir = storage::create_backup_root(&backup_id)?;
+            let mut incomplete = storage::IncompleteBackup::new(&root_dir);
             let boards = vec![crate::models::BackupBoardSummary {
                 short_name: manifest.board.short_name.clone(),
                 name: manifest.board.name.clone(),
@@ -991,6 +1004,7 @@ pub(in crate::server) async fn create_board_backup(
             };
 
             let backup_ref = finalize_saved_backup(&root_dir, manifest_v4)?;
+            incomplete.publish();
             invalidate_backup_list_cache(&board_backup_dir(), BackupListKind::Board);
 
             let size = storage::scan_dir_stats(&root_dir).bytes;
@@ -1312,6 +1326,7 @@ pub(super) fn write_board_backup_archive_from_dir(
 ) -> Result<()> {
     write_board_backup_archive(output_path, manifest_json, progress, |zip| {
         let opts = zip::write::SimpleFileOptions::default()
+            .large_file(true)
             .compression_method(zip::CompressionMethod::Deflated);
         if board_upload_path.exists() {
             if let Some(progress) = progress {
@@ -1344,6 +1359,7 @@ where
     let out_file = std::io::BufWriter::new(file);
     let mut zip = zip::ZipWriter::new(out_file);
     let opts = zip::write::SimpleFileOptions::default()
+        .large_file(true)
         .compression_method(zip::CompressionMethod::Deflated);
 
     zip.start_file("board.json", opts)
@@ -1813,7 +1829,7 @@ fn finalize_saved_backup(root_dir: &Path, mut manifest: storage::BackupManifest)
         created_at: manifest.created_at,
         completed_at: manifest.completed_at,
         total_size_bytes: 0,
-        verified: true,
+        verified: false,
         part_count: u32::try_from(manifest.parts.len()).unwrap_or(u32::MAX),
         includes_tor_keys: manifest.includes.tor_keys,
         included_boards: manifest.included_boards.clone(),
@@ -1843,6 +1859,13 @@ fn finalize_saved_backup(root_dir: &Path, mut manifest: storage::BackupManifest)
     storage::write_root_checksums(root_dir, &part_path_refs)?;
     metadata.total_size_bytes = storage::scan_dir_stats(root_dir).bytes;
     storage::write_json_pretty(&metadata_path, &metadata)?;
+    // Sync payloads and validate the same inventory/schema consumed by restore
+    // before publishing success or allowing retention to remove older copies.
+    super::recovery::sync_staged_tree(root_dir)?;
+    drop(storage::verify_backup_candidate(root_dir, manifest.scope)?);
+    metadata.verified = true;
+    storage::write_json_pretty(&metadata_path, &metadata)?;
     storage::write_root_checksums(root_dir, &part_path_refs)?;
+    super::recovery::sync_staged_tree(root_dir)?;
     Ok(manifest.backup_id)
 }

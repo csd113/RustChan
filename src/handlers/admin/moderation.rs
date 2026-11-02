@@ -48,7 +48,7 @@ pub(in crate::server) async fn add_ban(
 
     let ip_hash_log = form.ip_hash.chars().take(8).collect::<String>();
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -102,7 +102,7 @@ pub(in crate::server) async fn remove_ban(
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -159,7 +159,7 @@ pub(in crate::server) async fn admin_ban_and_delete(
             .saturating_add(h.min(87_600).saturating_mul(3600))
     });
 
-    let redirect = tokio::task::spawn_blocking({
+    let redirect = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -220,7 +220,7 @@ pub(in crate::server) async fn dismiss_appeal(
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -250,7 +250,7 @@ pub(in crate::server) async fn accept_appeal(
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -324,7 +324,7 @@ pub(in crate::server) async fn add_filter(
         .take(256)
         .collect::<String>();
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -358,7 +358,7 @@ pub(in crate::server) async fn remove_filter(
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -416,7 +416,7 @@ pub(in crate::server) async fn admin_ip_history(
         crate::utils::redirect::strict_safe_internal_path_or(params.return_to.as_deref(), "")
             .to_owned();
 
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             const PER_PAGE: i64 = 25;
@@ -470,7 +470,7 @@ pub(in crate::server) async fn resolve_report(
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
     super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -550,7 +550,7 @@ pub(in crate::server) async fn admin_ip_report(
         .take(8)
         .collect::<String>();
 
-    let submission = tokio::task::spawn_blocking({
+    let submission = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<db::ReportSubmission> {
             let conn = pool.get()?;
@@ -650,7 +650,7 @@ pub(in crate::server) async fn mod_log_page(
     let csrf_clone = csrf.clone();
     let page = params.page.max(1);
 
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             const PER_PAGE: i64 = 50;

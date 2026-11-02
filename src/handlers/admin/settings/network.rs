@@ -25,7 +25,7 @@ pub(in crate::server) async fn update_network_settings(
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    tokio::task::spawn_blocking(move || -> Result<Response> {
+    crate::middleware::data_access::spawn_blocking(move || -> Result<Response> {
         let conn = state.db.get()?;
         require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
         let save_result = crate::config::admin::save_network(&form);

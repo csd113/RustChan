@@ -464,6 +464,8 @@ pub struct AppState {
     pub auto_full_backup_settings: AutoFullBackupSettings,
     /// Gate preventing overlapping maintenance operations.
     pub maintenance_gate: MaintenanceGate,
+    /// Drain live-state users before backup or restore.
+    pub(crate) data_access: super::data_access::DataAccess,
     /// Gate limiting concurrent public media parsing and processing.
     pub(crate) media_upload_gate: MediaUploadGate,
     /// Bound admitted HTTP requests and response streams without queuing.

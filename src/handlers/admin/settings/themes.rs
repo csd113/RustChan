@@ -393,7 +393,7 @@ pub(in crate::server) async fn create_theme(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -458,7 +458,7 @@ pub(in crate::server) async fn update_theme(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
@@ -549,7 +549,7 @@ pub(in crate::server) async fn delete_theme(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;

@@ -78,7 +78,7 @@ pub(in crate::server) async fn update_site_settings(
         checkbox_is_on(form.banner_external_links_enabled.as_deref());
     let preserve_missing_badge_settings = is_banner_settings_only;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut pooled_connection = pool.get()?;

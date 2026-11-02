@@ -174,7 +174,7 @@ pub(in crate::server) async fn update_board_settings(
             .ok_or_else(|| AppError::BadRequest("Invalid board banner mode.".into()))?;
 
     let password_permit = state.password_work_gate.try_begin()?;
-    let board_short = tokio::task::spawn_blocking({
+    let board_short = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let _password_permit = password_permit;

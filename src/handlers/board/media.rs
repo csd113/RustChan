@@ -174,7 +174,7 @@ pub(in crate::server) async fn serve_board_media(
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, board_short);
-    let (is_protected_board, target) = match tokio::task::spawn_blocking({
+    let (is_protected_board, target) = match crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.to_owned();
         let media_path = media_path.clone();
@@ -235,7 +235,7 @@ pub(in crate::server) async fn serve_board_media(
         .is_ok_and(|resp| resp.status() == StatusCode::NOT_FOUND)
     {
         let stale_media_path = media_path.clone();
-        let redirect = tokio::task::spawn_blocking(move || {
+        let redirect = crate::middleware::data_access::spawn_blocking(move || {
             stale_media_redirect(std::path::Path::new(&CONFIG.upload_dir), &stale_media_path)
         })
         .await;
@@ -351,7 +351,7 @@ pub(in crate::server) async fn api_post_preview(
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         move || -> Result<Option<(String, i64)>> {
@@ -438,7 +438,7 @@ pub(in crate::server) async fn redirect_to_post(
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(Option<i64>, bool)> {
             let conn = pool.get()?;

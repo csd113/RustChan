@@ -285,6 +285,8 @@ fn log_thread_prune_schedule(board_id: i64, schedule: crate::db::ThreadPruneSche
 pub struct JobQueue {
     /// Database pool used to persist and claim background jobs.
     pub pool: DbPool,
+    /// Coordinate complete jobs with backup and restore.
+    pub(crate) data_access: crate::middleware::data_access::DataAccess,
     /// Wakes an idle worker after a producer enqueues work.
     pub notify: Arc<Notify>,
     /// Token cancelled at shutdown; workers observe this to exit cleanly.
@@ -305,7 +307,10 @@ pub struct JobQueue {
 impl JobQueue {
     /// Creates a queue backed by `pool`, initializing its pending-job gauge.
     #[must_use]
-    pub fn new(pool: DbPool) -> Self {
+    pub(crate) fn new(
+        pool: DbPool,
+        data_access: crate::middleware::data_access::DataAccess,
+    ) -> Self {
         let pending_jobs = pool
             .get()
             .ok()
@@ -319,6 +324,7 @@ impl JobQueue {
             });
         Self {
             pool,
+            data_access,
             notify: Arc::new(Notify::new()),
             cancel: CancellationToken::new(),
             in_progress: Arc::new(DashMap::new()),
@@ -879,7 +885,7 @@ async fn recover_non_transient_completion_error(
     let recovery_identity = media_identity.clone();
     let original_error = completion_error.to_string();
     let recovery_error = original_error.clone();
-    let recovery_result = tokio::task::spawn_blocking(move || {
+    let recovery_result = crate::middleware::data_access::spawn_blocking(move || {
         recover_job_after_completion_error_once(
             &recovery_pool,
             job_id,
@@ -926,7 +932,7 @@ async fn persist_job_completion(
         let attempt_pool = pool.clone();
         let attempt_completion = completion.clone();
         let attempt_identity = media_identity.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = crate::middleware::data_access::spawn_blocking(move || {
             persist_job_completion_once(
                 &attempt_pool,
                 job_id,
@@ -984,7 +990,6 @@ async fn persist_job_completion(
 }
 
 #[expect(
-    clippy::cognitive_complexity,
     clippy::too_many_lines,
     reason = "claim, execution, completion persistence, retry, and shutdown form one worker state machine"
 )]
@@ -1006,126 +1011,140 @@ async fn worker_loop(
             return;
         }
 
-        // Atomically claim the next pending job (UPDATE … RETURNING).
-        let pool_claim = queue.pool.clone();
-        let claim = tokio::task::spawn_blocking(move || {
-            let c = pool_claim.get().map_err(anyhow::Error::from)?;
-            crate::db::claim_next_job(&c)
+        let Some(access) = queue.data_access.try_read() else {
+            tokio::select! {
+                () = sleep(Duration::from_millis(100)) => {},
+                () = queue.cancel.cancelled() => return,
+            }
+            continue;
+        };
+        let outcome = crate::middleware::data_access::scope(access, async {
+            // Atomically claim the next pending job (UPDATE … RETURNING).
+            let pool_claim = queue.pool.clone();
+            let claim = crate::middleware::data_access::spawn_blocking(move || {
+                let c = pool_claim.get().map_err(anyhow::Error::from)?;
+                crate::db::claim_next_job(&c)
+            })
+            .await;
+
+            match claim {
+                Ok(Ok(Some((job_id, payload)))) => {
+                    queue.mark_job_claimed();
+                    consecutive_errors = 0; // reset back-off on any successful claim
+                    debug!("Worker {id}: picked up job #{job_id}");
+                    let job: Job = match serde_json::from_str(&payload) {
+                        Ok(job) => job,
+                        Err(error) => {
+                            error!("Worker {id}: cannot deserialize job #{job_id}: {error}");
+                            let err_msg = format!("Cannot deserialize job payload: {error}");
+                            match persist_job_completion(
+                                id,
+                                queue.pool.clone(),
+                                job_id,
+                                None,
+                                JobCompletion::Failed(err_msg),
+                                queue.cancel.clone(),
+                            )
+                            .await
+                            {
+                                Ok(Some(failure_state)) => {
+                                    queue.mark_job_failure_state(failure_state);
+                                }
+                                Ok(None) => {}
+                                Err(completion_error) => {
+                                    error!(
+                                        "Worker {id}: could not resolve broken job #{job_id}: {completion_error}"
+                                    );
+                                    return std::ops::ControlFlow::Break(());
+                                }
+                            }
+                            return std::ops::ControlFlow::Continue(());
+                        }
+                    };
+                    let media_identity = media_job_identity(&job);
+                    let result = handle_job(
+                        job_id,
+                        job,
+                        ffmpeg_available,
+                        ffmpeg_vp9_available,
+                        queue.pool.clone(),
+                        Arc::clone(&queue.in_progress),
+                        Arc::clone(&queue.active_video_jobs),
+                        queue.cancel.clone(),
+                    )
+                    .await;
+                    let completion = match result {
+                        Ok(JobExecution::Persisted) => return std::ops::ControlFlow::Continue(()),
+                        Ok(JobExecution::NeedsCompletion) => JobCompletion::Done,
+                        Ok(JobExecution::Stale) => JobCompletion::Stale,
+                        Err(error) if crate::db::is_stale_media_target_error(&error) => {
+                            warn!("Worker {id}: job #{job_id} target is stale — {error}");
+                            JobCompletion::Stale
+                        }
+                        Err(error) => {
+                            warn!("Worker {id}: job #{job_id} failed — {error}");
+                            JobCompletion::Failed(error.to_string())
+                        }
+                    };
+                    let completion_result = persist_job_completion(
+                        id,
+                        queue.pool.clone(),
+                        job_id,
+                        media_identity,
+                        completion,
+                        queue.cancel.clone(),
+                    )
+                    .await;
+                    match completion_result {
+                        Ok(Some(failure_state)) => {
+                            queue.mark_job_failure_state(failure_state);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            error!(
+                                "Worker {id}: could not resolve completion for job #{job_id}: {error}"
+                            );
+                            return std::ops::ControlFlow::Break(());
+                        }
+                    }
+                }
+                Ok(Ok(None)) => {
+                    consecutive_errors = 0; // queue empty is not an error
+                                            // Queue is empty — sleep until notified, POLL_INTERVAL elapses,
+                                            // or a shutdown is requested (#7).
+                    tokio::select! {
+                        () = queue.notify.notified() => {}
+                        () = sleep(POLL_INTERVAL) => {}
+                        () = queue.cancel.cancelled() => {
+                            debug!("Worker {id} exiting: shutdown requested while idle");
+                            return std::ops::ControlFlow::Break(());
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    error!("Worker {id}: DB error while claiming job: {e}");
+                    let delay = backoff_duration(consecutive_errors);
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    tokio::select! {
+                        () = sleep(delay) => {}
+                        () = queue.cancel.cancelled() => { return std::ops::ControlFlow::Break(()); }
+                    }
+                }
+                Err(e) => {
+                    error!("Worker {id}: panic in spawn_blocking: {e}");
+                    let delay = backoff_duration(consecutive_errors);
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    tokio::select! {
+                        () = sleep(delay) => {}
+                        () = queue.cancel.cancelled() => { return std::ops::ControlFlow::Break(()); }
+                    }
+                }
+            }
+            std::ops::ControlFlow::Continue(())
         })
         .await;
-
-        match claim {
-            Ok(Ok(Some((job_id, payload)))) => {
-                queue.mark_job_claimed();
-                consecutive_errors = 0; // reset back-off on any successful claim
-                debug!("Worker {id}: picked up job #{job_id}");
-                let job: Job = match serde_json::from_str(&payload) {
-                    Ok(job) => job,
-                    Err(error) => {
-                        error!("Worker {id}: cannot deserialize job #{job_id}: {error}");
-                        let err_msg = format!("Cannot deserialize job payload: {error}");
-                        match persist_job_completion(
-                            id,
-                            queue.pool.clone(),
-                            job_id,
-                            None,
-                            JobCompletion::Failed(err_msg),
-                            queue.cancel.clone(),
-                        )
-                        .await
-                        {
-                            Ok(Some(failure_state)) => {
-                                queue.mark_job_failure_state(failure_state);
-                            }
-                            Ok(None) => {}
-                            Err(completion_error) => {
-                                error!(
-                                    "Worker {id}: could not resolve broken job #{job_id}: {completion_error}"
-                                );
-                                return;
-                            }
-                        }
-                        continue;
-                    }
-                };
-                let media_identity = media_job_identity(&job);
-                let result = handle_job(
-                    job_id,
-                    job,
-                    ffmpeg_available,
-                    ffmpeg_vp9_available,
-                    queue.pool.clone(),
-                    Arc::clone(&queue.in_progress),
-                    Arc::clone(&queue.active_video_jobs),
-                    queue.cancel.clone(),
-                )
-                .await;
-                let completion = match result {
-                    Ok(JobExecution::Persisted) => continue,
-                    Ok(JobExecution::NeedsCompletion) => JobCompletion::Done,
-                    Ok(JobExecution::Stale) => JobCompletion::Stale,
-                    Err(error) if crate::db::is_stale_media_target_error(&error) => {
-                        warn!("Worker {id}: job #{job_id} target is stale — {error}");
-                        JobCompletion::Stale
-                    }
-                    Err(error) => {
-                        warn!("Worker {id}: job #{job_id} failed — {error}");
-                        JobCompletion::Failed(error.to_string())
-                    }
-                };
-                let completion_result = persist_job_completion(
-                    id,
-                    queue.pool.clone(),
-                    job_id,
-                    media_identity,
-                    completion,
-                    queue.cancel.clone(),
-                )
-                .await;
-                match completion_result {
-                    Ok(Some(failure_state)) => {
-                        queue.mark_job_failure_state(failure_state);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        error!(
-                            "Worker {id}: could not resolve completion for job #{job_id}: {error}"
-                        );
-                        return;
-                    }
-                }
-            }
-            Ok(Ok(None)) => {
-                consecutive_errors = 0; // queue empty is not an error
-                                        // Queue is empty — sleep until notified, POLL_INTERVAL elapses,
-                                        // or a shutdown is requested (#7).
-                tokio::select! {
-                    () = queue.notify.notified() => {}
-                    () = sleep(POLL_INTERVAL) => {}
-                    () = queue.cancel.cancelled() => {
-                        debug!("Worker {id} exiting: shutdown requested while idle");
-                        return;
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                error!("Worker {id}: DB error while claiming job: {e}");
-                let delay = backoff_duration(consecutive_errors);
-                consecutive_errors = consecutive_errors.saturating_add(1);
-                tokio::select! {
-                    () = sleep(delay) => {}
-                    () = queue.cancel.cancelled() => { return; }
-                }
-            }
-            Err(e) => {
-                error!("Worker {id}: panic in spawn_blocking: {e}");
-                let delay = backoff_duration(consecutive_errors);
-                consecutive_errors = consecutive_errors.saturating_add(1);
-                tokio::select! {
-                    () = sleep(delay) => {}
-                    () = queue.cancel.cancelled() => { return; }
-                }
-            }
+        if outcome.is_break() {
+            return;
         }
     }
 }
@@ -1325,7 +1344,7 @@ async fn transcode_video(
     let prepare_result = {
         let file_path2 = file_path.clone();
         let board_short2 = board_short.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::middleware::data_access::spawn_blocking(move || {
             transcode_video_prepare(post_id, &file_path2, &board_short2)
         })
         .await
@@ -1341,7 +1360,7 @@ async fn transcode_video(
     run_video_transcode(command, post_id, timeout_secs, cancel).await?;
 
     // File persistence and database updates are blocking.
-    let finalise_result = tokio::task::spawn_blocking(move || {
+    let finalise_result = crate::middleware::data_access::spawn_blocking(move || {
         transcode_video_finalise(
             job_id, post_id, &file_path, &src_path, &webm_abs, &webm_rel, tmp, &pool,
         )
@@ -1793,9 +1812,11 @@ async fn generate_waveform(
     cancel: CancellationToken,
 ) -> Result<JobExecution> {
     let (png_abs, png_rel, src_path, expected_file_path, tmp_png) =
-        tokio::task::spawn_blocking(move || waveform_prepare(&file_path, &board_short))
-            .await
-            .map_err(|error| anyhow::anyhow!("waveform preparation failed: {error}"))??;
+        crate::middleware::data_access::spawn_blocking(move || {
+            waveform_prepare(&file_path, &board_short)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("waveform preparation failed: {error}"))??;
     if !render_waveform_with_compatibility(&src_path, tmp_png.path(), ffmpeg_available, &cancel)
         .await?
     {
@@ -1804,7 +1825,7 @@ async fn generate_waveform(
     if cancel.is_cancelled() {
         anyhow::bail!("audio waveform cancelled before persistence");
     }
-    let finalised = tokio::task::spawn_blocking(move || {
+    let finalised = crate::middleware::data_access::spawn_blocking(move || {
         waveform_finalise(
             job_id,
             post_id,
@@ -1834,7 +1855,7 @@ async fn render_waveform_with_compatibility(
     let source = src_path.to_path_buf();
     let decoder_output_path = output_path.to_path_buf();
     let decoder_cancel = cancel.clone();
-    let rendered = tokio::task::spawn_blocking(move || {
+    let rendered = crate::middleware::data_access::spawn_blocking(move || {
         crate::media::audio::render_waveform(
             &source,
             &decoder_output_path,
@@ -2130,7 +2151,7 @@ fn sha256_file_hex(path: &std::path::Path) -> Result<String> {
 // ThreadPrune
 /// Applies one board's live and archived thread-retention limits.
 async fn prune_threads(board_id: i64, pool: DbPool) -> Result<()> {
-    tokio::task::spawn_blocking(move || {
+    crate::middleware::data_access::spawn_blocking(move || {
         let conn = pool.get()?;
         // Policy and both retention transitions share one write lock. A concurrent
         // board-settings edit cannot change the policy between read and deletion.

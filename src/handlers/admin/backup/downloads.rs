@@ -167,7 +167,7 @@ pub(in crate::server) async fn download_backup(
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
     };
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -298,7 +298,7 @@ pub(in crate::server) async fn backup_progress_json(
     jar: CookieJar,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -335,7 +335,7 @@ pub(in crate::server) async fn delete_backup(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let _maintenance_guard = state.maintenance_gate.try_begin("Saved backup deletion")?;
+    let maintenance_guard = state.maintenance_gate.try_begin("Saved backup deletion")?;
 
     let safe_filename = validate_saved_backup_reference(&form.filename)?;
 
@@ -345,9 +345,10 @@ pub(in crate::server) async fn delete_backup(
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
     };
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
+            let _maintenance_guard = maintenance_guard;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 

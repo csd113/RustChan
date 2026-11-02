@@ -9,11 +9,10 @@ use super::{
     should_set_secure_cookie, stream_restore_upload_to_tempfile, validate_board_short_name,
     validate_entry_path_under_prefix, validate_full_restore_archive_layout,
     validate_restore_safe_entry_name, validate_saved_backup_reference,
-    validate_streamed_restore_upload, verify_full_backup_archive, AppError, AppState, Backup,
-    Cookie, CookieJar, Duration, Form, HashMap, HeaderMap, Multipart, Path, PathBuf, Redirect,
-    Request, Response, RestoreKind, RestoreSavedForm, Result, Seek, State, Utc,
-    ADMIN_COOKIE_SAME_SITE, BANNER_RESTORE_ENTRY_MAX_BYTES, CONFIG, SESSION_COOKIE, SQLITE_HEADER,
-    ZIP_ENTRY_MAX_BYTES,
+    validate_streamed_restore_upload, AppError, AppState, Backup, Cookie, CookieJar, Duration,
+    Form, HashMap, HeaderMap, Multipart, Path, PathBuf, Redirect, Request, Response, RestoreKind,
+    RestoreSavedForm, Result, Seek, State, Utc, ADMIN_COOKIE_SAME_SITE,
+    BANNER_RESTORE_ENTRY_MAX_BYTES, CONFIG, SESSION_COOKIE, SQLITE_HEADER,
 };
 use crate::handlers::admin::backup::safety::{
     copy_limited_with_total_budget, RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
@@ -59,7 +58,7 @@ pub(super) fn refresh_live_site_state_from_db(conn: &rusqlite::Connection) -> Re
     reason = "all restored-database trust checks remain contiguous before any live-state mutation"
 )]
 /// Validates full restore database trust boundary.
-fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Result<()> {
+pub(super) fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Result<()> {
     let mut valid_board_shorts = std::collections::HashSet::new();
     let mut board_ids_to_shorts = HashMap::new();
     let mut stmt = conn
@@ -186,7 +185,7 @@ fn validate_full_restore_db_trust_boundary(conn: &rusqlite::Connection) -> Resul
     Ok(())
 }
 
-fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> {
+pub(super) fn recompute_restored_post_body_html(conn: &rusqlite::Connection) -> Result<()> {
     // Keyset pages prevent an 8 GiB snapshot from materializing every body.
     // Incremental reads bound bytes before allocation and count NUL bytes as
     // Rust scalars, unlike SQLite text length/substr functions.
@@ -249,65 +248,13 @@ fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-struct FullRestoreTempPaths {
-    temp_db: PathBuf,
-    db_snapshot: PathBuf,
-}
+pub(super) use super::recovery_files::{FullRestoreTempCleanupGuard, FullRestoreTempPaths};
 
 fn full_restore_runtime_tmp_dir() -> PathBuf {
     crate::config::runtime_tmp_dir()
 }
 
-struct FullRestoreTempCleanupGuard {
-    db_paths: [PathBuf; 2],
-}
-
-impl FullRestoreTempCleanupGuard {
-    fn new(paths: &FullRestoreTempPaths) -> Self {
-        Self {
-            db_paths: [paths.temp_db.clone(), paths.db_snapshot.clone()],
-        }
-    }
-}
-
-impl Drop for FullRestoreTempCleanupGuard {
-    fn drop(&mut self) {
-        for path in &self.db_paths {
-            remove_sqlite_db_and_sidecars(path);
-        }
-    }
-}
-
-fn sqlite_db_and_sidecar_paths(path: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![path.to_path_buf()];
-    let Some(file_name) = path.file_name() else {
-        return paths;
-    };
-
-    for suffix in ["-wal", "-shm", "-journal"] {
-        let mut sidecar_name = file_name.to_os_string();
-        sidecar_name.push(suffix);
-        paths.push(path.with_file_name(sidecar_name));
-    }
-    paths
-}
-
-/// Removes `SQLite` database and sidecars.
-fn remove_sqlite_db_and_sidecars(path: &Path) {
-    for candidate in sqlite_db_and_sidecar_paths(path) {
-        if let Err(error) = std::fs::remove_file(&candidate) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(
-                    path = %candidate.display(),
-                    %error,
-                    "Failed to remove full restore temporary SQLite file"
-                );
-            }
-        }
-    }
-}
-
-fn prepare_full_restore_temp_paths(tmp_id: &str) -> Result<FullRestoreTempPaths> {
+pub(super) fn prepare_full_restore_temp_paths(tmp_id: &str) -> Result<FullRestoreTempPaths> {
     prepare_full_restore_temp_paths_in(&full_restore_runtime_tmp_dir(), tmp_id)
 }
 
@@ -374,7 +321,7 @@ fn create_private_restore_temp_db(path: &Path) -> Result<std::fs::File> {
     }
 }
 
-fn create_live_restore_snapshot(
+pub(super) fn create_live_restore_snapshot(
     live_conn: &rusqlite::Connection,
     db_snapshot: &Path,
 ) -> Result<()> {
@@ -386,6 +333,7 @@ fn create_live_restore_snapshot(
         .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {error}")))?;
     restrict_restore_temp_file(db_snapshot)?;
+    std::fs::File::open(db_snapshot)?.sync_all()?;
     Ok(())
 }
 
@@ -421,13 +369,14 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     live_tor_hidden_service_keys_dir: Option<&Path>,
     restore_tor_hidden_service_keys: bool,
     archive: &mut zip::ZipArchive<R>,
+    restore_budget: u64,
     restore_label: &str,
     completion_log: &str,
     suspicious_entry_log: &str,
     session_warning_log: &str,
 ) -> Result<String> {
     validate_full_restore_archive_layout(archive)?;
-    let manifest = verify_full_backup_archive(archive)?;
+    let manifest = safety::verify_full_backup_archive_with_budget(archive, restore_budget)?;
     validate_restored_session_duration(CONFIG.session_duration)?;
     if restore_tor_hidden_service_keys && !manifest.tor_hidden_service_keys_included {
         return Err(AppError::BadRequest(
@@ -446,21 +395,28 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
 
     let tmp_id = uuid::Uuid::new_v4().simple().to_string();
     let temp_paths = prepare_full_restore_temp_paths(&tmp_id)?;
-    let _temp_file_cleanup = FullRestoreTempCleanupGuard::new(&temp_paths);
+    let mut temp_file_cleanup = FullRestoreTempCleanupGuard::new(&temp_paths);
     let FullRestoreTempPaths {
         temp_db,
         db_snapshot,
     } = temp_paths;
+    let mut staging_cleanup = super::recovery_files::StagingDirectories::default();
     let upload_root = PathBuf::from(upload_dir);
     let staged_upload_root = create_staging_dir(&upload_root, "restore-stage")?;
+    staging_cleanup.track(&staged_upload_root);
     let live_global_favicon_dir = crate::favicon::global_backup_source_dir();
     let staged_global_favicon_dir = create_staging_dir(&live_global_favicon_dir, "restore-stage")?;
+    staging_cleanup.track(&staged_global_favicon_dir);
     let live_global_banner_dir = banner::backup_source_dir();
     let staged_global_banner_dir = create_staging_dir(&live_global_banner_dir, "restore-stage")?;
+    staging_cleanup.track(&staged_global_banner_dir);
     let staged_tor_hidden_service_keys_dir = live_tor_hidden_service_keys_dir
         .as_deref()
         .map(|live_path| create_staging_dir(live_path, "restore-stage"))
         .transpose()?;
+    if let Some(path) = &staged_tor_hidden_service_keys_dir {
+        staging_cleanup.track(path);
+    }
     let mut favicon_extracted = false;
     let mut banner_extracted = false;
     let mut tor_hidden_service_key_files_extracted = 0u64;
@@ -537,9 +493,9 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
             copy_limited_with_total_budget(
                 &mut entry,
                 &mut out,
-                ZIP_ENTRY_MAX_BYTES,
+                restore_budget,
                 &mut extracted_bytes,
-                RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                restore_budget,
                 "Full restore archive",
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Write temp DB: {error}")))
@@ -584,9 +540,9 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 copy_limited_with_total_budget(
                     &mut entry,
                     &mut out,
-                    ZIP_ENTRY_MAX_BYTES,
+                    restore_budget,
                     &mut extracted_bytes,
-                    RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                    restore_budget,
                     "Full restore archive",
                 )
                 .map_err(|error| {
@@ -613,9 +569,9 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 copy_limited_with_total_budget(
                     &mut entry,
                     &mut out,
-                    ZIP_ENTRY_MAX_BYTES,
+                    restore_budget,
                     &mut extracted_bytes,
-                    RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                    restore_budget,
                     "Full restore archive",
                 )
                 .map_err(|error| {
@@ -653,7 +609,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 &mut out,
                 BANNER_RESTORE_ENTRY_MAX_BYTES,
                 &mut extracted_bytes,
-                RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                restore_budget,
                 "Full restore archive",
             )
             .map_err(|error| {
@@ -681,9 +637,9 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 copy_limited_with_total_budget(
                     &mut entry,
                     &mut out,
-                    ZIP_ENTRY_MAX_BYTES,
+                    restore_budget,
                     &mut extracted_bytes,
-                    RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+                    restore_budget,
                     "Full restore archive",
                 )
                 .map_err(|error| {
@@ -785,6 +741,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
         })?,
     };
 
+    let mut restore_started = false;
     let backup_result = (|| -> Result<()> {
         let src = rusqlite::Connection::open(&temp_db)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Open backup source: {error}")))?;
@@ -800,6 +757,14 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
         db::rebuild_pending_fs_ops_for_restore(&src)?;
         db::insert_pending_fs_op(&src, &pending_restore_op)?;
         db::verify_pending_fs_op_present(&src, &pending_restore_id)?;
+        super::recovery::sync_staged_tree(&staged_upload_root)?;
+        for swap in &pending_restore_payload.additional_swaps {
+            super::recovery::sync_staged_tree(Path::new(&swap.staged))?;
+        }
+        staging_cleanup.retain(true);
+        temp_file_cleanup.retain_snapshot(true);
+        super::recovery::begin_restore(&pending_restore_id, &db_snapshot)?;
+        restore_started = true;
         let backup = Backup::new(&src, live_conn)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Backup init: {error}")))?;
         backup
@@ -811,21 +776,23 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     })();
 
     if let Err(error) = backup_result {
-        let restore_db_result = restore_db_from_snapshot(live_conn, &db_snapshot, restore_label);
-        drop(std::fs::remove_file(&temp_db));
-        drop(std::fs::remove_file(&db_snapshot));
+        if restore_started {
+            if let Err(restore_error) =
+                restore_db_from_snapshot(live_conn, &db_snapshot, restore_label)
+            {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "{restore_label} failed and rollback failed: {error}; rollback error: {restore_error}; safety snapshot retained at {}", db_snapshot.display()
+                )));
+            }
+            super::recovery::finish_restore()?;
+            temp_file_cleanup.retain_snapshot(false);
+            staging_cleanup.retain(false);
+        }
         drop(remove_path_if_exists(&staged_upload_root));
         drop(remove_path_if_exists(&staged_global_favicon_dir));
         drop(remove_path_if_exists(&staged_global_banner_dir));
-        if let Some(staged_tor_hidden_service_keys_dir) =
-            staged_tor_hidden_service_keys_dir.as_ref()
-        {
-            drop(remove_path_if_exists(staged_tor_hidden_service_keys_dir));
-        }
-        if let Err(restore_err) = restore_db_result {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "{restore_label} failed and rollback failed: {error}; rollback error: {restore_err}"
-            )));
+        if let Some(staged) = &staged_tor_hidden_service_keys_dir {
+            drop(remove_path_if_exists(staged));
         }
         return Err(error);
     }
@@ -835,13 +802,14 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
         &upload_root,
         live_tor_hidden_service_keys_dir.as_deref(),
     ) {
-        drop(std::fs::remove_file(&temp_db));
-        drop(std::fs::remove_file(&db_snapshot));
         return Err(AppError::Internal(anyhow::anyhow!(
             "{restore_label} filesystem swap failed and remains pending for startup reconciliation: {error}"
         )));
     }
     db::delete_pending_fs_op(live_conn, &pending_restore_id)?;
+    super::recovery::finish_restore()?;
+    temp_file_cleanup.retain_snapshot(false);
+    staging_cleanup.retain(false);
 
     if !favicon_extracted {
         drop(remove_path_if_exists(&staged_global_favicon_dir));
@@ -949,9 +917,17 @@ pub(in crate::server) async fn admin_restore(
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
-    let _maintenance_guard = match state
-        .maintenance_gate
-        .try_begin(RestoreKind::Full.maintenance_label())
+    let session_id = match restore_auth_preflight(&state, &headers, &jar, secure_context.peer).await
+    {
+        Ok(session) => session,
+        Err(error) => return restore_start_response(RestoreKind::Full, xhr_request, &error),
+    };
+    let maintenance_guard = match super::recovery::reserve_operation(
+        &state,
+        &jar,
+        RestoreKind::Full.maintenance_label(),
+    )
+    .await
     {
         Ok(guard) => guard,
         Err(error) => return restore_start_response(RestoreKind::Full, xhr_request, &error),
@@ -973,8 +949,6 @@ pub(in crate::server) async fn admin_restore(
     };
 
     let result: Result<String> = async {
-        let session_id =
-            restore_auth_preflight(&state, &headers, &jar, secure_context.peer).await?;
         let upload = stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart).await?;
         validate_streamed_restore_upload(RestoreKind::Full, &jar, &upload)
             .map(|_completed_value| ())?;
@@ -986,9 +960,11 @@ pub(in crate::server) async fn admin_restore(
         let live_tor_hidden_service_keys_dir =
             crate::config::configured_tor_hidden_service_keys_dir();
 
-        let restore_result = tokio::task::spawn_blocking({
+        let maintenance_guard = super::recovery::drain_operation(&state, maintenance_guard).await?;
+        let restore_result = crate::middleware::data_access::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<String> {
+                let _operation_guard = maintenance_guard;
                 let mut live_conn = pool.get()?;
                 let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
 
@@ -1036,6 +1012,7 @@ pub(in crate::server) async fn admin_restore(
                     live_tor_hidden_service_keys_dir.as_deref(),
                     restore_tor_hidden_service_keys,
                     &mut archive,
+                    RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
                     "Restore",
                     "Restore completed, new session issued",
                     "Restore",
@@ -1087,18 +1064,19 @@ pub(in crate::server) async fn restore_saved_full_backup(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
-    let _maintenance_guard = state
-        .maintenance_gate
-        .try_begin(RestoreKind::Full.maintenance_label())?;
+    let maintenance_guard =
+        super::recovery::begin_operation(&state, &jar, RestoreKind::Full.maintenance_label())
+            .await?;
 
     let safe_filename = validate_saved_backup_reference(&form.filename)?;
     let upload_dir = CONFIG.upload_dir.clone();
     let restore_tor_hidden_service_keys = form.restore_tor_hidden_service_keys;
     let live_tor_hidden_service_keys_dir = crate::config::configured_tor_hidden_service_keys_dir();
 
-    let restore_result = tokio::task::spawn_blocking({
+    let restore_result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
+            let _operation_guard = maintenance_guard;
             let mut live_conn = pool.get()?;
             let admin_id = require_admin_session_sid(&live_conn, session_id.as_deref())?;
             let root_dir = crate::config::backups_dir().join(&safe_filename);
@@ -1110,8 +1088,13 @@ pub(in crate::server) async fn restore_saved_full_backup(
             };
             let _restore_archive_guard = restore_archive_path
                 .as_ref()
-                .map(|path| archive::TempZipCleanupGuard::new(path.clone()));
-            let archive_path = restore_archive_path.as_deref().unwrap_or(&legacy_zip_path);
+                .map(|(path, _)| archive::TempZipCleanupGuard::new(path.clone()));
+            let restore_budget = restore_archive_path
+                .as_ref()
+                .map_or(RESTORE_TOTAL_EXTRACTED_MAX_BYTES, |(_, budget)| *budget);
+            let archive_path = restore_archive_path
+                .as_ref()
+                .map_or(legacy_zip_path.as_path(), |(path, _)| path.as_path());
 
             let zip_file = std::fs::File::open(archive_path)
                 .map_err(|_error| AppError::NotFound("Backup file not found.".into()))?;
@@ -1124,6 +1107,7 @@ pub(in crate::server) async fn restore_saved_full_backup(
                 live_tor_hidden_service_keys_dir.as_deref(),
                 restore_tor_hidden_service_keys,
                 &mut archive,
+                restore_budget,
                 "Restore-saved",
                 "Restore-saved completed",
                 "Restore-saved",

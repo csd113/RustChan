@@ -63,7 +63,7 @@ pub(in crate::server) async fn catalog(
 
     // The most-recently-bumped thread drives the ETag, matching the board index.
     let thread_activity_markers = thread_activity_markers_from_jar(&jar);
-    let catalog_data = tokio::task::spawn_blocking({
+    let catalog_data = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -309,7 +309,7 @@ pub(in crate::server) async fn hidden_threads(
 
     let admin_csrf =
         admin_scoped_csrf_token(&jar, admin_session_id.as_deref(), access_context.is_admin);
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -417,7 +417,7 @@ pub(in crate::server) async fn board_archive(
         ));
     }
 
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
@@ -527,7 +527,7 @@ pub(in crate::server) async fn search(
         ));
     }
 
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         move || -> Result<String> {

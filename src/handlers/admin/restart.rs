@@ -27,7 +27,7 @@ pub(in crate::server) struct RestartForm {
 pub(super) async fn snapshot(native_status: Option<&crate::updates::Status>) -> View {
     let managed = crate::updates::managed();
     let local = if crate::restart::container_restart_enabled() {
-        tokio::task::spawn_blocking(crate::restart::container_status)
+        crate::middleware::data_access::spawn_blocking(crate::restart::container_status)
             .await
             .ok()
             .and_then(std::result::Result::ok)
@@ -39,10 +39,11 @@ pub(super) async fn snapshot(native_status: Option<&crate::updates::Status>) -> 
     } else {
         local.as_ref()
     };
-    let pending = tokio::task::spawn_blocking(crate::config::admin::restart_pending)
-        .await
-        .ok()
-        .and_then(std::result::Result::ok);
+    let pending =
+        crate::middleware::data_access::spawn_blocking(crate::config::admin::restart_pending)
+            .await
+            .ok()
+            .and_then(std::result::Result::ok);
     let in_progress = status.is_some_and(|s| s.phase.active());
     let supported = (managed || crate::restart::container_restart_enabled()) && pending.is_some();
     let message = if pending.is_none() {
@@ -92,9 +93,10 @@ pub(in crate::server) async fn restart(
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
     let administrator = updates::authorize(&state, &jar).await?;
     let guard = state.maintenance_gate.try_begin("Settings restart")?;
-    let pending = tokio::task::spawn_blocking(crate::config::admin::restart_pending)
-        .await
-        .map_err(|error| AppError::Internal(error.into()))??;
+    let pending =
+        crate::middleware::data_access::spawn_blocking(crate::config::admin::restart_pending)
+            .await
+            .map_err(|error| AppError::Internal(error.into()))??;
     if !pending {
         return Err(AppError::BadRequest(
             "No saved settings require a restart.".into(),
@@ -109,7 +111,7 @@ pub(in crate::server) async fn restart(
         let acknowledged_rejection = result.as_ref().is_ok_and(|reply| reply.error.is_some());
         if !acknowledged_rejection {
             let cancel = state.job_queue.cancel.clone();
-            drop(tokio::spawn(async move {
+            drop(crate::middleware::data_access::spawn(async move {
                 let _guard = guard;
                 loop {
                     if cancel.is_cancelled() {
@@ -133,11 +135,13 @@ pub(in crate::server) async fn restart(
             Err(_) => return Ok(outcome(&headers, None, "Restart acknowledgment timed out. Check restart status before retrying; the supervisor may have accepted it.")),
         }
     } else if crate::restart::container_restart_enabled() {
-        tokio::task::spawn_blocking(move || crate::restart::request_container(administrator))
-            .await
-            .map_err(|error| AppError::Internal(error.into()))??;
+        crate::middleware::data_access::spawn_blocking(move || {
+            crate::restart::request_container(administrator)
+        })
+        .await
+        .map_err(|error| AppError::Internal(error.into()))??;
         let cancel = state.job_queue.cancel.clone();
-        drop(tokio::spawn(async move {
+        drop(crate::middleware::data_access::spawn(async move {
             let _guard = guard;
             // Permit the 303 response to reach the browser before closing listeners.
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;

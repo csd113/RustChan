@@ -364,7 +364,7 @@ pub(super) async fn restore_auth_preflight(
     {
         let pool = state.db.clone();
         let session_id_for_task = session_id.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        crate::middleware::data_access::spawn_blocking(move || -> Result<()> {
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id_for_task.as_deref())
                 .map(|_completed_value| ())?;

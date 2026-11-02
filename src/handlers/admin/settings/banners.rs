@@ -126,7 +126,7 @@ pub(in crate::server) struct ClearBoardBannerForm {
 }
 
 async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -273,7 +273,7 @@ async fn upload_banner_for_scope(
     parsed: ParsedBannerUpload,
     media_permit: crate::middleware::MediaUploadGuard,
 ) -> Result<String> {
-    tokio::task::spawn_blocking(move || -> Result<String> {
+    crate::middleware::data_access::spawn_blocking(move || -> Result<String> {
         let _media_permit = media_permit;
         let mut conn = state.db.get()?;
         require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
@@ -535,7 +535,7 @@ pub(in crate::server) async fn update_banner_meta(
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -603,7 +603,7 @@ pub(in crate::server) async fn delete_banner(
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let anchor = tokio::task::spawn_blocking({
+    let anchor = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -645,7 +645,7 @@ pub(in crate::server) async fn move_banner(
             ));
         }
     };
-    let anchor = tokio::task::spawn_blocking({
+    let anchor = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
@@ -680,7 +680,7 @@ pub(in crate::server) async fn clear_board_banner_override(
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let board_short = tokio::task::spawn_blocking({
+    let board_short = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;

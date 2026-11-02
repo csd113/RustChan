@@ -274,6 +274,32 @@ pub(super) struct VerifiedBackup {
 }
 
 #[must_use]
+/// Removes only an operation's newly allocated, unpublished backup directory.
+pub(super) struct IncompleteBackup {
+    path: Option<PathBuf>,
+}
+
+impl IncompleteBackup {
+    pub(super) fn new(path: &Path) -> Self {
+        Self {
+            path: Some(path.to_path_buf()),
+        }
+    }
+    pub(super) fn publish(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for IncompleteBackup {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            if let Err(error) = std::fs::remove_dir_all(path) {
+                tracing::warn!(path = %path.display(), %error, "Could not clean incomplete backup");
+            }
+        }
+    }
+}
+
 pub(super) fn backups_root_dir() -> PathBuf {
     crate::config::backups_dir()
 }
@@ -294,9 +320,16 @@ pub(super) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
             .map(|_completed_value| ())?;
     }
     let root = backups_root_dir().join(backup_id);
-    crate::config::ensure_private_dir(&root).map_err(|error| {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let _private_builder = builder.mode(0o700);
+    }
+    // A collision must never reuse (or later clean up) somebody else's backup.
+    builder.create(&root).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
-            "Create backup directory {}: {error}",
+            "Create new backup directory {}: {error}",
             root.display()
         ))
     })?;
@@ -975,17 +1008,47 @@ fn verify_root_declared_file(
     )
 }
 
+/// Hash bytes as they are handed to their actual restore/archive consumer.
+struct DigestWriter<'a, W> {
+    inner: &'a mut W,
+    hasher: Sha256,
+    written: u64,
+}
+
+impl<W: Write> Write for DigestWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        let chunk = bytes
+            .get(..written)
+            .ok_or_else(|| std::io::Error::other("Invalid writer byte count"))?;
+        self.hasher.update(chunk);
+        self.written = self
+            .written
+            .checked_add(u64::try_from(written).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("Verified file size overflow"))?;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Copies verified file to writer.
 pub(super) fn copy_verified_file_to_writer<W: Write>(
     file: &VerifiedFile,
     writer: &mut W,
 ) -> Result<()> {
+    let mut checked_writer = DigestWriter {
+        inner: writer,
+        hasher: Sha256::new(),
+        written: 0,
+    };
     match &file.source {
         VerifiedFileSource::RootFile(path) => {
             let mut source = std::fs::File::open(path).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Open {}: {error}", path.display()))
             })?;
-            std::io::copy(&mut source, writer)
+            super::safety::copy_limited(&mut source, &mut checked_writer, file.size)
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy verified file: {error}")))
                 .map(|_completed_value| ())?;
         }
@@ -1005,7 +1068,7 @@ pub(super) fn copy_verified_file_to_writer<W: Write>(
                     "Verified Backup v4 ZIP entry '{entry_path}' is no longer readable: {error}"
                 ))
             })?;
-            std::io::copy(&mut entry, writer)
+            super::safety::copy_limited(&mut entry, &mut checked_writer, file.size)
                 .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!(
                         "Copy verified Backup v4 ZIP entry '{entry_path}': {error}"
@@ -1013,6 +1076,14 @@ pub(super) fn copy_verified_file_to_writer<W: Write>(
                 })
                 .map(|_completed_value| ())?;
         }
+    }
+    if checked_writer.written != file.size
+        || hex::encode(checked_writer.hasher.finalize()) != file.sha256
+    {
+        return Err(AppError::BadRequest(format!(
+            "Verified backup file changed while reading: {}",
+            file.logical_path
+        )));
     }
     Ok(())
 }
@@ -1402,14 +1473,30 @@ fn verify_split_zip_files(
     Ok((verified_files, allowed_files))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "root metadata, manifest, payload, path, and checksum checks form one fail-closed verifier"
-)]
 /// Verifies the saved backup metadata, declared files, and content integrity.
 pub(super) fn verify_saved_backup(
     root_dir: &Path,
     expected_scopes: &[BackupScope],
+) -> Result<VerifiedBackup> {
+    verify_saved_backup_inner(root_dir, expected_scopes, true)
+}
+
+/// Validate payloads before publishing a newly created backup as verified.
+pub(super) fn verify_backup_candidate(
+    root_dir: &Path,
+    scope: BackupScope,
+) -> Result<VerifiedBackup> {
+    verify_saved_backup_inner(root_dir, &[scope], false)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one manifest verification boundary validates the complete saved backup"
+)]
+fn verify_saved_backup_inner(
+    root_dir: &Path,
+    expected_scopes: &[BackupScope],
+    require_published: bool,
 ) -> Result<VerifiedBackup> {
     crate::utils::fs_security::assert_dir_no_symlink(root_dir).map_err(|error| {
         AppError::BadRequest(format!(
@@ -1477,7 +1564,7 @@ pub(super) fn verify_saved_backup(
             layout.backup_ref, manifest.archive_container
         )));
     }
-    if !metadata.verified {
+    if require_published && !metadata.verified {
         return Err(AppError::BadRequest(format!(
             "Saved backup {} is not marked complete.",
             layout.backup_ref
@@ -1619,7 +1706,11 @@ pub(super) fn verify_saved_backup(
         None => None,
     };
     if let Some(snapshot) = &db_snapshot {
-        verify_db_snapshot_schema(snapshot)?;
+        // Pre-maintenance evidence must preserve a damaged database without
+        // claiming that it is a usable full-site recovery point.
+        if manifest.scope != BackupScope::PreMaintenance {
+            verify_db_snapshot_schema(snapshot, &verified_files)?;
+        }
     }
 
     match manifest.scope {
@@ -1879,7 +1970,10 @@ pub(super) fn verify_saved_backup(
 }
 
 /// Verifies database snapshot schema.
-fn verify_db_snapshot_schema(snapshot: &VerifiedDatabaseSnapshot) -> Result<()> {
+fn verify_db_snapshot_schema(
+    snapshot: &VerifiedDatabaseSnapshot,
+    files: &HashMap<String, VerifiedFile>,
+) -> Result<()> {
     let mut temp_db = tempfile::NamedTempFile::new().map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Create temporary Backup v4 DB validation file: {error}"
@@ -1896,5 +1990,24 @@ fn verify_db_snapshot_schema(snapshot: &VerifiedDatabaseSnapshot) -> Result<()> 
             "Backup v4 DB snapshot does not match the RustChan {} database baseline: {error}",
             crate::db::baseline_schema_version()
         ))
-    })
+    })?;
+    super::restore_full::validate_full_restore_db_trust_boundary(&conn)?;
+    super::restore_full::recompute_restored_post_body_html(&conn)?;
+    let mut statement = conn.prepare("SELECT file_path, thumb_path, audio_file_path FROM posts")?;
+    let rows = statement.query_map([], |row| {
+        Ok([row.get::<_, Option<String>>(0)?, row.get(1)?, row.get(2)?])
+    })?;
+    for row in rows {
+        for path in row?.into_iter().flatten().filter(|path| !path.is_empty()) {
+            let board =
+                super::safety::validate_restored_media_path(&path, "Backup database media")?;
+            let (logical, _) = runtime_upload_path_to_logical(&board, &path)?;
+            if !files.contains_key(&logical) {
+                return Err(AppError::BadRequest(format!(
+                    "Backup is missing media referenced by its database: {path}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }

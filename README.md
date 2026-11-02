@@ -191,7 +191,7 @@ Sign in at `/admin` on your site to manage boards, posts, reports, bans, appeara
 
 **Backups:** the admin panel can save or download full-site and per-board backups and restore them later. Keep independent copies and test that you can restore them. To copy the whole data directory yourself, stop the app first so the database and uploaded files remain consistent.
 
-**Backup storage:** change **Admin → Backups → backup storage directory**, or set `backup_directory` in `settings.toml`, then restart. Existing backups stay in their original location, and only the active location appears in the admin panel. Use a dedicated, writable directory; mount external storage before starting the app. For Docker, a directory outside `/data` needs its own persistent mount. See the [container backup instructions](docs/containers.md#backups).
+**Backup storage:** change **Admin → Backups → backup storage directory**, or set `backup_directory` in `settings.toml`, then restart. Existing backups stay in their original location, and only the active location appears in the admin panel. Use a dedicated, writable directory; mount external storage before starting the app. For Docker, a directory outside `/data` needs its own persistent mount. See the [container backup instructions](docs/containers.md#backups). See [backup safety and interrupted restore recovery](docs/backups.md) for limits and recovery behavior.
 
 **Command-line administration:** use `rustchan-cli admin --help` to see account, board, ban, and database commands. In Docker, run it as:
 

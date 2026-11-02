@@ -159,7 +159,7 @@ async fn render_admin_login_response(
 ) -> Result<Response> {
     let (jar, csrf) = ensure_admin_login_csrf(jar, headers, secure_context);
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    let boards = tokio::task::spawn_blocking({
+    let boards = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<Vec<crate::models::Board>> {
             let conn = pool.get()?;
@@ -190,7 +190,7 @@ pub(in crate::server) async fn admin_index(
     // Move DB I/O into spawn_blocking.
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
 
-    let (is_logged_in, boards) = tokio::task::spawn_blocking({
+    let (is_logged_in, boards) = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(bool, Vec<crate::models::Board>)> {
             let conn = pool.get()?;
@@ -300,7 +300,7 @@ pub(in crate::server) async fn admin_login(
     let password = form.password;
 
     // Argon2 verification is CPU-intensive; always use spawn_blocking.
-    let result = tokio::task::spawn_blocking(move || -> Result<Option<i64>> {
+    let result = crate::middleware::data_access::spawn_blocking(move || -> Result<Option<i64>> {
         let _password_permit = permit;
         let conn = pool.get()?;
         let user = db::get_admin_by_username(&conn, &username)?;
@@ -342,7 +342,7 @@ pub(in crate::server) async fn admin_login(
                     AppError::Internal(anyhow::anyhow!("administrator session expiry overflows"))
                 })?;
             let sid_clone = session_id.clone();
-            tokio::task::spawn_blocking({
+            crate::middleware::data_access::spawn_blocking({
                 let session_pool = state.db.clone();
                 move || -> Result<()> {
                     let conn = session_pool.get()?;
@@ -398,7 +398,7 @@ pub(in crate::server) async fn admin_logout(
     if let Some(session_cookie) = jar.get(super::SESSION_COOKIE) {
         let session_id = session_cookie.value().to_owned();
         // DB call in spawn_blocking
-        tokio::task::spawn_blocking({
+        crate::middleware::data_access::spawn_blocking({
             let pool = state.db.clone();
             move || -> Result<()> {
                 let conn = pool.get()?;

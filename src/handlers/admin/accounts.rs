@@ -42,7 +42,7 @@ pub(in crate::server) async fn update_account(
         ));
     }
     let password_permit = state.password_work_gate.try_begin()?;
-    tokio::task::spawn_blocking(move || -> Result<Response> {
+    crate::middleware::data_access::spawn_blocking(move || -> Result<Response> {
         let _password_permit = password_permit;
         let mut conn = state.db.get()?;
         require_admin_session_sid(&conn, session.as_deref()).map(|_completed_value| ())?;
@@ -82,7 +82,7 @@ pub(in crate::server) async fn rotate_secret(
         ));
     }
     let password_permit = state.password_work_gate.try_begin()?;
-    tokio::task::spawn_blocking(move || -> Result<Response> {
+    crate::middleware::data_access::spawn_blocking(move || -> Result<Response> {
         let _password_permit = password_permit;
         let conn = state.db.get()?;
         let actor = require_admin_session_sid(&conn, session.as_deref())?;

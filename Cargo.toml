@@ -47,17 +47,22 @@ doctest = false
 test = false
 bench = false
 
+[[test]]
+name = "backup_regressions"
+path = "src/handlers/admin/backup/tests/regressions.rs"
+
 [dependencies]
 axum       = { version = "0.8.9",  features = ["multipart"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 tower      = "0.5.3"
 tower-http = { version = "0.7.1", features = ["fs", "set-header", "compression-full", "limit", "trace"] }
-tokio      = { version = "1.53.3", features = ["full"] }
+tokio      = { version = "1.54.1", features = ["full"] }
 tokio-util = "0.7.20"
 captcha    = { version = "1.0.0", default-features = false }
 
-# Arti 0.47 permits rusqlite >=0.36,<0.41. Keep the latest application and
-# Tor directory-cache SQLite dependencies on the same bundled library.
+# Arti 0.47 requires rusqlite >=0.36,<0.41, and r2d2_sqlite 0.35 requires 0.40.
+# rusqlite 0.41 uses a different libsqlite3-sys; Cargo cannot link both SQLite
+# libraries. Keep 0.40.2 until both upstream dependencies support 0.41.
 rusqlite    = { version = "0.40.2", features = ["bundled", "backup", "hooks", "blob"] }
 r2d2        = "0.8.10"
 r2d2_sqlite = "0.35.0"
@@ -101,16 +106,16 @@ kamadak-exif = "0.6.1"
 
 clap = { version = "4.6.7", features = ["derive"] }
 
-uuid      = { version = "1.28.0", features = ["v4", "serde"] }
+uuid      = { version = "1.29.0", features = ["v4", "serde"] }
 chrono    = { version = "0.4.45", features = ["serde"] }
 dashmap      = "6.2.1"
-parking_lot  = "0.12.5"
+parking_lot  = "0.13.0"
 anyhow       = "1.0.104"
 regex     = "1.13.1"
 ipnet     = "2.12.2"
 
 # Backup preflight scans use `file_names()` without decompressing entries.
-zip = { version = "9.0.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.2.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # URL validation for admin-supplied external banner links.
 url = "2.5.8"
@@ -118,7 +123,7 @@ url = "2.5.8"
 # Keep a direct lower bound on the RUSTSEC-2026-0049 CRL
 # distribution-point fix. The crate is consumed transitively through rustls;
 # this declaration intentionally constrains future lockfile regeneration.
-rustls-webpki = { version = "0.103.15", default-features = false }
+rustls-webpki = { version = "0.103.16", default-features = false }
 
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
@@ -184,7 +189,7 @@ ratatui = { version = "0.30.2", default-features = false, features = ["crossterm
 
 [target.'cfg(unix)'.dependencies]
 # Safe in-process filesystem-capacity queries for upload disk-space preflights.
-rustix = { version = "1.1.5", features = ["fs", "process", "thread", "net", "stdio"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "thread", "net", "stdio"] }
 
 
 [features]

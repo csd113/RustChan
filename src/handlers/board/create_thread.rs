@@ -125,7 +125,7 @@ pub(in crate::server) async fn create_thread(
         captcha_id,
         captcha_answer,
     } = form;
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
@@ -194,7 +194,7 @@ pub(in crate::server) async fn create_thread(
             let pool = state.db.clone();
             let current_theme = current_theme.clone();
             let viewer_key = super::viewer_preference_key(&client_ip, &jar);
-            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+            let html = crate::middleware::data_access::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;
                 // Error re-render only: resolve the board for this request.
                 let board =

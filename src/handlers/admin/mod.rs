@@ -2145,7 +2145,7 @@ pub(in crate::server) async fn admin_panel(
     let update_status = updates::snapshot().await;
     let restart_view = restart::snapshot(Some(&update_status)).await;
     let auto_full_backup_settings = state.auto_full_backup_settings.snapshot();
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let open_section = params.open.clone();
         move || -> Result<String> {
@@ -2190,7 +2190,7 @@ pub(in crate::server) async fn admin_site_health_jobs(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
 
-    let jobs = tokio::task::spawn_blocking({
+    let jobs = crate::middleware::data_access::spawn_blocking({
         let state = state.clone();
         move || -> Result<SiteHealthJobsSnapshot> {
             let conn = state.db.get()?;
@@ -2239,7 +2239,7 @@ pub(in crate::server) async fn dismiss_failed_site_health_jobs(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
 
-    let failed_before = tokio::task::spawn_blocking({
+    let failed_before = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<i64> {
             let conn = pool.get()?;
@@ -2279,7 +2279,7 @@ pub(in crate::server) async fn admin_live_log(
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let max_bytes = params.bytes.unwrap_or(65_536).clamp(4_096, 262_144);
 
-    let payload = tokio::task::spawn_blocking({
+    let payload = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;

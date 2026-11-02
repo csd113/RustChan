@@ -1037,12 +1037,20 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
     let live_exists = live.exists();
     let previous_exists = previous.exists();
 
+    anyhow::ensure!(
+        staged_exists || live_exists,
+        "restore has neither a staged nor live path; preserving previous recovery data at {}",
+        previous.display()
+    );
+
     if staged_exists && live_exists {
-        if previous_exists {
-            cleanup_path_if_exists(previous)?;
-        }
+        anyhow::ensure!(
+            !previous_exists,
+            "ambiguous restore paths; refusing to discard previous recovery data"
+        );
         std::fs::rename(live, previous)
             .with_context(|| format!("Move live path {} aside", live.display()))?;
+        sync_restore_parent(live)?;
         ensure_parent_dir(live)?;
         if let Err(error) = std::fs::rename(staged, live) {
             let move_error =
@@ -1056,6 +1064,7 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
                         previous.display()
                     )
                 })?;
+                sync_restore_parent(live)?;
             }
             return Err(move_error);
         }
@@ -1065,6 +1074,12 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
             .with_context(|| format!("Move staged path {} into place", live.display()))?;
     }
 
+    // Persist installation before deleting the displaced tree. Recovery may
+    // repeat this branch after interruption without losing its only good copy.
+    sync_restore_parent(live)?;
+    if staged_exists && staged.parent() != live.parent() {
+        sync_restore_parent(staged)?;
+    }
     if previous.exists() {
         if let Err(error) = cleanup_path_if_exists(previous) {
             warn!(
@@ -1077,6 +1092,15 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
     }
 
     cleanup_empty_parent_dir(staged, live);
+    Ok(())
+}
+
+/// Persist restore renames and deletions on filesystems with directory fsync.
+fn sync_restore_parent(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

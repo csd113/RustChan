@@ -12,12 +12,17 @@ use super::{ScopedDecrement, ACTIVE_IPS, ACTIVE_UPLOADS, IN_FLIGHT, REQUEST_COUN
 const REQUEST_ID_HEADER: &str = "x-request-id";
 
 /// Track request counts, active clients, uploads, tracing, and request IDs.
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "access intentionally covers the request and streamed response, including detached blocking work"
+)]
 pub(super) async fn track_requests(
     axum::extract::State(state): axum::extract::State<crate::middleware::AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     if state.job_queue.cancel.is_cancelled()
+        || state.data_access.is_blocked()
         || (!state.runtime_ready.load(Ordering::Acquire) && req.uri().path() != "/readyz")
     {
         return recovery_unavailable();
@@ -70,7 +75,35 @@ pub(super) async fn track_requests(
         ScopedDecrement(&ACTIVE_UPLOADS)
     });
 
-    let mut response = next.run(req).instrument(span).await;
+    // These handlers acquire exclusive access themselves. Every other route,
+    // including GET handlers that update preferences or sessions, participates.
+    let exclusive_route = matches!(
+        req.uri().path(),
+        "/admin/backup"
+            | "/admin/backup/create"
+            | "/admin/board/backup/create"
+            | "/admin/restore"
+            | "/admin/backup/restore-saved"
+            | "/admin/board/restore"
+            | "/admin/board/backup/restore-saved"
+            | "/admin/backup/extract-board"
+    );
+    let access =
+        if exclusive_route || matches!(req.uri().path(), "/readyz" | "/admin/backup/progress") {
+            None
+        } else {
+            let Some(access) = state.data_access.try_read() else {
+                return recovery_unavailable();
+            };
+            Some(access)
+        };
+    let work = next.run(req).instrument(span);
+    let mut response = match &access {
+        Some(access) => {
+            crate::middleware::data_access::scope(std::sync::Arc::clone(access), work).await
+        }
+        None => work.await,
+    };
     if let Ok(value) = axum::http::HeaderValue::from_str(&req_id) {
         let _previous_request_header = response.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
@@ -79,6 +112,7 @@ pub(super) async fn track_requests(
     response.map(move |body| {
         axum::body::Body::from_stream(body.into_data_stream().map(move |chunk| {
             let _request_permit = &permit;
+            let _data_access = &access;
             chunk
         }))
     })

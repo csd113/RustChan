@@ -54,7 +54,7 @@ pub(in crate::server) async fn file_report(
         .get("csrf_token")
         .map(|cookie| cookie.value().to_owned())
         .unwrap_or_default();
-    let outcome = tokio::task::spawn_blocking({
+    let outcome = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<Option<(i64, db::ReportSubmission)>> {
             let conn = pool.get()?;
@@ -170,7 +170,7 @@ pub(in crate::server) async fn submit_appeal(
         return AppError::BadRequest("Appeal message cannot be empty.".into()).into_response();
     }
 
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<db::BanAppealSubmission> {
             let conn = pool.get()?;

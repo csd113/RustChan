@@ -77,7 +77,7 @@ pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + Seek
     let mut db_entry = archive.by_name("chan.db").map_err(|_error| {
         AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
     })?;
-    let mut out = std::fs::File::create(temp_db)
+    let mut out = super::recovery_files::open_private_file_new(temp_db)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Create temp DB: {error}")))?;
     crate::config::restrict_private_file_permissions(temp_db).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -185,6 +185,7 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + Seek, W: Write 
             zip.add_directory(
                 &name,
                 zip::write::SimpleFileOptions::default()
+                    .large_file(true)
                     .compression_method(zip::CompressionMethod::Deflated),
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip dir: {error}")))?;
@@ -228,9 +229,18 @@ fn temporary_archive_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{}.zip", uuid::Uuid::new_v4().simple()))
 }
 
-pub(super) fn prepare_saved_full_restore_archive(root_dir: &Path) -> Result<PathBuf> {
+pub(super) fn prepare_saved_full_restore_archive(root_dir: &Path) -> Result<(PathBuf, u64)> {
     let verified = storage::verify_saved_backup(root_dir, &[storage::BackupScope::FullSite])?;
-    create_full_restore_archive(&verified)
+    let budget = verified
+        .manifest
+        .files
+        .iter()
+        .try_fold(0_u64, |sum, file| {
+            sum.checked_add(file.size).ok_or_else(|| {
+                AppError::BadRequest("Saved backup size overflows restore budget.".into())
+            })
+        })?;
+    Ok((create_full_restore_archive(&verified)?, budget))
 }
 
 #[expect(
@@ -240,6 +250,7 @@ pub(super) fn prepare_saved_full_restore_archive(root_dir: &Path) -> Result<Path
 pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<PathBuf> {
+    let mut declared_bytes = 0_u64;
     let mut db_index = None;
     let mut db_bytes = 0_u64;
     let mut mapped_files = Vec::new();
@@ -263,6 +274,14 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
             continue;
         }
 
+        declared_bytes = declared_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| AppError::BadRequest("Transfer archive size overflow.".into()))?;
+        if declared_bytes > safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES {
+            return Err(AppError::BadRequest(
+                "Transfer archive exceeds the extracted restore budget.".into(),
+            ));
+        }
         if name == "db/rustchan.sqlite3" {
             db_index = Some(index);
             db_bytes = entry.size();
@@ -314,9 +333,10 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
         )
     })?;
     let temp_zip = temporary_archive_path("rustchan_v4_transfer_full_restore");
-    let output = std::fs::File::create(&temp_zip).map_err(|error| {
+    let output = super::recovery_files::open_private_file_new(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    let mut output_cleanup = TempZipCleanupGuard::new(temp_zip.clone());
     crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Set private permissions on {}: {error}",
@@ -325,6 +345,7 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
+        .large_file(true)
         .compression_method(zip::CompressionMethod::Deflated);
     let manifest = serde_json::json!({
         "version": 3_i32,
@@ -347,15 +368,23 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
     )
     .map_err(|error| AppError::Internal(anyhow::anyhow!("Write backup.json: {error}")))?;
 
+    let mut converted_bytes = 0_u64;
     zip.start_file("chan.db", options)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip chan.db: {error}")))?;
     {
         let mut entry = archive.by_index(db_index).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read Backup v4 DB entry: {error}"))
         })?;
-        copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))
-            .map(|_completed_value| ())?;
+        safety::copy_limited_with_total_budget(
+            &mut entry,
+            &mut zip,
+            ZIP_ENTRY_MAX_BYTES,
+            &mut converted_bytes,
+            safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+            "Transfer conversion",
+        )
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))
+        .map(|_completed_value| ())?;
     }
 
     for (index, zip_path) in mapped_files {
@@ -366,12 +395,20 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
                 "Read Backup v4 transfer entry #{index}: {error}"
             ))
         })?;
-        copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
-            .map(|_completed_value| ())?;
+        safety::copy_limited_with_total_budget(
+            &mut entry,
+            &mut zip,
+            ZIP_ENTRY_MAX_BYTES,
+            &mut converted_bytes,
+            safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+            "Transfer conversion",
+        )
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
+        .map(|_completed_value| ())?;
     }
 
     finalize_archive(zip, &temp_zip)?;
+    output_cleanup.disarm();
     Ok(temp_zip)
 }
 
@@ -392,9 +429,10 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
 
     let manifest = &verified.manifest;
     let temp_zip = temporary_archive_path("rustchan_v4_full_restore");
-    let output = std::fs::File::create(&temp_zip).map_err(|error| {
+    let output = super::recovery_files::open_private_file_new(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    let mut output_cleanup = TempZipCleanupGuard::new(temp_zip.clone());
     crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Set private permissions on {}: {error}",
@@ -403,6 +441,7 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
+        .large_file(true)
         .compression_method(zip::CompressionMethod::Deflated);
 
     let upload_file_count = u64::try_from(
@@ -564,13 +603,14 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
     }
 
     finalize_archive(zip, &temp_zip)?;
+    output_cleanup.disarm();
     Ok(temp_zip)
 }
 
 pub(super) fn prepare_saved_board_restore_archive(
     root_dir: &Path,
     board_short: Option<&str>,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, u64)> {
     let verified = storage::verify_saved_backup(
         root_dir,
         &[
@@ -584,7 +624,7 @@ pub(super) fn prepare_saved_board_restore_archive(
 fn create_board_restore_archive(
     verified: &storage::VerifiedBackup,
     board_short: Option<&str>,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, u64)> {
     let board_short = match board_short {
         Some(board_short) => board_short.to_owned(),
         None => verified
@@ -601,16 +641,28 @@ fn create_board_restore_archive(
     let board_layout = verified.boards.get(&board_short).ok_or_else(|| {
         AppError::NotFound(format!("Board /{board_short}/ not found in this backup."))
     })?;
+    if board_layout.board_json.size > BOARD_MANIFEST_MAX_BYTES {
+        return Err(AppError::BadRequest("Board export exceeds the 64 MiB manifest restore limit; restore the full site instead.".into()));
+    }
     let board_json = storage::read_verified_file(&board_layout.board_json)?;
+    let budget =
+        board_layout
+            .upload_files
+            .iter()
+            .try_fold(board_layout.board_json.size, |sum, file| {
+                sum.checked_add(file.size)
+                    .ok_or_else(|| AppError::BadRequest("Board restore budget overflow.".into()))
+            })?;
 
     let temp_zip = temporary_archive_path("rustchan_v4_board_restore");
     let filename = format!(
         "rustchan-board-{board_short}-{}.zip",
         uuid::Uuid::new_v4().simple()
     );
-    let output = std::fs::File::create(&temp_zip).map_err(|error| {
+    let output = super::recovery_files::open_private_file_new(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    let mut output_cleanup = TempZipCleanupGuard::new(temp_zip.clone());
     crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Set private permissions on {}: {error}",
@@ -619,6 +671,7 @@ fn create_board_restore_archive(
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
+        .large_file(true)
         .compression_method(zip::CompressionMethod::Deflated);
     zip.start_file("board.json", options)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip board.json: {error}")))?;
@@ -631,13 +684,14 @@ fn create_board_restore_archive(
     }
 
     finalize_archive(zip, &temp_zip)?;
-    Ok((temp_zip, filename))
+    output_cleanup.disarm();
+    Ok((temp_zip, filename, budget))
 }
 
 pub(super) fn extract_board_archive_from_saved_full_backup(
     root_dir: &Path,
     board_short: &str,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, u64)> {
     let verified = storage::verify_saved_backup(root_dir, &[storage::BackupScope::FullSite])?;
     create_board_restore_archive(&verified, Some(board_short))
 }

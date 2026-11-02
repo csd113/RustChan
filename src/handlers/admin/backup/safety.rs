@@ -263,69 +263,7 @@ pub(super) fn render_restored_body_html(body: &str) -> String {
     crate::utils::sanitize::render_post_body(&escaped, false)
 }
 
-/// Copies limited.
-pub(super) fn copy_limited<R: std::io::Read, W: std::io::Write>(
-    reader: &mut R,
-    writer: &mut W,
-    max_bytes: u64,
-) -> std::io::Result<u64> {
-    let mut buf = vec![0u8; 65_536];
-    let mut total = 0u64;
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        let n_u64 = u64::try_from(n).map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Read size does not fit the byte counter: {error}"),
-            )
-        })?;
-        total = total.checked_add(n_u64).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Decompressed byte count overflowed",
-            )
-        })?;
-        if total > max_bytes {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Decompressed entry exceeds {} MiB limit — possible zip bomb",
-                    max_bytes / 1024 / 1024
-                ),
-            ));
-        }
-        if let Some(slice) = buf.get(..n) {
-            writer.write_all(slice)?;
-        }
-    }
-    Ok(total)
-}
-
-/// Copies limited with total budget.
-pub(super) fn copy_limited_with_total_budget<R: std::io::Read, W: std::io::Write>(
-    reader: &mut R,
-    writer: &mut W,
-    max_bytes: u64,
-    total_written: &mut u64,
-    total_budget: u64,
-    label: &str,
-) -> std::io::Result<u64> {
-    let copied = copy_limited(reader, writer, max_bytes)?;
-    *total_written = total_written.saturating_add(copied);
-    if *total_written > total_budget {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "{label} exceeds the {} MiB extracted restore budget",
-                total_budget / 1024 / 1024
-            ),
-        ));
-    }
-    Ok(copied)
-}
+pub(super) use super::limits::{copy_limited, copy_limited_with_total_budget};
 
 pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
     let parent = base_path
@@ -339,7 +277,7 @@ pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBu
         ".{file_name}.{label}.{}",
         uuid::Uuid::new_v4().simple()
     ));
-    std::fs::create_dir_all(&staging)
+    crate::config::ensure_private_dir(&staging)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Create staging dir: {e}")))?;
     Ok(staging)
 }
@@ -376,6 +314,15 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     destination_root: &Path,
 ) -> Result<()> {
+    extract_uploads_with_budget(archive, destination_root, RESTORE_TOTAL_EXTRACTED_MAX_BYTES)
+}
+
+pub(super) fn extract_uploads_with_budget<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    destination_root: &Path,
+    budget: u64,
+) -> Result<()> {
+    validate_archive_budget(archive, budget)?;
     let mut extracted_bytes = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive
@@ -405,9 +352,9 @@ pub(super) fn extract_uploads_to_dir<R: std::io::Read + Seek>(
         copy_limited_with_total_budget(
             &mut entry,
             &mut out,
-            ZIP_ENTRY_MAX_BYTES,
+            budget,
             &mut extracted_bytes,
-            RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+            budget,
             "Restored uploads",
         )
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Write {}: {e}", target.display())))
@@ -482,6 +429,14 @@ pub(super) fn validate_entry_path_under_prefix(
 pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<FullBackupManifest> {
+    verify_full_backup_archive_with_budget(archive, RESTORE_TOTAL_EXTRACTED_MAX_BYTES)
+}
+
+pub(super) fn verify_full_backup_archive_with_budget<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    budget: u64,
+) -> Result<FullBackupManifest> {
+    validate_archive_budget(archive, budget)?;
     let manifest = read_full_backup_manifest_from_archive(archive)?;
 
     let mut db_entry = archive.by_name("chan.db").map_err(|_error| {
@@ -504,7 +459,7 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
         )));
     }
     drop(db_entry);
-    verify_full_backup_db_schema(archive, manifest.db_bytes)?;
+    verify_full_backup_db_schema(archive, manifest.db_bytes, budget)?;
 
     let mut upload_file_count = 0u64;
     let mut favicon_file_count = 0u64;
@@ -567,12 +522,56 @@ pub(super) fn verify_full_backup_archive<R: std::io::Read + Seek>(
     Ok(manifest)
 }
 
+/// Bound declared extraction before creating payload files, and reject duplicate
+/// paths rather than overwriting already extracted data.
+pub(super) fn validate_archive_budget<R: std::io::Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    budget: u64,
+) -> Result<()> {
+    let mut names = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| AppError::BadRequest(format!("Invalid archive entry: {error}")))?;
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid archive name: {error}")))?
+            .into_owned();
+        validate_restore_safe_entry_name(&name)?;
+        if entry.is_dir() {
+            continue;
+        }
+        if !names.insert(name.clone()) {
+            return Err(AppError::BadRequest(format!(
+                "Duplicate restore archive path: {name}"
+            )));
+        }
+        if name == "chan.db"
+            || name == "board.json"
+            || name.starts_with("uploads/")
+            || name.starts_with("favicon/")
+            || name.starts_with("banner/")
+            || name.starts_with(FULL_BACKUP_TOR_KEYS_ENTRY_PREFIX)
+        {
+            total = total
+                .checked_add(entry.size())
+                .ok_or_else(|| AppError::BadRequest("Restore archive size overflow.".into()))?;
+            if total > budget {
+                return Err(AppError::BadRequest("Archive exceeds its extracted restore budget; use a verified server-saved backup for large restores.".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Verifies full backup database schema.
 fn verify_full_backup_db_schema<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     expected_db_bytes: u64,
+    budget: u64,
 ) -> Result<()> {
-    if expected_db_bytes > ZIP_ENTRY_MAX_BYTES {
+    if expected_db_bytes > budget {
         return Err(AppError::BadRequest(
             "Invalid full backup: chan.db exceeds the restore entry size limit.".into(),
         ));
@@ -585,9 +584,10 @@ fn verify_full_backup_db_schema<R: std::io::Read + Seek>(
             "Create temporary database validation file: {error}"
         ))
     })?;
-    let copied = std::io::copy(&mut db_entry, temp_db.as_file_mut()).map_err(|error| {
-        AppError::BadRequest(format!("Invalid full backup database entry: {error}"))
-    })?;
+    let copied =
+        copy_limited(&mut db_entry, temp_db.as_file_mut(), expected_db_bytes).map_err(|error| {
+            AppError::BadRequest(format!("Invalid full backup database entry: {error}"))
+        })?;
     if copied != expected_db_bytes {
         return Err(AppError::BadRequest(format!(
             "Invalid full backup: copied database size {copied} does not match manifest size {expected_db_bytes}."
@@ -649,6 +649,7 @@ pub(super) fn verify_board_backup_zip(
     })?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| AppError::BadRequest(format!("Invalid zip backup: {error}")))?;
+    validate_archive_budget(&mut archive, RESTORE_TOTAL_EXTRACTED_MAX_BYTES)?;
     let manifest = super::parse_board_backup_manifest_from_zip(&mut archive)?;
     validate_board_short_name(&manifest.board.short_name)?;
     for idx in 0..archive.len() {

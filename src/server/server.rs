@@ -289,19 +289,13 @@ async fn run_server_lifecycle(
     {
         let reconcile_pool = pool.clone();
         let upload_dir = CONFIG.upload_dir.clone();
-        let reconciliation = tokio::task::spawn_blocking(move || {
-            crate::pending_fs::reconcile_pending_fs_ops(&reconcile_pool, &upload_dir)
+        tokio::task::spawn_blocking(move || {
+            crate::handlers::admin::backup::reconcile_startup(&reconcile_pool, &upload_dir)
         })
         .await
-        .map_err(|error| anyhow::anyhow!("pending_fs_ops reconciliation task failed: {error}"))?;
-        if let Err(error) = reconciliation {
-            tracing::warn!(
-                target: "pending_fs",
-                error = %error,
-                "startup filesystem reconciliation left quarantined operations for retry"
-            );
-        }
+        .map_err(|error| anyhow::anyhow!("restore reconciliation task failed: {error}"))??;
     }
+
     let startup_managed_media_cursor = {
         let reconcile_pool = pool.clone();
         let upload_dir = CONFIG.upload_dir.clone();
@@ -611,7 +605,11 @@ async fn run_server_lifecycle(
             "startup thread-retention reconciliation completed"
         );
     }
-    let worker_queue = Arc::new(crate::workers::JobQueue::new(pool.clone()));
+    let live_data_access = crate::middleware::data_access::DataAccess::default();
+    let worker_queue = Arc::new(crate::workers::JobQueue::new(
+        pool.clone(),
+        live_data_access.clone(),
+    ));
     let worker_handles =
         crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
 
@@ -640,6 +638,7 @@ async fn run_server_lifecycle(
             CONFIG.auto_full_backup_split_zip_part_size_bytes,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        data_access: live_data_access,
         media_upload_gate: crate::middleware::MediaUploadGate::new(),
         request_work_gate: crate::middleware::WorkGate::new(256),
         password_work_gate: crate::middleware::WorkGate::new(2),
@@ -666,6 +665,7 @@ async fn run_server_lifecycle(
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             let mut job_cursor = startup_media_reconciliation.next_job_id;
             let mut post_cursor = startup_media_reconciliation.next_post_id;
@@ -675,7 +675,9 @@ async fn run_server_lifecycle(
                 tokio::select! {
                     _ = interval.tick() => {
                         let pass_pool = reconcile_pool.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let pass = tokio::task::spawn_blocking(move || {
+                            let _access = access;
                             crate::workers::reconcile_media_job_states(
                                 &pass_pool,
                                 job_cursor,
@@ -724,6 +726,7 @@ async fn run_server_lifecycle(
     if CONFIG.media_reconcile_interval_hours > 0 {
         let reconcile_pool = pool.clone();
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             let mut cursor = startup_managed_media_cursor;
             let mut interval = tokio::time::interval(media_reconcile_interval);
@@ -734,7 +737,9 @@ async fn run_server_lifecycle(
                         let pass_pool = reconcile_pool.clone();
                         let upload_dir = CONFIG.upload_dir.clone();
                         let pass_cursor = cursor.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let pass = tokio::task::spawn_blocking(move || {
+                            let _access = access;
                             crate::media::reconcile::reconcile_managed_media(
                                 &pass_pool,
                                 &upload_dir,
@@ -776,6 +781,7 @@ async fn run_server_lifecycle(
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             let mut cursor = startup_prune_reconciliation.next_board_id;
             let mut interval = tokio::time::interval(Duration::from_mins(1));
@@ -784,7 +790,9 @@ async fn run_server_lifecycle(
                 tokio::select! {
                     _ = interval.tick() => {
                         let pass_pool = reconcile_pool.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let pass = tokio::task::spawn_blocking(move || {
+                            let _access = access;
                             crate::workers::reconcile_thread_prune_intents(
                                 &pass_pool,
                                 cursor,
@@ -831,13 +839,16 @@ async fn run_server_lifecycle(
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_hours(1));
             loop {
                 tokio::select! {
                     _ = iv.tick() => {
                         let purge_pool = bg.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+                            let _access = access;
                             let conn = purge_pool.get()?;
                             crate::db::purge_expired_sessions(&conn)
                         }).await;
@@ -865,6 +876,7 @@ async fn run_server_lifecycle(
         let maintenance_state = state.clone();
         let interval_secs = wal_interval.as_secs();
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             // Stagger the first run by half the interval so it doesn't fire
             // immediately at startup alongside the session purge.
@@ -887,7 +899,9 @@ async fn run_server_lifecycle(
                             continue;
                         }
                         let checkpoint_pool = bg.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                            let _access = access;
                             let conn = checkpoint_pool.get()?;
                             let (log_pages, checkpointed_pages, busy) = crate::db::run_wal_checkpoint(&conn)?;
                             tracing::debug!(target: "db", log_pages, checkpointed_pages, busy,
@@ -964,6 +978,7 @@ async fn run_server_lifecycle(
         let maintenance_state = state.clone();
         let interval_secs = vacuum_interval.as_secs();
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             // Stagger the first run by half the interval to avoid hammering the
             // DB immediately at startup alongside WAL checkpoint and session purge.
@@ -985,12 +1000,15 @@ async fn run_server_lifecycle(
                             );
                             continue;
                         }
-                        let Ok(_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled VACUUM") else {
+                        let Ok(maintenance_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled VACUUM") else {
                             tracing::debug!(target: "db", "Skipping scheduled VACUUM because maintenance is already running");
                             continue;
                         };
                         let bg2 = bg.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let task_result = tokio::task::spawn_blocking(move || {
+                            let access_guard = access;
+                            let _maintenance_guard = maintenance_guard;
                             if let Ok(conn) = bg2.get() {
                                 let before = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
                                 match crate::db::run_vacuum(&conn) {
@@ -1008,6 +1026,7 @@ async fn run_server_lifecycle(
                                     Err(e) => tracing::warn!("Scheduled VACUUM failed: {e}"),
                                 }
                             }
+                            drop(access_guard);
                         })
                         .await;
                         if let Err(error) = task_result {
@@ -1034,6 +1053,7 @@ async fn run_server_lifecycle(
         let bg = pool.clone();
         let maintenance_state = state.clone();
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             let scheduler_started_at = SystemTime::now();
             let mut failure_streak = 0u32;
@@ -1083,14 +1103,17 @@ async fn run_server_lifecycle(
                             );
                             continue;
                         }
-                        let Ok(_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled full backup") else {
+                        let Ok(maintenance_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled full backup") else {
                             tracing::debug!(target: "admin", "Skipping scheduled full backup because maintenance is already running");
                             continue;
                         };
 
                         let bg2 = bg.clone();
                         let progress = Arc::clone(&maintenance_state.backup_progress);
+                        let Some(exclusive_access) = data_access.exclusive().await else { continue; };
                         let attempt_result = tokio::task::spawn_blocking(move || {
+                            let _exclusive_access = exclusive_access;
+                            let _maintenance_guard = maintenance_guard;
                             let storage_mode = crate::handlers::admin::backup::parse_backup_storage_mode_value(
                                 Some(&settings.storage_mode),
                             )?;
@@ -1162,6 +1185,7 @@ async fn run_server_lifecycle(
     if CONFIG.poll_cleanup_interval_hours > 0 {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
@@ -1172,7 +1196,9 @@ async fn run_server_lifecycle(
                 tokio::select! {
                     _ = iv.tick() => {
                         let bg2 = bg.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let task_result = tokio::task::spawn_blocking(move || {
+                            let access_guard = access;
                             if let Ok(conn) = bg2.get() {
                                 let cutoff = chrono::Utc::now().timestamp().saturating_sub(poll_retention_cutoff_secs);
                                 match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
@@ -1183,6 +1209,7 @@ async fn run_server_lifecycle(
                                     Err(e) => tracing::warn!("Poll vote cleanup failed: {e}"),
                                 }
                             }
+                            drop(access_guard);
                         })
                         .await;
                         if let Err(error) = task_result {
@@ -1207,6 +1234,8 @@ async fn run_server_lifecycle(
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
+        let data_access = state.data_access.clone();
+        let maintenance_gate = state.maintenance_gate.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(5)) => {}
@@ -1218,7 +1247,11 @@ async fn run_server_lifecycle(
                     _ = iv.tick() => {
                         let retry_pool = bg.clone();
                         let upload_dir = CONFIG.upload_dir.clone();
+                        let Ok(maintenance) = maintenance_gate.try_begin("Filesystem reconciliation") else { continue; };
+                        let Some(access) = data_access.exclusive().await else { continue; };
                         let task_result = tokio::task::spawn_blocking(move || {
+                            let access_guard = access;
+                            let _maintenance = maintenance;
                             if let Err(error) = crate::pending_fs::reconcile_pending_fs_ops(
                                 &retry_pool,
                                 &upload_dir,
@@ -1229,6 +1262,7 @@ async fn run_server_lifecycle(
                                     "periodic filesystem reconciliation left quarantined operations"
                                 );
                             }
+                            drop(access_guard);
                         })
                         .await;
                         if let Err(error) = task_result {
@@ -1255,6 +1289,7 @@ async fn run_server_lifecycle(
         let max_bytes = CONFIG.waveform_cache_max_bytes;
         let cancel_clone = worker_cancel.clone();
         let bg = pool.clone();
+        let data_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             tokio::select! {
                 () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
@@ -1266,7 +1301,9 @@ async fn run_server_lifecycle(
                     _ = iv.tick() => {
                         let upload_dir = CONFIG.upload_dir.clone();
                         let eviction_pool = bg.clone();
+                        let Some(access) = data_access.try_read() else { continue; };
                         let task_result = tokio::task::spawn_blocking(move || {
+                            let _access = access;
                             let Ok(conn) = eviction_pool.get() else {
                                 return;
                             };
@@ -1456,6 +1493,7 @@ async fn run_server_lifecycle(
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
         let operation_pool = pool.clone();
+        let operation_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             loop {
                 let next_key = tokio::select! {
@@ -1503,6 +1541,7 @@ async fn run_server_lifecycle(
                         return;
                     }
                     ConsoleAction::Submit(request) => {
+                        let Some(access) = operation_access.try_read() else { continue; };
                         let request_for_work = request.clone();
                         let pool_for_work = operation_pool.clone();
                         let state_for_work = Arc::clone(&console);
@@ -1510,6 +1549,7 @@ async fn run_server_lifecycle(
                         let redraw_after_work = Arc::clone(&redraw);
                         drop(tokio::spawn(async move {
                             let result = tokio::task::spawn_blocking(move || {
+                                let _access = access;
                                 super::console::wizard::execute(&request_for_work, &pool_for_work)
                             })
                             .await

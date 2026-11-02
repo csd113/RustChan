@@ -499,16 +499,23 @@ pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
 }
 
 pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> Result<Vec<String>> {
-    let keep_limit = keep_limit.max(1);
-    let mut backups = list_backup_files(dir, BackupListKind::Full)
-        .into_iter()
-        .filter(|backup| backup.scope == "Full site" || backup.scope == "Selected boards")
-        .collect::<Vec<_>>();
-    if backups.len() <= keep_limit {
-        return Ok(Vec::new());
-    }
-
-    let to_remove = backups.split_off(keep_limit);
+    let to_remove = super::retention::removals(
+        list_backup_files(dir, BackupListKind::Full),
+        keep_limit,
+        |backup| {
+            let path = Path::new(&backup.server_path);
+            let result = if path.is_dir() {
+                storage::verify_saved_backup(path, &[storage::BackupScope::FullSite])
+                    .map(|_verified| ())
+            } else {
+                safety::verify_full_backup_zip(path).map(|_manifest| ())
+            };
+            if let Err(error) = &result {
+                tracing::warn!(backup = %backup.backup_ref, %error, "Excluding unusable backup from retention");
+            }
+            result.is_ok()
+        },
+    );
     let mut removed = Vec::with_capacity(to_remove.len());
     for backup in to_remove {
         let path = PathBuf::from(&backup.server_path);
@@ -554,7 +561,7 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
         list_standalone_archives(dir, BackupListKind::Full)
     };
     for backup in backups {
-        if !backup.verified {
+        if !backup.verified || backup.scope != "Full site" {
             continue;
         }
         let candidate = backup.modified_epoch.and_then(|epoch| {

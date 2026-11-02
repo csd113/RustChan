@@ -47,9 +47,13 @@ mod board_manifest;
 mod create;
 mod downloads;
 mod http;
+mod limits;
 mod listing;
+mod recovery;
+mod recovery_files;
 mod restore_board;
 mod restore_full;
+mod retention;
 mod safety;
 mod storage;
 pub(in crate::server) use storage::BackupStorageMode;
@@ -58,6 +62,7 @@ pub(in crate::server) use create::*;
 pub(in crate::server) use downloads::{backup_progress_json, delete_backup, download_backup};
 pub(in crate::server) use http::backup_request_logging_middleware;
 pub(in crate::server) use listing::{list_backup_files, BackupListKind};
+pub(in crate::server) use recovery::reconcile_startup;
 pub(in crate::server) use restore_board::{
     board_restore, extract_board_from_full_backup, restore_saved_board_backup,
 };
@@ -66,7 +71,7 @@ use safety::{
     copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
     log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
     render_restored_body_html, validate_board_short_name, validate_entry_path_under_prefix,
-    validate_restore_safe_entry_name, verify_full_backup_archive, BANNER_RESTORE_ENTRY_MAX_BYTES,
+    validate_restore_safe_entry_name, BANNER_RESTORE_ENTRY_MAX_BYTES,
     BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
 
@@ -112,7 +117,6 @@ pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
 use listing::{
     enforce_full_backup_retention, invalidate_backup_list_cache, latest_board_backup_reference,
 };
-use restore_full::restore_db_from_snapshot;
 
 #[expect(
     clippy::too_many_lines,
@@ -122,16 +126,17 @@ pub(in crate::server) async fn admin_backup(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Response> {
-    let _maintenance_guard = state.maintenance_gate.try_begin("Full backup download")?;
+    let maintenance_guard = recovery::begin_operation(&state, &jar, "Full backup download").await?;
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let upload_dir = CONFIG.upload_dir.clone();
     let global_favicon_dir = crate::favicon::global_backup_source_dir();
     let global_banner_dir = banner::backup_source_dir();
     let progress = std::sync::Arc::clone(&state.backup_progress);
 
-    let (tmp_path, filename, file_size) = tokio::task::spawn_blocking({
+    let (tmp_path, filename, file_size) = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(PathBuf, String, u64)> {
+            let _operation_guard = maintenance_guard;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             let uploads_base = Path::new(&upload_dir);
@@ -139,9 +144,10 @@ pub(in crate::server) async fn admin_backup(
             progress.reset(crate::middleware::backup_phase::SNAPSHOT_DB);
             log_backup_phase(crate::middleware::backup_phase::SNAPSHOT_DB);
 
-            let temp_dir = std::env::temp_dir();
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
-            let temp_db = temp_dir.join(format!("chan_backup_{tmp_id}.db"));
+            let temp_paths = restore_full::prepare_full_restore_temp_paths(&tmp_id)?;
+            let _db_cleanup = restore_full::FullRestoreTempCleanupGuard::new(&temp_paths);
+            let temp_db = temp_paths.temp_db;
             let temp_db_str = temp_db
                 .to_str()
                 .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Temp path is non-UTF-8")))?
@@ -194,6 +200,7 @@ pub(in crate::server) async fn admin_backup(
                     })?);
                 let mut zip = zip::ZipWriter::new(out_file);
                 let opts = zip::write::SimpleFileOptions::default()
+                    .large_file(true)
                     .compression_method(zip::CompressionMethod::Deflated);
 
                 progress.reset(crate::middleware::backup_phase::COMPRESS);
@@ -307,7 +314,7 @@ pub(in crate::server) async fn admin_backup(
 
     // Schedule temp-file cleanup after a generous window so even slow clients finish.
     let cleanup_path = tmp_path;
-    drop(tokio::spawn(async move {
+    drop(crate::middleware::data_access::spawn(async move {
         tokio::time::sleep(Duration::from_mins(10)).await;
         drop(tokio::fs::remove_file(cleanup_path).await);
     }));
@@ -431,7 +438,9 @@ fn zip_file_options_for_path(path: &Path) -> zip::write::SimpleFileOptions {
     } else {
         zip::CompressionMethod::Deflated
     };
-    zip::write::SimpleFileOptions::default().compression_method(method)
+    zip::write::SimpleFileOptions::default()
+        .large_file(true)
+        .compression_method(method)
 }
 
 fn should_store_without_recompress(path: &Path) -> bool {
@@ -545,7 +554,7 @@ pub(in crate::server) async fn board_backup(
         return Err(AppError::BadRequest("Invalid board name.".into()));
     }
 
-    let filename = tokio::task::spawn_blocking({
+    let filename = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let safe_board = safe_board.clone();
         move || -> Result<String> {
@@ -570,7 +579,7 @@ pub(in crate::server) async fn board_backup(
 
     let saved_root = crate::config::backups_dir().join(&filename);
     if saved_root.is_dir() {
-        let (temp_zip, temp_name) =
+        let (temp_zip, temp_name, _budget) =
             prepare_saved_board_restore_archive(&saved_root, Some(&safe_board))?;
         let mut temp_zip_guard = archive::TempZipCleanupGuard::new(temp_zip.clone());
         let download_token = new_session_id();

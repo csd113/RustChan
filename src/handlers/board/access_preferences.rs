@@ -750,7 +750,7 @@ pub(in crate::server) async fn serve_theme_css(
     State(state): State<AppState>,
     Path(theme): Path<String>,
 ) -> Result<Response> {
-    let css = tokio::task::spawn_blocking({
+    let css = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<Option<String>> {
             let conn = pool.get()?;
@@ -829,7 +829,7 @@ pub(in crate::server) async fn board_unlock_page(
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
-    let access_context = tokio::task::spawn_blocking({
+    let access_context = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -904,7 +904,7 @@ pub(in crate::server) async fn unlock_board_access(
         .get(ADMIN_SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
-    let access_context = tokio::task::spawn_blocking({
+    let access_context = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         let admin_session_id = admin_session_id.clone();
@@ -979,7 +979,7 @@ pub(in crate::server) async fn unlock_board_access(
         return Err(AppError::DbBusy);
     }
     let password_hash = access_context.board.access_password_hash.clone();
-    let password_valid_result = tokio::task::spawn_blocking(move || {
+    let password_valid_result = crate::middleware::data_access::spawn_blocking(move || {
         let _password_permit = permit;
         verify_password(&password, &password_hash)
     })
@@ -1121,7 +1121,7 @@ pub(in crate::server) async fn update_thread_preference(
         .map(|cookie| cookie.value().to_owned());
     let access_cookie = board_access_cookie_from_jar(&jar, &board_short);
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_short = board_short.clone();
         move || -> Result<()> {

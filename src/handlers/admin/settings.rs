@@ -77,7 +77,7 @@ pub(super) fn checkbox_is_on(value: Option<&str>) -> bool {
 
 /// Authenticate before multipart headers or file bytes are consumed.
 async fn preflight_asset_upload(state: &AppState, session_id: Option<String>) -> Result<()> {
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || {
             let conn = pool.get()?;
@@ -187,7 +187,7 @@ pub(in crate::server) async fn update_visitor_defaults(
         _ => return Err(AppError::BadRequest("Choose an NSFW default.".into())),
     };
     let session = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    crate::middleware::data_access::spawn_blocking(move || -> Result<()> {
         let conn = state.db.get()?;
         require_admin_session_sid(&conn, session.as_deref()).map(|_completed_value| ())?;
         db::set_site_setting(

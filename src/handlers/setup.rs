@@ -549,7 +549,7 @@ async fn load_setup_state(
     state: &AppState,
     session_id: Option<String>,
 ) -> Result<(db::SetupState, bool)> {
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<(db::SetupState, bool)> {
             let conn = pool.get()?;
@@ -647,7 +647,7 @@ pub(in crate::server) async fn setup_review(
             .ok_or_else(|| AppError::BadRequest("Initial admin password is required.".into()))?;
         let password = password.to_owned();
         let permit = state.password_work_gate.try_begin()?;
-        let password_hash = tokio::task::spawn_blocking(move || {
+        let password_hash = crate::middleware::data_access::spawn_blocking(move || {
             let _password_permit = permit;
             crypto::hash_password(&password)
         })
@@ -698,7 +698,7 @@ pub(in crate::server) async fn setup_finish(
     let board_slug = parsed.board_slug.clone();
     let auto_backup_settings = state.auto_full_backup_settings.clone();
     let permit = state.password_work_gate.try_begin()?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let _password_permit = permit;
@@ -903,7 +903,7 @@ pub(in crate::server) async fn admin_reopen_setup(
         Some(peer),
         form.csrf.as_deref(),
     )?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -932,7 +932,7 @@ pub(in crate::server) async fn admin_close_setup(
         Some(peer),
         form.csrf.as_deref(),
     )?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;

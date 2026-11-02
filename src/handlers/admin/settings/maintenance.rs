@@ -200,7 +200,7 @@ pub(in crate::server) async fn update_media_settings(
         Err(error) => return Err(error),
     };
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut conn = pool.get()?;
@@ -251,7 +251,7 @@ pub(in crate::server) async fn admin_vacuum(
     )?;
     let _maintenance_guard = state.maintenance_gate.try_begin("Database VACUUM")?;
 
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
@@ -303,7 +303,7 @@ pub(in crate::server) async fn admin_db_check(
         jar,
         super::super::should_set_secure_cookie(&headers, secure_context),
     )?;
-    let html = tokio::task::spawn_blocking({
+    let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
@@ -348,7 +348,7 @@ pub(in crate::server) async fn admin_db_repair(
         jar,
         super::super::should_set_secure_cookie(&headers, secure_context),
     )?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -367,9 +367,9 @@ pub(in crate::server) async fn admin_db_repair(
     let pool = state.db.clone();
     let db_maintenance_jobs = state.db_maintenance_jobs.clone();
 
-    drop(tokio::spawn(async move {
+    drop(crate::middleware::data_access::spawn(async move {
         let job_status = db_maintenance_jobs.clone();
-        let join_result = tokio::task::spawn_blocking(move || {
+        let join_result = crate::middleware::data_access::spawn_blocking(move || {
             let _maintenance_guard = maintenance_guard;
             run_db_repair_job(&pool, &progress, &db_maintenance_jobs, job_id);
         })
@@ -398,7 +398,7 @@ pub(in crate::server) async fn admin_db_repair_progress_json(
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -568,7 +568,7 @@ pub(in crate::server) async fn admin_db_repair_status(
         jar,
         super::super::should_set_secure_cookie(&headers, secure_context),
     )?;
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
