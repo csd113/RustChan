@@ -78,7 +78,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run focused regressions
-        run: cargo test --locked --workspace --all-features
+        run: cargo test --locked --workspace --all-features --no-fail-fast
 
       - name: Build documentation
         run: cargo doc --locked --workspace --all-features --no-deps
