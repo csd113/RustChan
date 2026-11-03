@@ -7,6 +7,13 @@ remain in Git history.
 
 ## RustChan 1.7.5 — 2026-11-03
 
+- Fixed private setup by collecting a separate board password and keeping its
+  reviewed hash out of the HTML. Invalid upload limits now fail before review
+  instead of causing an internal error when setup finishes. Removed the
+  nonfunctional read-only setup toggle; password-required posting remains available.
+- Fixed setup silently disabling video, audio, and PDF uploads when image
+  uploads were unchecked. Each media setting now applies independently.
+- Made advertised BMP and TIFF uploads selectable in posting file pickers.
 - Fixed banner and favicon uploads rejected by conflicting document and HTTP
   referrer policies. Thanks to @jfkn1ght for reporting the banner problem in #123.
 - Tightened CSRF checks for forms, login redirects, backups, and browser origins.

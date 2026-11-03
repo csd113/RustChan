@@ -148,6 +148,9 @@ pub(in crate::server) struct SetupWizardForm {
     pub board_description: Option<String>,
     pub board_nsfw: Option<String>,
     pub board_visibility: Option<String>,
+    pub board_password: Option<String>,
+    pub board_password_confirm: Option<String>,
+    pub board_password_token: Option<String>,
     pub allow_posting: Option<String>,
     pub allow_uploads: Option<String>,
     pub allow_video: Option<String>,
@@ -190,7 +193,7 @@ struct ParsedSetup {
     pub board_description: String,
     pub board_nsfw: bool,
     pub board_visibility: String,
-    pub allow_posting: bool,
+    pub board_password: Option<String>,
     pub allow_uploads: bool,
     pub allow_video: bool,
     pub allow_audio: bool,
@@ -232,10 +235,26 @@ fn validate_board_slug(raw: &str) -> Option<String> {
     valid.then_some(slug)
 }
 
+/// Setup also saves new-board defaults, whose limits can be narrower than board caps.
+fn setup_upload_maximum(key: &str) -> u64 {
+    crate::config::admin::runtime::RuntimeSection::Media
+        .definitions()
+        .iter()
+        .find(|field| field.key == key)
+        .and_then(|field| {
+            if let crate::config::admin::InputKind::Number(_, maximum) = field.kind {
+                Some(maximum.min(512))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(512)
+}
+
 #[must_use]
-fn parse_upload_limit_mib(raw: &str) -> Option<i64> {
+fn parse_upload_limit_mib(raw: &str, maximum: u64) -> Option<i64> {
     let mib = raw.trim().parse::<u64>().ok()?;
-    if !(1..=4096).contains(&mib) {
+    if !(1..=maximum).contains(&mib) {
         return None;
     }
     i64::try_from(mib.saturating_mul(MIB)).ok()
@@ -259,26 +278,51 @@ fn checked(value: Option<&str>) -> &'static str {
     }
 }
 
-fn pending_admin_hash_signature(token: &str, password_hash_hex: &str) -> String {
+/// Isolated cookie and signing scopes for the administrator and board passwords.
+#[derive(Clone, Copy)]
+enum SetupPasswordKind {
+    Admin,
+    Board,
+}
+
+impl SetupPasswordKind {
+    const fn cookie_name(self) -> &'static str {
+        match self {
+            Self::Admin => SETUP_PENDING_ADMIN_HASH_COOKIE,
+            Self::Board => "rustchan_setup_board_hash",
+        }
+    }
+
+    const fn scope(self) -> &'static str {
+        match self {
+            Self::Admin => "setup-admin-password",
+            Self::Board => "setup-board-password",
+        }
+    }
+}
+
+fn pending_hash_signature(kind: SetupPasswordKind, token: &str, password_hash_hex: &str) -> String {
     crypto::sha256_hex(
         format!(
-            "{}:setup-admin-password:{token}:{password_hash_hex}",
-            CONFIG.cookie_secret
+            "{}:{}:{token}:{password_hash_hex}",
+            CONFIG.cookie_secret,
+            kind.scope()
         )
         .as_bytes(),
     )
 }
 
-fn make_pending_admin_hash_cookie(
+fn make_pending_hash_cookie(
+    kind: SetupPasswordKind,
     token: &str,
     password_hash: &str,
     headers: &HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
 ) -> Cookie<'static> {
     let password_hash_hex = hex::encode(password_hash.as_bytes());
-    let signature = pending_admin_hash_signature(token, &password_hash_hex);
+    let signature = pending_hash_signature(kind, token, &password_hash_hex);
     let mut cookie = Cookie::new(
-        SETUP_PENDING_ADMIN_HASH_COOKIE,
+        kind.cookie_name(),
         format!("{token}:{password_hash_hex}:{signature}"),
     );
     cookie.set_http_only(true);
@@ -291,11 +335,15 @@ fn make_pending_admin_hash_cookie(
     cookie
 }
 
-fn pending_admin_hash_from_cookie(jar: &CookieJar, token: Option<&str>) -> Result<Option<String>> {
+fn pending_hash_from_cookie(
+    kind: SetupPasswordKind,
+    jar: &CookieJar,
+    token: Option<&str>,
+) -> Result<Option<String>> {
     let Some(token) = token.filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    let Some(cookie) = jar.get(SETUP_PENDING_ADMIN_HASH_COOKIE) else {
+    let Some(cookie) = jar.get(kind.cookie_name()) else {
         return Ok(None);
     };
     let mut parts = cookie.value().splitn(3, ':');
@@ -311,16 +359,16 @@ fn pending_admin_hash_from_cookie(jar: &CookieJar, token: Option<&str>) -> Resul
     if cookie_token != token {
         return Ok(None);
     }
-    let expected = pending_admin_hash_signature(token, password_hash_hex);
+    let expected = pending_hash_signature(kind, token, password_hash_hex);
     if signature != expected {
         return Err(AppError::Forbidden(
-            "Setup admin secret token is invalid.".into(),
+            "Setup password token is invalid.".into(),
         ));
     }
     let password_hash_bytes = hex::decode(password_hash_hex)
-        .map_err(|_error| AppError::BadRequest("Setup admin secret token is malformed.".into()))?;
+        .map_err(|_error| AppError::BadRequest("Setup password token is malformed.".into()))?;
     let password_hash = String::from_utf8(password_hash_bytes).map_err(|_error| {
-        AppError::BadRequest("Setup admin secret token is not valid UTF-8.".into())
+        AppError::BadRequest("Setup password token is not valid UTF-8.".into())
     })?;
     Ok(Some(password_hash))
 }
@@ -338,7 +386,7 @@ fn parse_setup_form(
     form: &SetupWizardForm,
     admin_count: i64,
 ) -> std::result::Result<ParsedSetup, Vec<String>> {
-    parse_setup_form_inner(form, admin_count, false)
+    parse_setup_form_inner(form, admin_count, false, false)
 }
 
 #[expect(
@@ -349,6 +397,7 @@ fn parse_setup_form_inner(
     form: &SetupWizardForm,
     admin_count: i64,
     admin_secret_available: bool,
+    board_secret_available: bool,
 ) -> std::result::Result<ParsedSetup, Vec<String>> {
     let mut errors = Vec::new();
     let preset = parse_preset(&form.preset);
@@ -407,16 +456,32 @@ fn parse_setup_form_inner(
             "public".to_owned()
         }
     };
-    let image_limit_bytes = parse_upload_limit_mib(&form.image_limit_mib);
-    let video_limit_bytes = parse_upload_limit_mib(&form.video_limit_mib);
-    let audio_limit_bytes = parse_upload_limit_mib(&form.audio_limit_mib);
-    let pdf_limit_bytes = parse_upload_limit_mib(&form.pdf_limit_mib);
+    if !checkbox(form.allow_posting.as_deref()) {
+        errors.push("Read-only boards are not supported by setup. Use password-required posting to restrict who can post.".to_owned());
+    }
+    let board_password = (board_visibility != "public")
+        .then(|| form.board_password.clone())
+        .flatten();
+    if board_visibility != "public" && !board_secret_available {
+        let password = board_password.as_deref().unwrap_or_default();
+        let confirmation = form.board_password_confirm.as_deref().unwrap_or_default();
+        if password != confirmation || !(12..=256).contains(&password.chars().count()) {
+            errors.push("Password-protected boards need a separate board password of 12–256 characters and matching confirmation.".to_owned());
+        }
+    }
+    let image_maximum = setup_upload_maximum("max_image_size_mb");
+    let video_maximum = setup_upload_maximum("max_video_size_mb");
+    let audio_maximum = setup_upload_maximum("max_audio_size_mb");
+    let image_limit_bytes = parse_upload_limit_mib(&form.image_limit_mib, image_maximum);
+    let video_limit_bytes = parse_upload_limit_mib(&form.video_limit_mib, video_maximum);
+    let audio_limit_bytes = parse_upload_limit_mib(&form.audio_limit_mib, audio_maximum);
+    let pdf_limit_bytes = parse_upload_limit_mib(&form.pdf_limit_mib, 512);
     if image_limit_bytes.is_none()
         || video_limit_bytes.is_none()
         || audio_limit_bytes.is_none()
         || pdf_limit_bytes.is_none()
     {
-        errors.push("Upload limits must be whole MiB values from 1 through 4096.".to_owned());
+        errors.push(format!("Upload limits must be whole MiB values: images 1–{image_maximum}, video 1–{video_maximum}, audio 1–{audio_maximum}, PDF 1–512."));
     }
     if !errors.is_empty() {
         return Err(errors);
@@ -450,7 +515,7 @@ fn parse_setup_form_inner(
         board_description: trimmed_limited(form.board_description.as_deref(), 256),
         board_nsfw: checkbox(form.board_nsfw.as_deref()),
         board_visibility,
-        allow_posting: checkbox(form.allow_posting.as_deref()),
+        board_password,
         allow_uploads: checkbox(form.allow_uploads.as_deref()),
         allow_video: checkbox(form.allow_video.as_deref()),
         allow_audio: checkbox(form.allow_audio.as_deref()),
@@ -640,11 +705,13 @@ pub(in crate::server) async fn setup_review(
     };
     let (mut jar, csrf) = ensure_setup_csrf(jar, &headers, secure_context);
     let mut review_form = form.clone();
-    if setup_state.admin_count == 0 {
-        let password = parsed
-            .admin_password
-            .as_deref()
-            .ok_or_else(|| AppError::BadRequest("Initial admin password is required.".into()))?;
+    for (kind, password) in [
+        (SetupPasswordKind::Admin, parsed.admin_password.as_deref()),
+        (SetupPasswordKind::Board, parsed.board_password.as_deref()),
+    ] {
+        let Some(password) = password else {
+            continue;
+        };
         let password = password.to_owned();
         let permit = state.password_work_gate.try_begin()?;
         let password_hash = crate::middleware::data_access::spawn_blocking(move || {
@@ -654,15 +721,25 @@ pub(in crate::server) async fn setup_review(
         .await
         .map_err(|error| AppError::Internal(error.into()))??;
         let token = crypto::random_hex(32);
-        jar = jar.add(make_pending_admin_hash_cookie(
+        jar = jar.add(make_pending_hash_cookie(
+            kind,
             &token,
             &password_hash,
             &headers,
             secure_context,
         ));
-        review_form.admin_password = None;
-        review_form.admin_password_confirm = None;
-        review_form.admin_password_token = Some(token);
+        match kind {
+            SetupPasswordKind::Admin => {
+                review_form.admin_password = None;
+                review_form.admin_password_confirm = None;
+                review_form.admin_password_token = Some(token);
+            }
+            SetupPasswordKind::Board => {
+                review_form.board_password = None;
+                review_form.board_password_confirm = None;
+                review_form.board_password_token = Some(token);
+            }
+        }
     }
     Ok((
         jar,
@@ -690,11 +767,23 @@ pub(in crate::server) async fn setup_finish(
 ) -> Result<Response> {
     let (setup_state, _is_admin) = load_setup_state(&state, admin_session_id(&jar)).await?;
     validate_setup_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
-    let pending_admin_hash =
-        pending_admin_hash_from_cookie(&jar, form.admin_password_token.as_deref())?;
-    let parsed =
-        parse_setup_form_inner(&form, setup_state.admin_count, pending_admin_hash.is_some())
-            .map_err(|errors| AppError::BadRequest(errors.join(" ")))?;
+    let pending_admin_hash = pending_hash_from_cookie(
+        SetupPasswordKind::Admin,
+        &jar,
+        form.admin_password_token.as_deref(),
+    )?;
+    let pending_board_hash = pending_hash_from_cookie(
+        SetupPasswordKind::Board,
+        &jar,
+        form.board_password_token.as_deref(),
+    )?;
+    let parsed = parse_setup_form_inner(
+        &form,
+        setup_state.admin_count,
+        pending_admin_hash.is_some(),
+        pending_board_hash.is_some(),
+    )
+    .map_err(|errors| AppError::BadRequest(errors.join(" ")))?;
     let board_slug = parsed.board_slug.clone();
     let auto_backup_settings = state.auto_full_backup_settings.clone();
     let permit = state.password_work_gate.try_begin()?;
@@ -713,6 +802,14 @@ pub(in crate::server) async fn setup_finish(
                     .as_deref()
                     .map(crypto::hash_password)
                     .transpose()?
+            };
+            let board_password_hash = if parsed.board_visibility == "public" {
+                String::new()
+            } else {
+                pending_board_hash.map_or_else(
+                    || crypto::hash_password(parsed.board_password.as_deref().unwrap_or_default()),
+                    Ok,
+                )?
             };
             let mut conn = pool.get()?;
             let tx = conn.transaction()?;
@@ -743,8 +840,8 @@ pub(in crate::server) async fn setup_finish(
                 &parsed.board_description,
                 parsed.board_nsfw,
                 parsed.allow_uploads,
-                parsed.allow_uploads && parsed.allow_video,
-                parsed.allow_uploads && parsed.allow_audio,
+                parsed.allow_video,
+                parsed.allow_audio,
             )?;
             tx.execute(
                 "UPDATE boards SET
@@ -755,17 +852,17 @@ pub(in crate::server) async fn setup_finish(
                  allow_archive = ?11, allow_video_embeds = ?12, allow_captcha = ?13,
                  show_poster_ids = 1, collapse_greentext = 0, post_cooldown_secs = ?14,
                  default_theme = ?15, banner_mode = 'inherit', access_mode = ?16,
-                 access_password_hash = ''
+                 access_password_hash = ?18
                  WHERE id = ?17",
                 rusqlite::params![
-                    if parsed.allow_posting { 150_i32 } else { 0_i32 },
+                    150_i32,
                     150_i32,
                     500_i32,
                     parsed.image_limit_bytes,
                     parsed.video_limit_bytes,
                     parsed.audio_limit_bytes,
                     parsed.pdf_limit_bytes,
-                    i32::from(parsed.allow_uploads && parsed.allow_pdf),
+                    i32::from(parsed.allow_pdf),
                     i32::from(parsed.allow_thread_editing),
                     i32::from(parsed.allow_self_delete),
                     i32::from(parsed.allow_archive),
@@ -775,6 +872,7 @@ pub(in crate::server) async fn setup_finish(
                     parsed.default_theme,
                     parsed.board_visibility,
                     board_id,
+                    board_password_hash,
                 ],
             )
             .map(|_completed_value| ())?;
@@ -879,7 +977,9 @@ pub(in crate::server) async fn setup_finish(
     .await
     .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))??;
 
-    let jar = jar.remove(Cookie::from(SETUP_PENDING_ADMIN_HASH_COOKIE));
+    let jar = jar
+        .remove(Cookie::from(SETUP_PENDING_ADMIN_HASH_COOKIE))
+        .remove(Cookie::from(SetupPasswordKind::Board.cookie_name()));
     Ok((jar, Redirect::to(&format!("/{board_slug}"))).into_response())
 }
 
@@ -974,6 +1074,9 @@ impl SetupWizardForm {
             board_description: Some(defaults.board_description.to_owned()),
             board_nsfw: None,
             board_visibility: Some(defaults.board_visibility.to_owned()),
+            board_password: None,
+            board_password_confirm: None,
+            board_password_token: None,
             allow_posting: Some("1".to_owned()),
             allow_uploads: defaults.allow_uploads.then(|| "1".to_owned()),
             allow_video: defaults.allow_video.then(|| "1".to_owned()),
@@ -1113,7 +1216,11 @@ fn setup_form_page(
 <label><span>Name</span><input name="board_name" value="{board_name}" maxlength="64" required></label>
 <label><span>Description</span><input name="board_description" value="{board_description}" maxlength="256"></label>
 <label><span>Visibility</span><select name="board_visibility">{visibility_options}</select></label>
-<label class="setup-check"><input type="checkbox" name="allow_posting" value="1"{allow_posting}> Allow posting</label>
+<label><span>Board password</span><input type="password" name="board_password" autocomplete="new-password" minlength="12" maxlength="256" aria-describedby="setup-board-password-help"></label>
+<label><span>Confirm board password</span><input type="password" name="board_password_confirm" autocomplete="new-password" minlength="12" maxlength="256" aria-describedby="setup-board-password-help"></label>
+<p class="setup-field-help" id="setup-board-password-help">Required for password-protected boards. Use a separate password to share with board visitors; do not share your administrator password. Leave both fields blank for a public board.</p>
+<input type="hidden" name="allow_posting" value="1">
+<p class="setup-field-help">To restrict posting, choose “Require password to post”.</p>
 <label class="setup-check"><input type="checkbox" name="board_nsfw" value="1"{board_nsfw}> Mark board NSFW</label>
 <label class="setup-check"><input type="checkbox" name="allow_thread_editing" value="1"{allow_thread_editing}> Allow post editing</label>
 <label class="setup-check"><input type="checkbox" name="allow_self_delete" value="1"{allow_self_delete}> Allow self-delete</label>
@@ -1127,10 +1234,10 @@ fn setup_form_page(
 <label class="setup-check"><input type="checkbox" name="allow_video" value="1"{allow_video}> Allow video uploads</label>
 <label class="setup-check"><input type="checkbox" name="allow_audio" value="1"{allow_audio}> Allow audio uploads</label>
 <label class="setup-check"><input type="checkbox" name="allow_pdf" value="1"{allow_pdf}> Allow PDF uploads</label>
-<label><span>Image limit (MiB)</span><input type="number" name="image_limit_mib" value="{image_limit_mib}" min="1" max="4096" required></label>
-<label><span>Video limit (MiB)</span><input type="number" name="video_limit_mib" value="{video_limit_mib}" min="1" max="4096" required></label>
-<label><span>Audio limit (MiB)</span><input type="number" name="audio_limit_mib" value="{audio_limit_mib}" min="1" max="4096" required></label>
-<label><span>PDF limit (MiB)</span><input type="number" name="pdf_limit_mib" value="{pdf_limit_mib}" min="1" max="4096" required></label>
+<label><span>Image limit (MiB)</span><input type="number" name="image_limit_mib" value="{image_limit_mib}" min="1" max="{image_maximum}" required></label>
+<label><span>Video limit (MiB)</span><input type="number" name="video_limit_mib" value="{video_limit_mib}" min="1" max="{video_maximum}" required></label>
+<label><span>Audio limit (MiB)</span><input type="number" name="audio_limit_mib" value="{audio_limit_mib}" min="1" max="{audio_maximum}" required></label>
+<label><span>PDF limit (MiB)</span><input type="number" name="pdf_limit_mib" value="{pdf_limit_mib}" min="1" max="512" required></label>
 <label class="setup-check"><input type="checkbox" name="allow_video_embeds" value="1"{allow_video_embeds}> Allow video embeds</label>
 </div></section>
 <section class="setup-section" aria-labelledby="setup-step-7">
@@ -1179,7 +1286,6 @@ fn setup_form_page(
         board_description = escape_html(form.board_description.as_deref().unwrap_or_default()),
         visibility_options =
             visibility_options(form.board_visibility.as_deref().unwrap_or("public")),
-        allow_posting = checked(form.allow_posting.as_deref()),
         board_nsfw = checked(form.board_nsfw.as_deref()),
         allow_thread_editing = checked(form.allow_thread_editing.as_deref()),
         allow_self_delete = checked(form.allow_self_delete.as_deref()),
@@ -1190,6 +1296,9 @@ fn setup_form_page(
         allow_audio = checked(form.allow_audio.as_deref()),
         allow_pdf = checked(form.allow_pdf.as_deref()),
         allow_video_embeds = checked(form.allow_video_embeds.as_deref()),
+        image_maximum = setup_upload_maximum("max_image_size_mb"),
+        video_maximum = setup_upload_maximum("max_video_size_mb"),
+        audio_maximum = setup_upload_maximum("max_audio_size_mb"),
         image_limit_mib = escape_html(&form.image_limit_mib),
         video_limit_mib = escape_html(&form.video_limit_mib),
         audio_limit_mib = escape_html(&form.audio_limit_mib),
@@ -1392,6 +1501,10 @@ fn hidden_form_fields(csrf: &str, form: &SetupWizardForm) -> String {
             "admin_password_token",
             form.admin_password_token.as_deref().unwrap_or_default(),
         ),
+        (
+            "board_password_token",
+            form.board_password_token.as_deref().unwrap_or_default(),
+        ),
         ("public_url", form.public_url.as_deref().unwrap_or_default()),
         ("board_slug", form.board_slug.as_str()),
         ("board_name", form.board_name.as_str()),
@@ -1461,3 +1574,7 @@ fn hidden_form_fields(csrf: &str, form: &SetupWizardForm) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "setup/tests/regressions.rs"]
+mod tests;

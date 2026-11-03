@@ -42,6 +42,12 @@ use the fresh-instance browser wizard at <http://localhost:8080/setup>. Complete
 setup before allowing public access. The site is at <http://localhost:8080> and
 administration is at <http://localhost:8080/admin>.
 
+For a password-protected board, the browser wizard requires a separate board
+password and matching confirmation. Share that board password with visitors;
+keep the administrator password private. Setup supports image limits of
+1–100 MiB and video, audio, and PDF limits of 1–512 MiB. It validates these
+limits before review so the saved settings and board policy agree.
+
 Explicit service arguments:
 
 ```sh
