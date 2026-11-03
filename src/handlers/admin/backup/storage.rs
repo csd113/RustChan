@@ -320,6 +320,9 @@ pub(super) fn create_backup_root(backup_id: &str) -> Result<PathBuf> {
             .map(|_completed_value| ())?;
     }
     let root = backups_root_dir().join(backup_id);
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

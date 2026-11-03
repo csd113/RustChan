@@ -124,6 +124,8 @@ fn sync_parent(path: &Path) -> Result<()> {
             .and_then(|file| file.sync_all())
             .map_err(anyhow::Error::from)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
