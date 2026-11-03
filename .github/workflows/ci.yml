@@ -120,6 +120,18 @@ jobs:
       - name: Run focused regressions natively
         run: cargo test --locked --workspace --all-features --no-fail-fast --target ${{ matrix.target }}
 
+  tests:
+    name: Tests
+    if: ${{ always() }}
+    needs: platform-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every native regression job to pass
+        env:
+          PLATFORM_RESULT: ${{ needs.platform-smoke.result }}
+        run: test "$PLATFORM_RESULT" = success
+
   binary-upgrade:
     name: Binary upgrade
     if: github.event_name == 'workflow_dispatch'
