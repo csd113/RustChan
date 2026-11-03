@@ -326,10 +326,20 @@ if not kernel.GenerateConsoleCtrlEvent(0, 0):
     raise ctypes.WinError(ctypes.get_last_error())
 time.sleep(0.2)
 """
-                    result = subprocess.run([sys.executable, "-c", helper, str(process.pid)],
-                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                            stderr=subprocess.PIPE, timeout=10)
-                    require(result.returncode == 0, "owned Windows console could not receive Ctrl+C")
+                    try:
+                        result = subprocess.run([sys.executable, "-c", helper, str(process.pid)],
+                                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, timeout=10)
+                        delivered = result.returncode == 0
+                        if not delivered and self.log_handle is not None:
+                            self.log_handle.write(b"Windows console signal failed: " + result.stderr[:2048])
+                    except (OSError, subprocess.TimeoutExpired):
+                        delivered = False
+                    if not delivered:
+                        # Failed validation must still stop the owned process so
+                        # cleanup can release its files. Never count this as a pass.
+                        forced = True
+                        process.terminate()
                 else:
                     process.send_signal(signal.SIGINT)
                 try:
