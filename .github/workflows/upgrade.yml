@@ -22,6 +22,9 @@ jobs:
     name: Upgrade 1.7.1 (${{ matrix.asset }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +45,10 @@ jobs:
             runner: ubuntu-24.04-arm
             asset: linux-arm64
             old_sha256: d0b148e40b8323af2ad8f75fdc1392f4e97c91f8d22c7b1d33c7ac02cfc43a09
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: windows-x86_64
+            old_sha256: 2a4609a3684b7c822c72fef66d2c28ba5be79501233a7d4df43b90713ed4cd14
     steps:
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,19 +86,20 @@ jobs:
           python3 - <<'PY'
           import os, pathlib, shutil, zipfile
           root = pathlib.Path(os.environ["RUNNER_TEMP"])
-          destination = root / "candidate" / "rustchan-cli"
+          executable = "rustchan-cli.exe" if os.name == "nt" else "rustchan-cli"
+          destination = root / "candidate" / executable
           destination.parent.mkdir()
           if os.environ["FROM_ARCHIVE"] == "true":
               archives = list((root / "candidate-artifact").glob("*.zip"))
               if len(archives) != 1:
                   raise SystemExit("expected one candidate archive")
               with zipfile.ZipFile(archives[0]) as archive:
-                  entries = [item for item in archive.infolist() if pathlib.PurePosixPath(item.filename).name == "rustchan-cli"]
+                  entries = [item for item in archive.infolist() if pathlib.PurePosixPath(item.filename).name == executable]
                   if len(entries) != 1 or entries[0].file_size > 256 * 1024 * 1024:
                       raise SystemExit("invalid candidate executable entry")
                   destination.write_bytes(archive.read(entries[0]))
           else:
-              shutil.copy2(pathlib.Path("target") / os.environ["TARGET"] / "release/rustchan-cli", destination)
+              shutil.copy2(pathlib.Path("target") / os.environ["TARGET"] / "release" / executable, destination)
           destination.chmod(0o755)
           PY
 
@@ -127,10 +135,11 @@ jobs:
               data = response.read(256 * 1024 * 1024 + 1)
           if len(data) > 256 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != os.environ["EXPECTED_SHA256"]:
               raise SystemExit("official baseline checksum mismatch")
-          destination = pathlib.Path(os.environ["RUNNER_TEMP"]) / "old171" / "rustchan-cli"
+          executable = "rustchan-cli.exe" if os.name == "nt" else "rustchan-cli"
+          destination = pathlib.Path(os.environ["RUNNER_TEMP"]) / "old171" / executable
           destination.parent.mkdir()
           with zipfile.ZipFile(io.BytesIO(data)) as archive:
-              entries = [item for item in archive.infolist() if pathlib.PurePosixPath(item.filename).name == "rustchan-cli"]
+              entries = [item for item in archive.infolist() if pathlib.PurePosixPath(item.filename).name == executable]
               if len(entries) != 1 or entries[0].file_size > 256 * 1024 * 1024:
                   raise SystemExit("invalid baseline executable entry")
               destination.write_bytes(archive.read(entries[0]))
@@ -142,9 +151,11 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          file "$RUNNER_TEMP/candidate/rustchan-cli" "$RUNNER_TEMP/old171/rustchan-cli"
-          "$RUNNER_TEMP/candidate/rustchan-cli" --version
-          "$RUNNER_TEMP/old171/rustchan-cli" --version
+          executable=rustchan-cli
+          if [[ "$TARGET" == *windows* ]]; then executable=rustchan-cli.exe; fi
+          file "$RUNNER_TEMP/candidate/$executable" "$RUNNER_TEMP/old171/$executable"
+          "$RUNNER_TEMP/candidate/$executable" --version
+          "$RUNNER_TEMP/old171/$executable" --version
           if [[ "$TARGET" == *apple-darwin ]]; then
             if [[ "$TARGET" == x86_64-* ]]; then arch=x86_64; else arch=arm64; fi
             lipo "$RUNNER_TEMP/candidate/rustchan-cli" -verify_arch "$arch"
@@ -158,10 +169,12 @@ jobs:
         run: |
           version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           context=()
+          executable=rustchan-cli
+          if [[ "$TARGET" == *windows* ]]; then executable=rustchan-cli.exe; fi
           if [[ "$TARGET" == *linux* ]]; then context=(--managed-linux-baseline); fi
           python3 src/db/tests/binary_upgrade.py \
-            --old-bin "$RUNNER_TEMP/old171/rustchan-cli" \
-            --new-bin "$RUNNER_TEMP/candidate/rustchan-cli" \
+            --old-bin "$RUNNER_TEMP/old171/$executable" \
+            --new-bin "$RUNNER_TEMP/candidate/$executable" \
             --expected-version "$version" \
             --output "$RUNNER_TEMP/upgrade-evidence" "${context[@]}"
 

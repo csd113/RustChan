@@ -7,7 +7,7 @@ On Linux, --manual-linux-root verifies the protected/check-only root context.
 --managed-linux-baseline verifies an ordinary-user 1.7.1 installation's real
 controller state is preserved when its executable is replaced by a new check-only
 release. Neither mode installs a signed managed update or bypasses old admission.
-POSIX graceful shutdown is required; Windows needs a console-control adapter.
+Graceful shutdown uses SIGINT on POSIX and an isolated console on Windows.
 """
 
 import argparse
@@ -279,7 +279,8 @@ class Smoke:
         self.log_handle = log.open("wb")
         self.process = subprocess.Popen([str(binary), "--port", str(self.port), "serve"],
                                         cwd=binary.parent, env=self.env, stdin=subprocess.DEVNULL,
-                                        stdout=self.log_handle, stderr=subprocess.STDOUT)
+                                        stdout=self.log_handle, stderr=subprocess.STDOUT,
+                                        creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0)
         return log
 
     def ready(self, expected_version, timeout=45):
@@ -312,7 +313,25 @@ class Smoke:
         forced = False
         try:
             if process.poll() is None:
-                process.send_signal(signal.SIGINT)
+                if os.name == "nt":
+                    helper = r"""
+import ctypes, sys, time
+kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel.FreeConsole()
+if not kernel.AttachConsole(int(sys.argv[1])):
+    raise ctypes.WinError(ctypes.get_last_error())
+if not kernel.SetConsoleCtrlHandler(None, True):
+    raise ctypes.WinError(ctypes.get_last_error())
+if not kernel.GenerateConsoleCtrlEvent(0, 0):
+    raise ctypes.WinError(ctypes.get_last_error())
+time.sleep(0.2)
+"""
+                    result = subprocess.run([sys.executable, "-c", helper, str(process.pid)],
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, timeout=10)
+                    require(result.returncode == 0, "owned Windows console could not receive Ctrl+C")
+                else:
+                    process.send_signal(signal.SIGINT)
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
@@ -325,7 +344,7 @@ class Smoke:
                         process.wait(timeout=5)
             if strict:
                 require(not forced and process.returncode == 0,
-                        "owned server did not exit cleanly after SIGINT")
+                        "owned server did not exit cleanly after its graceful shutdown signal")
         finally:
             if process.poll() is not None:
                 self.process = None
@@ -352,7 +371,7 @@ class Smoke:
     @staticmethod
     def install(directory, source):
         directory.mkdir()
-        binary = directory / "rustchan-cli"
+        binary = directory / ("rustchan-cli.exe" if os.name == "nt" else "rustchan-cli")
         shutil.copy2(source, binary)
         binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
         return binary, directory / "rustchan-data"
@@ -721,7 +740,7 @@ def main():
     smoke, temporary = None, None
     exit_code = 1
     try:
-        require(os.name == "posix", "full smoke requires POSIX graceful SIGINT; Windows console adapter is not implemented")
+        require(os.name in ("posix", "nt"), "unsupported process and shutdown platform")
         linux = sys.platform.startswith("linux")
         require(not linux or os.geteuid() == 0 or args.managed_linux_baseline,
                 "ordinary-user Linux requires explicit --managed-linux-baseline")
@@ -730,7 +749,8 @@ def main():
         require(not args.managed_linux_baseline or (linux and os.geteuid() != 0),
                 "--managed-linux-baseline requires Linux and an actual ordinary user")
         report["deployment_context"] = ("linux-ordinary-171-managed-to-check-only" if args.managed_linux_baseline
-                                        else "linux-protected-root-manual" if linux else "native-posix-manual")
+                                        else "linux-protected-root-manual" if linux
+                                        else "native-windows-manual" if os.name == "nt" else "native-posix-manual")
         require(args.old_bin.is_file() and args.new_bin.is_file(), "both supplied executables must be regular files")
         report["old_version"], report["candidate_version"] = version(args.old_bin), version(args.new_bin)
         require(report["old_version"] == "1.7.1", "baseline executable must be exactly 1.7.1")
