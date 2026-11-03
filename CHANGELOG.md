@@ -26,6 +26,11 @@ remain in Git history.
 - Added manual CI validation and native Linux x86_64 builds alongside ARM64,
   Apple Silicon, and Windows.
 
+Upgrading from 1.7.1: stop RustChan, back up the complete data directory and old
+binary, then replace the binary in place. Keep the same data path; startup handles
+the database upgrade. Older external updater services need a manual switch;
+see the [upgrade guide](https://github.com/csd113/RustChan/blob/main/docs/software-updates.md#manual-upgrade-of-a-source-install).
+
 ## RustChan 1.7.1 — 2026-10-09
 
 - Fixed startup migration from earlier releases, including 1.6.6 databases with
