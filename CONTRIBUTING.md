@@ -74,8 +74,12 @@ cargo fmt --all --check
 cargo check --locked --workspace --all-targets --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo
 cargo build --locked --workspace --all-features
+cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
+
+The focused regressions cover upload rejection responses, log-event counting,
+and backup safety. They use small synthetic inputs without starting a server.
 
 Use a small runtime smoke check with disposable local data when application
 startup or request handling changes. Keep generated evidence out of commits.

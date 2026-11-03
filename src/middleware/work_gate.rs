@@ -3,7 +3,16 @@
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use super::WorkGate;
+/// Non-queueing work allowance shared across clones of one application state.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the co-located type retains the existing crate-visible middleware facade"
+)]
+#[derive(Clone, Debug)]
+pub(crate) struct WorkGate {
+    /// Owned permits remain with blocking work after request cancellation.
+    semaphore: Arc<Semaphore>,
+}
 
 impl WorkGate {
     /// Create an independent gate for one resource class.

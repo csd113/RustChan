@@ -2,9 +2,12 @@
     unused_crate_dependencies,
     reason = "Cargo exposes the companion chan library and the transitive rustls-webpki security floor to this standalone binary target"
 )]
-#![expect(
-    clippy::missing_docs_in_private_items,
-    reason = "private items are documented only when comments add rationale beyond their names and types"
+#![cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "private items are documented only when comments add rationale beyond their names and types"
+    )
 )]
 
 //! Single-binary `RustChan` entry point.

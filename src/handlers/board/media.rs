@@ -1,3 +1,4 @@
+use super::access::can_view_board;
 use super::{
     board_access_cookie_from_jar, db, load_board_access_context, templates, unlock_redirect_url,
     user_preferences_from_jar, AppError, AppState, CookieJar, HeaderMap, Path, Redirect, Response,
@@ -184,7 +185,7 @@ pub(in crate::server) async fn serve_board_media(
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
             // Public/post-password boards and valid unlock cookies already grant
             // viewing. Only a remaining password gate needs a session lookup.
-            if !super::can_view_board(&board, false, access_cookie.as_deref())
+            if !can_view_board(&board, false, access_cookie.as_deref())
                 && !super::posting::is_admin_session(&conn, admin_session_id.as_deref())
             {
                 return Err(AppError::Forbidden("Board access denied".to_owned()));

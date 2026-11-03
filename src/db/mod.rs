@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 /// Transactional administrator credential workflows.
 pub mod accounts;
-/// Administrative users, sessions, moderation, and database health queries.
+/// Administrative users, sessions, moderation, and compatible health-query exports.
 pub mod admin;
 /// Banner asset persistence and ordering.
 pub mod banners;
@@ -19,6 +19,8 @@ mod diagnostics;
 mod fs_ops;
 /// Durable background-job persistence.
 mod jobs;
+/// Database health checks and maintenance operations.
+mod maintenance;
 /// Database schema-version bookkeeping.
 mod migrations;
 /// `SQLite` connection-pool creation and startup checks.

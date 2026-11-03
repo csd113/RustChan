@@ -1,7 +1,11 @@
 //! Exclusive operation ownership and durable restore recovery evidence.
 
-use super::{AppError, AppState, CookieJar, Path, PathBuf, Result, SESSION_COOKIE};
+use crate::error::{AppError, Result};
+use crate::handlers::admin::SESSION_COOKIE;
+use crate::middleware::AppState;
+use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Held by the actual blocking operation, even after request cancellation.
 pub(super) struct BackupOperation {

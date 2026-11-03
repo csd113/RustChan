@@ -7,6 +7,12 @@ remain in Git history.
 
 ## Unreleased
 
+- Corrected upload rejection status mapping, including secondary audio type and
+  size errors, while keeping filesystem and decoder diagnostics private.
+
+- Corrected Tor descriptor-timeout warning counts across dependency-only and
+  shared outputs, including concurrent events and suppression-window summaries.
+
 - Updated the supported toolchain to Rust 1.99.1 and refreshed Rust dependencies,
   including Hayro 0.8 and ZIP 9; Arti remains on 0.47.0.
 - Added manual CI validation and native Linux x86_64 builds alongside ARM64,

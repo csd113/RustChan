@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::UploadRejection;
 use anyhow::Result;
 use std::path::Path;
 
@@ -19,11 +21,11 @@ pub(super) fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
         .unwrap_or(u64::MAX)
         .saturating_mul(2);
     if free_bytes < needed {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(UploadRejection::TooLarge(format!(
             "Insufficient disk space: need ~{} MiB free, only ~{} MiB available.",
             needed / (1024 * 1024),
             free_bytes / (1024 * 1024)
-        ));
+        ))));
     }
     Ok(())
 }

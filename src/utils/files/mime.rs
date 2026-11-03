@@ -46,9 +46,9 @@ pub(super) fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
                 return Ok("video/x-matroska");
             }
         }
-        return Err(anyhow::anyhow!(
-            "File type not allowed. EBML container is not valid WebM or Matroska/MKV media."
-        ));
+        return Err(anyhow::anyhow!(super::UploadRejection::Disallowed(
+            "File type not allowed. EBML container is not valid WebM or Matroska/MKV media.".into()
+        )));
     }
 
     if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -98,10 +98,11 @@ pub(super) fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
         }
     }
 
-    Err(anyhow::anyhow!(
+    Err(anyhow::anyhow!(super::UploadRejection::Disallowed(
         "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, HEIC, HEIF, BMP, TIFF, \
          MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC, PDF"
-    ))
+            .into()
+    )))
 }
 
 /// Return whether an ISO base-media header declares any accepted brand.

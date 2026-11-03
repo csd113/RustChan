@@ -1,6 +1,15 @@
 //! Fixed-window budgets with bounded retention and atomic admission.
 
-use super::RateTable;
+/// Bounded fixed-window storage for hashed visitor identities.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the co-located type retains the existing crate-visible middleware facade"
+)]
+#[derive(Debug, Default)]
+pub(crate) struct RateTable {
+    /// Serializes only admission and amortized expiration, never application work.
+    state: parking_lot::Mutex<TableState>,
+}
 use std::collections::HashMap;
 
 /// Maximum retained identities in each abuse-control table.

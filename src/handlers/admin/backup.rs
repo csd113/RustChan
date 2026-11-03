@@ -10,37 +10,25 @@ use crate::{
     config::CONFIG,
     db,
     error::{AppError, Result},
-    handlers::is_xml_http_request,
     middleware::AppState,
-    models::{BackupInfo, BoardAccessMode},
-    utils::crypto::{new_session_id, verify_password},
+    utils::crypto::new_session_id,
 };
 use axum::{
-    extract::{Form, Multipart, Query, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
-    middleware::Next,
+    extract::{Query, State},
+    http::header,
     response::{IntoResponse as _, Redirect, Response},
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar};
-use chrono::{Local, Utc};
-use futures::stream::Stream;
-use rusqlite::{backup::Backup, params};
+use axum_extra::extract::cookie::CookieJar;
+use chrono::Local;
+use rusqlite::params;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::sync::LazyLock;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::Duration;
 use tokio_util::io::ReaderStream;
 
-use super::{
-    admin_panel_redirect_anchor_open, check_admin_csrf_jar, require_admin_post_origin_and_csrf,
-    require_admin_session_sid, require_same_origin_request, should_set_secure_cookie,
-    AdminPanelTarget, ADMIN_COOKIE_SAME_SITE, SESSION_COOKIE,
-};
+use super::{check_admin_csrf_jar, require_admin_session_sid, SESSION_COOKIE};
 
 mod archive;
 mod board_manifest;
@@ -68,13 +56,7 @@ pub(in crate::server) use restore_board::{
     board_restore, extract_board_from_full_backup, restore_saved_board_backup,
 };
 pub(in crate::server) use restore_full::{admin_restore, restore_saved_full_backup};
-use safety::{
-    copy_limited, create_staging_dir, extract_uploads_to_dir, log_backup_phase,
-    log_backup_progress, read_limited_bytes, remap_body_quotelinks, remove_path_if_exists,
-    render_restored_body_html, validate_board_short_name, validate_entry_path_under_prefix,
-    validate_restore_safe_entry_name, BANNER_RESTORE_ENTRY_MAX_BYTES,
-    BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
-};
+use safety::{log_backup_phase, log_backup_progress};
 
 /// Full backup restore section used by this handler.
 const FULL_BACKUP_RESTORE_SECTION: &str = "full-backup-restore";
@@ -100,24 +82,10 @@ where
     Ok(super::settings::checkbox_is_on(value.as_deref()))
 }
 
-use archive::{
-    canonicalize_restored_banner_dir, convert_transfer_zip_to_full_restore_archive,
-    extract_board_archive_from_full_backup, extract_board_archive_from_saved_full_backup,
-    parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive,
-    prepare_saved_full_restore_archive, validate_full_restore_archive_layout,
-};
-use downloads::{prune_stale_temp_board_downloads, write_temp_board_download_token};
-use http::{
-    log_restore_upload_started, redirect_page_response, restore_auth_preflight,
-    restore_error_redirect_target, restore_failure_response, restore_start_response,
-    restore_success_redirect_target, restore_upload_parse_response, sanitize_board_short_value,
-    stream_restore_upload_to_tempfile, validate_backup_zip_filename,
-    validate_saved_backup_reference, validate_streamed_restore_upload, RestoreKind,
-};
+use archive::{parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive};
+use downloads::write_temp_board_download_token;
+use listing::latest_board_backup_reference;
 pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
-use listing::{
-    enforce_full_backup_retention, invalidate_backup_list_cache, latest_board_backup_reference,
-};
 
 #[expect(
     clippy::too_many_lines,
@@ -147,7 +115,7 @@ pub(in crate::server) async fn admin_backup(
 
             let tmp_id = uuid::Uuid::new_v4().simple().to_string();
             let temp_paths = restore_full::prepare_full_restore_temp_paths(&tmp_id)?;
-            let _db_cleanup = restore_full::FullRestoreTempCleanupGuard::new(&temp_paths);
+            let _db_cleanup = recovery_files::FullRestoreTempCleanupGuard::new(&temp_paths);
             let temp_db = temp_paths.temp_db;
             let temp_db_str = temp_db
                 .to_str()

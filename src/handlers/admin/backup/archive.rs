@@ -1,11 +1,19 @@
-use super::{
-    banner, board_manifest, build_board_backup_manifest, copy_limited,
-    local_backup_timestamp_label, prune_stale_temp_board_downloads, read_limited_bytes, safety,
-    storage, temp_board_download_dir, unique_backup_filename, validate_restore_safe_entry_name,
-    write_board_backup_archive, zip_file_options_for_path, AppError, Path, PathBuf, Result, Seek,
-    Utc, Write, BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, SQLITE_HEADER,
-    ZIP_ENTRY_MAX_BYTES,
+use super::create::{build_board_backup_manifest, write_board_backup_archive};
+use super::downloads::prune_stale_temp_board_downloads;
+use super::limits::{copy_limited, copy_limited_with_total_budget};
+use super::safety::{
+    read_limited_bytes, validate_restore_safe_entry_name, BANNER_RESTORE_TOTAL_MAX_BYTES,
+    BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
+use super::{
+    board_manifest, local_backup_timestamp_label, safety, storage, temp_board_download_dir,
+    unique_backup_filename, zip_file_options_for_path, SQLITE_HEADER,
+};
+use crate::banner;
+use crate::error::{AppError, Result};
+use chrono::Utc;
+use std::io::{Seek, Write};
+use std::path::{Path, PathBuf};
 
 pub(super) struct TempZipCleanupGuard {
     path: Option<PathBuf>,
@@ -375,7 +383,7 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
         let mut entry = archive.by_index(db_index).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read Backup v4 DB entry: {error}"))
         })?;
-        safety::copy_limited_with_total_budget(
+        copy_limited_with_total_budget(
             &mut entry,
             &mut zip,
             ZIP_ENTRY_MAX_BYTES,
@@ -395,7 +403,7 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
                 "Read Backup v4 transfer entry #{index}: {error}"
             ))
         })?;
-        safety::copy_limited_with_total_budget(
+        copy_limited_with_total_budget(
             &mut entry,
             &mut zip,
             ZIP_ENTRY_MAX_BYTES,

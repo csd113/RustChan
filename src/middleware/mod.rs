@@ -44,16 +44,5 @@ pub(crate) fn forwarded_proto_is_https(
     ip::forwarded_proto_is_https(headers, peer, behind_proxy)
 }
 
-/// Non-queueing work allowance shared across clones of one application state.
-#[derive(Clone, Debug)]
-pub(crate) struct WorkGate {
-    /// Owned permits remain with blocking work after request cancellation.
-    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
-}
-
-/// Bounded fixed-window storage for hashed visitor identities.
-#[derive(Debug, Default)]
-pub(crate) struct RateTable {
-    /// Serializes only admission and amortized expiration, never application work.
-    state: parking_lot::Mutex<rate_table::TableState>,
-}
+pub(crate) use rate_table::RateTable;
+pub(crate) use work_gate::WorkGate;

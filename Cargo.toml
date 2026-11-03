@@ -37,7 +37,7 @@ opt-level = 3
 [[bin]]
 name = "rustchan-cli"
 path = "src/main.rs"
-test = false
+test = true
 bench = false
 
 [lib]

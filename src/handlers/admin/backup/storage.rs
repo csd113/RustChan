@@ -1048,7 +1048,7 @@ pub(super) fn copy_verified_file_to_writer<W: Write>(
             let mut source = std::fs::File::open(path).map_err(|error| {
                 AppError::Internal(anyhow::anyhow!("Open {}: {error}", path.display()))
             })?;
-            super::safety::copy_limited(&mut source, &mut checked_writer, file.size)
+            super::limits::copy_limited(&mut source, &mut checked_writer, file.size)
                 .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy verified file: {error}")))
                 .map(|_completed_value| ())?;
         }
@@ -1068,7 +1068,7 @@ pub(super) fn copy_verified_file_to_writer<W: Write>(
                     "Verified Backup v4 ZIP entry '{entry_path}' is no longer readable: {error}"
                 ))
             })?;
-            super::safety::copy_limited(&mut entry, &mut checked_writer, file.size)
+            super::limits::copy_limited(&mut entry, &mut checked_writer, file.size)
                 .map_err(|error| {
                     AppError::Internal(anyhow::anyhow!(
                         "Copy verified Backup v4 ZIP entry '{entry_path}': {error}"

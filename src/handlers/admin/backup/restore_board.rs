@@ -1,23 +1,43 @@
-use super::{
-    admin_panel_redirect_anchor_open, archive, banner, board_backup_dir, board_manifest,
-    create_staging_dir, db, extract_board_archive_from_full_backup,
-    extract_board_archive_from_saved_full_backup, extract_uploads_to_dir, full_backup_dir,
-    is_xml_http_request, log_restore_upload_started, new_session_id,
-    parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive, read_limited_bytes,
-    redirect_page_response, remap_body_quotelinks, remove_path_if_exists,
-    render_restored_body_html, require_admin_post_origin_and_csrf, require_admin_session_sid,
-    restore_auth_preflight, restore_error_redirect_target, restore_failure_response,
-    restore_start_response, restore_success_redirect_target, restore_upload_parse_response, safety,
-    sanitize_board_short_value, stream_restore_upload_to_tempfile, temp_board_download_dir,
-    validate_board_short_name, validate_saved_backup_reference, validate_streamed_restore_upload,
-    verify_password, write_temp_board_download_token, AppError, AppState, BoardAccessMode,
-    CookieJar, Form, HeaderMap, Multipart, Path, PathBuf, Redirect, Request, Response, RestoreKind,
-    RestoreSavedForm, Result, State, BOARD_BACKUP_RESTORE_SECTION, BOARD_MANIFEST_MAX_BYTES,
-    CONFIG, SESSION_COOKIE,
+use super::archive::{
+    extract_board_archive_from_full_backup, extract_board_archive_from_saved_full_backup,
+    parse_board_backup_manifest_from_zip, prepare_saved_board_restore_archive,
 };
+use super::downloads::write_temp_board_download_token;
+use super::http::{
+    log_restore_upload_started, redirect_page_response, restore_auth_preflight,
+    restore_error_redirect_target, restore_failure_response, restore_start_response,
+    restore_success_redirect_target, restore_upload_parse_response, sanitize_board_short_value,
+    stream_restore_upload_to_tempfile, validate_saved_backup_reference,
+    validate_streamed_restore_upload, RestoreKind,
+};
+use super::safety::{
+    create_staging_dir, extract_uploads_to_dir, read_limited_bytes, remap_body_quotelinks,
+    remove_path_if_exists, render_restored_body_html, validate_board_short_name,
+    BOARD_MANIFEST_MAX_BYTES,
+};
+use super::{
+    archive, board_backup_dir, board_manifest, full_backup_dir, safety, temp_board_download_dir,
+    RestoreSavedForm, BOARD_BACKUP_RESTORE_SECTION,
+};
+use crate::config::CONFIG;
+use crate::error::{AppError, Result};
+use crate::handlers::admin::{
+    admin_panel_redirect_anchor_open, require_admin_post_origin_and_csrf,
+    require_admin_session_sid, SESSION_COOKIE,
+};
+use crate::handlers::is_xml_http_request;
+use crate::middleware::AppState;
+use crate::models::BoardAccessMode;
+use crate::utils::crypto::{new_session_id, verify_password};
+use crate::{banner, db};
+use axum::extract::{Form, Multipart, Request, State};
+use axum::http::HeaderMap;
+use axum::response::{Redirect, Response};
 use axum::{extract::FromRequest as _, response::IntoResponse as _};
+use axum_extra::extract::cookie::CookieJar;
 use rusqlite::{params, OptionalExtension as _};
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 /// Validate post body bounds and board restore media metadata before staging.
 fn validate_board_restore_media_metadata(
@@ -390,7 +410,7 @@ where
     let paths = super::restore_full::prepare_full_restore_temp_paths(
         &uuid::Uuid::new_v4().simple().to_string(),
     )?;
-    let mut snapshot_cleanup = super::restore_full::FullRestoreTempCleanupGuard::new(&paths);
+    let mut snapshot_cleanup = super::recovery_files::FullRestoreTempCleanupGuard::new(&paths);
     let db_snapshot = paths.db_snapshot;
     super::restore_full::create_live_restore_snapshot(conn, &db_snapshot)?;
     super::recovery::sync_staged_tree(&workspace.staged_upload_root)?;

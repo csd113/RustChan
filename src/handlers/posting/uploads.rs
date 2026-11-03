@@ -8,34 +8,34 @@ use crate::{
     models::Board,
 };
 
-// Upload error classifier (#6)
-/// Convert an anyhow error from `save_upload` into the most appropriate
-/// `AppError` variant, giving clients accurate HTTP status codes:
-///   • "File too large"          → 413 `UploadTooLarge`
-///   • "Insufficient disk space" → 413 `UploadTooLarge`
-///   • "File type not allowed"   → 415 `InvalidMediaType`
-///   • "Not an audio file"       → 415 `InvalidMediaType`
-///   • filesystem errors         → generic 500, with details retained for logging.
-///   • other decoder errors      → a generic 400, without tool output or paths.
+/// Map typed upload rejections to HTTP errors without inspecting diagnostic text.
+/// Size/free-space failures are 413, prohibited content is 415, malformed content
+/// is 400 (422 in processed posting responses), and I/O failures remain private 500s.
 #[expect(
     clippy::redundant_pub_crate,
     reason = "the private upload owner preserves the existing crate-visible handler facade"
 )]
-pub(crate) fn classify_upload_error(e: &anyhow::Error) -> AppError {
-    let msg = e.to_string();
-    // Compare lower-cased so minor wording changes in save_upload don't silently
-    // fall through to a generic 400 instead of the correct 413 / 415.
-    let lower = msg.to_ascii_lowercase();
-    if lower.starts_with("file too large") || lower.starts_with("insufficient disk space") {
-        AppError::UploadTooLarge(msg)
-    } else if lower.starts_with("file type not allowed") || lower.starts_with("not an audio file") {
-        AppError::InvalidMediaType(msg)
-    } else if e
+pub(crate) fn classify_upload_error(error: anyhow::Error) -> AppError {
+    use crate::utils::files::UploadRejection;
+
+    match error.downcast_ref::<UploadRejection>() {
+        Some(UploadRejection::TooLarge(message)) => {
+            return AppError::UploadTooLarge(message.clone())
+        }
+        Some(UploadRejection::Disallowed(message)) => {
+            return AppError::InvalidMediaType(message.clone())
+        }
+        Some(UploadRejection::MalformedImageHeader(_) | UploadRejection::Malformed(_)) | None => {}
+    }
+    if error
         .chain()
         .any(<dyn std::error::Error + 'static>::is::<std::io::Error>)
     {
-        AppError::Internal(anyhow::anyhow!("Upload filesystem operation failed: {e:#}"))
-    } else if lower.contains("image header is malformed") {
+        AppError::Internal(error.context("Upload filesystem operation failed"))
+    } else if matches!(
+        error.downcast_ref::<UploadRejection>(),
+        Some(UploadRejection::MalformedImageHeader(_))
+    ) {
         AppError::BadRequest("The image header is malformed. Check that the image is valid.".into())
     } else {
         AppError::BadRequest(
@@ -95,7 +95,7 @@ pub(crate) fn process_primary_upload(
         &upload.sniff_bytes,
         allow_any_files,
     )
-    .map_err(|error| classify_upload_error(&error))?;
+    .map_err(classify_upload_error)?;
     let detected_media = crate::models::MediaType::from_mime(&detected_mime);
     let ambiguous_webm = detected_mime == crate::utils::files::AMBIGUOUS_WEBM_MIME;
 
@@ -158,7 +158,7 @@ pub(crate) fn process_primary_upload(
         upload.size_bytes,
         &upload_options,
     )
-    .map_err(|error| classify_upload_error(&error))?;
+    .map_err(classify_upload_error)?;
 
     // SHA-256 deduplication — serve the cached entry without re-saving.
     //
@@ -217,7 +217,7 @@ pub(crate) fn process_primary_upload(
 
     let f =
         crate::utils::files::storage::save_validated_upload_from_path(validated, &upload_options)
-            .map_err(|e| classify_upload_error(&e))?;
+            .map_err(classify_upload_error)?;
     Ok((Some(f), Some(hash)))
 }
 
@@ -237,7 +237,7 @@ fn temp_upload_mime(upload: &TempUpload, allow_any_files: bool) -> Result<String
         &upload.sniff_bytes,
         allow_any_files,
     )
-    .map_err(|error| classify_upload_error(&error))
+    .map_err(classify_upload_error)
 }
 
 /// Process the secondary audio file for an image+audio combo upload.
@@ -284,7 +284,7 @@ pub(crate) fn process_audio_combo(
         &board.short_name,
         max_audio_size,
     )
-    .map_err(|e| classify_upload_error(&e))?;
+    .map_err(classify_upload_error)?;
 
     // Use the image thumbnail as the audio's visual.
     if let Some(img) = primary_upload {
@@ -723,3 +723,7 @@ pub(super) fn process_uploads(
         pending_finalize,
     })
 }
+
+#[cfg(test)]
+#[path = "tests/upload_rejections.rs"]
+mod tests;

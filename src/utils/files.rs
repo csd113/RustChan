@@ -4,6 +4,10 @@ mod disk_space;
 mod jpeg;
 /// Content-based MIME detection.
 mod mime;
+/// Internal upload rejection categories.
+mod rejection;
+pub(crate) use rejection::UploadRejection;
+
 /// Validated upload persistence.
 pub(crate) mod storage;
 

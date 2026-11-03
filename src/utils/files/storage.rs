@@ -5,7 +5,7 @@ use uuid::Uuid;
 use super::disk_space::check_disk_space;
 use super::jpeg::{read_exif_orientation_from_file, strip_jpeg_exif_file};
 use super::mime::detect_mime_type;
-use super::AMBIGUOUS_WEBM_MIME;
+use super::{UploadRejection, AMBIGUOUS_WEBM_MIME};
 
 /// Metadata describing a persisted upload and its generated thumbnail.
 #[derive(Debug)]
@@ -151,21 +151,23 @@ pub fn save_audio_with_image_thumb_from_path(
     max_audio_size: usize,
 ) -> Result<UploadedFile> {
     if original_size == 0 {
-        return Err(anyhow::anyhow!("Audio file is empty."));
+        return Err(anyhow::anyhow!(UploadRejection::Malformed(
+            "Audio file is empty.".into()
+        )));
     }
 
     let mime_type = classify_upload_mime(input_path, sniff_bytes, false)?;
     let media_type = crate::models::MediaType::from_mime(&mime_type);
     if !matches!(media_type, crate::models::MediaType::Audio) {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(UploadRejection::Disallowed(format!(
             "Expected an audio file for the audio slot; got {mime_type}"
-        ));
+        ))));
     }
     if original_size > max_audio_size {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(UploadRejection::TooLarge(format!(
             "Audio file too large. Maximum audio upload size is {}.",
             format_upload_limit(max_audio_size)
-        ));
+        ))));
     }
     validate_av_stream_kind(input_path, &mime_type, crate::models::MediaType::Audio)?;
 
@@ -401,7 +403,7 @@ pub(crate) fn validate_upload_for_storage(
     options: &SaveUploadOptions<'_>,
 ) -> Result<ValidatedUpload> {
     if original_size == 0 {
-        anyhow::bail!("File is empty.");
+        anyhow::bail!(UploadRejection::Malformed("File is empty.".into()));
     }
     validate_upload(input_path, sniff_bytes, original_size, options)
 }
@@ -419,9 +421,9 @@ fn validate_upload(
 ) -> Result<ValidatedUpload> {
     let mime_type = classify_upload_mime(input_path, sniff_bytes, options.allow_any_files)?;
     if mime_type == "image/svg+xml" {
-        anyhow::bail!(
-            "File type not allowed. SVG files are not accepted because they can contain executable JavaScript."
-        );
+        anyhow::bail!(UploadRejection::Disallowed(
+            "File type not allowed. SVG files are not accepted because they can contain executable JavaScript.".into()
+        ));
     }
 
     let media_type = crate::models::MediaType::from_mime(&mime_type);
@@ -431,11 +433,11 @@ fn validate_upload(
         max_size_for_media(media_type, options)
     };
     if original_size > max_size {
-        anyhow::bail!(
+        anyhow::bail!(UploadRejection::TooLarge(format!(
             "File too large. Maximum {} upload size is {}.",
             media_label(media_type),
             format_upload_limit(max_size)
-        );
+        )));
     }
     if media_type == crate::models::MediaType::Image {
         validate_decodable_image(input_path, &mime_type)?;
@@ -618,12 +620,12 @@ fn final_processed_size_within_limit(
     }
 
     cleanup_processed_outputs(processed);
-    anyhow::bail!(
+    anyhow::bail!(UploadRejection::TooLarge(format!(
         "File too large after media processing. Maximum {} upload size is {}; processed file is {}.",
         media_label(media_type),
         format_upload_limit(max_size),
         format_upload_limit_u64(final_size)
-    );
+    )));
 }
 
 /// Best-effort removes both outputs from a failed processed upload.
@@ -709,7 +711,9 @@ fn validate_decodable_image(input_path: &Path, mime_type: &str) -> Result<()> {
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&data), format);
     reader.limits(crate::media::untrusted_image_decode_limits());
     let (width, height) = reader.into_dimensions().with_context(|| {
-        format!("File appears to be {mime_type}, but its image header is malformed or incomplete.")
+        UploadRejection::MalformedImageHeader(format!(
+            "File appears to be {mime_type}, but its image header is malformed or incomplete."
+        ))
     })?;
     validate_untrusted_image_dimensions(width, height)?;
 
@@ -778,64 +782,59 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
     const MALFORMED_PNG_ERROR: &str =
         "File appears to be image/png, but its image header is malformed or incomplete.";
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    let malformed_header = || UploadRejection::MalformedImageHeader(MALFORMED_PNG_ERROR.into());
     if data.len() < PNG_SIGNATURE.len().saturating_add(12) {
-        anyhow::bail!(MALFORMED_PNG_ERROR);
+        anyhow::bail!(malformed_header());
     }
     if data.get(..PNG_SIGNATURE.len()) != Some(PNG_SIGNATURE.as_slice()) {
-        anyhow::bail!(MALFORMED_PNG_ERROR);
+        anyhow::bail!(malformed_header());
     }
 
     let mut offset = PNG_SIGNATURE.len();
     let mut saw_ihdr = false;
 
     while offset.checked_add(12).is_some_and(|end| end <= data.len()) {
-        let length_end = offset
-            .checked_add(4)
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
-        let chunk_data_start = offset
-            .checked_add(8)
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+        let length_end = offset.checked_add(4).ok_or_else(malformed_header)?;
+        let chunk_data_start = offset.checked_add(8).ok_or_else(malformed_header)?;
         let length_bytes: [u8; 4] = data
             .get(offset..length_end)
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
+            .ok_or_else(malformed_header)?
             .try_into()
-            .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
+            .map_err(|error| anyhow::Error::new(error).context(malformed_header()))?;
         let length = usize::try_from(u32::from_be_bytes(length_bytes))
             .context("PNG chunk length overflows usize")?;
         let chunk_type = data
             .get(length_end..chunk_data_start)
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+            .ok_or_else(malformed_header)?;
         let chunk_data_end = chunk_data_start
             .checked_add(length)
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
-        let crc_end = chunk_data_end
-            .checked_add(4)
-            .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+            .ok_or_else(malformed_header)?;
+        let crc_end = chunk_data_end.checked_add(4).ok_or_else(malformed_header)?;
         if crc_end > data.len() {
-            anyhow::bail!(MALFORMED_PNG_ERROR);
+            anyhow::bail!(malformed_header());
         }
 
         if !saw_ihdr {
             if chunk_type != b"IHDR" || length != 13 {
-                anyhow::bail!(MALFORMED_PNG_ERROR);
+                anyhow::bail!(malformed_header());
             }
             let chunk_data = data
                 .get(chunk_data_start..chunk_data_end)
-                .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?;
+                .ok_or_else(malformed_header)?;
             let width_bytes: [u8; 4] = chunk_data
                 .get(..4)
-                .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
+                .ok_or_else(malformed_header)?
                 .try_into()
-                .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
+                .map_err(|error| anyhow::Error::new(error).context(malformed_header()))?;
             let height_bytes: [u8; 4] = chunk_data
                 .get(4..8)
-                .ok_or_else(|| anyhow::anyhow!(MALFORMED_PNG_ERROR))?
+                .ok_or_else(malformed_header)?
                 .try_into()
-                .map_err(|error| anyhow::anyhow!("{MALFORMED_PNG_ERROR}: {error}"))?;
+                .map_err(|error| anyhow::Error::new(error).context(malformed_header()))?;
             let width = u32::from_be_bytes(width_bytes);
             let height = u32::from_be_bytes(height_bytes);
             if width == 0 || height == 0 {
-                anyhow::bail!(MALFORMED_PNG_ERROR);
+                anyhow::bail!(malformed_header());
             }
             saw_ihdr = true;
         } else if chunk_type == b"IEND" {
@@ -845,7 +844,7 @@ fn validate_png_structure(data: &[u8]) -> Result<()> {
         offset = crc_end;
     }
 
-    anyhow::bail!(MALFORMED_PNG_ERROR);
+    anyhow::bail!(malformed_header());
 }
 
 /// Maps a supported image MIME type to the image decoder format.

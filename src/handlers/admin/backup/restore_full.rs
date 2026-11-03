@@ -1,22 +1,40 @@
-use super::{
-    archive, banner, canonicalize_restored_banner_dir,
-    convert_transfer_zip_to_full_restore_archive, create_staging_dir, db, full_backup_dir,
-    is_xml_http_request, log_restore_upload_started, new_session_id,
-    prepare_saved_full_restore_archive, remove_path_if_exists, require_admin_post_origin_and_csrf,
-    require_admin_session_sid, restore_auth_preflight, restore_error_redirect_target,
+use super::archive::{
+    canonicalize_restored_banner_dir, convert_transfer_zip_to_full_restore_archive,
+    prepare_saved_full_restore_archive, validate_full_restore_archive_layout,
+};
+use super::http::{
+    log_restore_upload_started, restore_auth_preflight, restore_error_redirect_target,
     restore_failure_response, restore_start_response, restore_success_redirect_target,
-    restore_upload_parse_response, safety, should_set_secure_cookie,
-    stream_restore_upload_to_tempfile, validate_entry_path_under_prefix,
-    validate_full_restore_archive_layout, validate_restore_safe_entry_name,
-    validate_saved_backup_reference, validate_streamed_restore_upload, AppError, AppState, Backup,
-    Cookie, CookieJar, Duration, Form, HeaderMap, Multipart, Path, PathBuf, Redirect, Request,
-    Response, RestoreKind, RestoreSavedForm, Result, Seek, State, Utc, ADMIN_COOKIE_SAME_SITE,
-    BANNER_RESTORE_ENTRY_MAX_BYTES, CONFIG, SESSION_COOKIE, SQLITE_HEADER,
+    restore_upload_parse_response, stream_restore_upload_to_tempfile,
+    validate_saved_backup_reference, validate_streamed_restore_upload, RestoreKind,
 };
-use crate::handlers::admin::backup::safety::{
-    copy_limited_with_total_budget, RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+use super::limits::copy_limited_with_total_budget;
+use super::safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES;
+use super::safety::{
+    create_staging_dir, remove_path_if_exists, validate_entry_path_under_prefix,
+    validate_restore_safe_entry_name, BANNER_RESTORE_ENTRY_MAX_BYTES,
 };
+use super::{archive, full_backup_dir, safety, RestoreSavedForm, SQLITE_HEADER};
+use crate::config::CONFIG;
+use crate::error::{AppError, Result};
+use crate::handlers::admin::{
+    require_admin_post_origin_and_csrf, require_admin_session_sid, should_set_secure_cookie,
+    ADMIN_COOKIE_SAME_SITE, SESSION_COOKIE,
+};
+use crate::handlers::is_xml_http_request;
+use crate::middleware::AppState;
+use crate::utils::crypto::new_session_id;
+use crate::{banner, db};
+use axum::extract::{Form, Multipart, Request, State};
+use axum::http::HeaderMap;
+use axum::response::{Redirect, Response};
 use axum::{extract::FromRequest as _, response::IntoResponse as _};
+use axum_extra::extract::cookie::{Cookie, CookieJar};
+use chrono::Utc;
+use rusqlite::backup::Backup;
+use std::io::Seek;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::warn;
 
 /// Restores database from snapshot.
@@ -58,7 +76,7 @@ fn scrub_full_restore_runtime_state(conn: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) use super::recovery_files::{FullRestoreTempCleanupGuard, FullRestoreTempPaths};
+use super::recovery_files::{FullRestoreTempCleanupGuard, FullRestoreTempPaths};
 
 fn full_restore_runtime_tmp_dir() -> PathBuf {
     crate::config::runtime_tmp_dir()

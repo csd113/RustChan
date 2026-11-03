@@ -263,7 +263,7 @@ pub(super) fn render_restored_body_html(body: &str) -> String {
     crate::utils::sanitize::render_post_body(&escaped, false)
 }
 
-pub(super) use super::limits::{copy_limited, copy_limited_with_total_budget};
+use super::limits::{copy_limited, copy_limited_with_total_budget};
 
 pub(super) fn create_staging_dir(base_path: &Path, label: &str) -> Result<PathBuf> {
     let parent = base_path
