@@ -213,8 +213,6 @@ RustChan is written in Rust using Axum, Tokio, bundled SQLite, server-rendered t
 
 Use Rust 1.99.1. [CONTRIBUTING.md](CONTRIBUTING.md) contains the validation commands,
 workspace lint policy, and development workflow.
-The demonstration screenshots
-in `docs/screenshots/` are published documentation.
 
 ## Documentation
 

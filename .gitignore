@@ -12,11 +12,9 @@ Desktop.ini
 
 # Build output, dependency caches, coverage, and profiling output.
 target/
-node_modules/
 /dist/
 /build/
 /coverage/
-/.nyc_output/
 /lcov.info
 /tarpaulin-report.*
 *.profraw
@@ -34,7 +32,6 @@ __pycache__/
 /.pytest_cache/
 /.mypy_cache/
 /.ruff_cache/
-/.npm/
 /.cache/
 
 # Logs, process state, and temporary files.
@@ -54,55 +51,17 @@ __pycache__/
 /core.[0-9]*
 /rustchan-cli*.dmp
 
-# Local Playwright tooling: keep the complete browser harness on this machine.
-/tests/e2e/
-/playwright*.config.*
-/package.json
-/package-lock.json
-/.github/workflows/e2e.yml
-# End local Playwright tooling.
-
-# Generated browser evidence remains local too.
+# Generated evidence and release staging outputs.
 /output/
-playwright-report/
-test-results/
-blob-report/
-browser-report/
-browser-artifacts/
-.playwright/
-.playwright-cli/
-.playwright-mcp/
-# Downloaded browser bundles and Playwright-generated temporary profiles.
-ms-playwright/
-playwright-browsers/
-playwright_*_profile-*/
-.auth/
-/browser-results.json
-/browser-summary.json
-/browser-versions.json
-/instance.json
-/*-instance.json
-/storage-state*.json
-/storageState*.json
-/*browser-state*.json
-/screenshots/
-/videos/
-/traces/
-/downloads/
 /audit-output/
 /audit-reports/
 /.codex-pet-runs/
-# Established generated documentation evidence and release staging outputs.
-/docs/sqlite-evidence/
-/docs/thumbnail-evidence/
-/docs/security-audit-evidence-*.json
 /RELEASE_NOTES.md
 /release-assets/
 # End generated evidence.
 
 # RustChan runtime trees (also next to copied binaries) and disposable instances.
 rustchan-data/
-rustchan-e2e-*/
 /runtime/
 /runtimes/
 /uploads/
@@ -116,7 +75,7 @@ rustchan-e2e-*/
 /tor/
 /certs/
 
-# Loose runtime data, backups, keys, and browser state at the repository root.
+# Loose runtime data, backups, and keys at the repository root.
 # Root anchoring keeps deliberately versioned fixtures/examples trackable.
 /settings.toml
 /*.db

@@ -136,8 +136,8 @@ operational, security, licensing, compliance, and release records.
 Place disposable evidence under the ignored `output/` or `audit-output/`
 directories, or outside the checkout. Keep permanent test infrastructure separate
 from its generated results. Review links when moving or deleting documentation.
-`tools/check_local_tooling.py` checks that local instructions, reserved browser
-tooling paths, and designated generated evidence remain untracked.
+`tools/check_local_tooling.py` checks that local instructions and designated
+generated evidence remain untracked.
 
 The workspace lint tables in `Cargo.toml` are the authoritative Rust/Clippy
 policy; unsafe Rust is forbidden. New workspace packages must inherit it with
@@ -165,7 +165,7 @@ safety is uncertain.
 
 Never commit runtime data, `rustchan-data/`, SQLite databases, backups, logs,
 credentials, tokens, TLS private keys, Tor/onion private keys, private media,
-temporary evidence, Playwright reports, or other large generated artifacts.
+temporary evidence, or other large generated artifacts.
 
 ## License
 

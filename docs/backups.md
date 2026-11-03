@@ -49,5 +49,4 @@ the record alone does not complete a restore.
 `cargo test --test backup_regressions --all-features` checks cancellation-safe
 draining, failed-recovery admission, streaming budgets, retained rollback files,
 retention selection, staging cleanup, and interrupted swap replay using small
-temporary fixtures. These checks are wired as a dedicated integration target;
-the previously removed application suites remain disabled.
+temporary fixtures through a dedicated integration target.

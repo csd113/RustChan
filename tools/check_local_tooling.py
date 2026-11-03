@@ -15,11 +15,7 @@ def main():
             "# End local AI tooling.",
         ),
         (
-            "# Local Playwright tooling: keep the complete browser harness on this machine.",
-            "# End local Playwright tooling.",
-        ),
-        (
-            "# Generated browser evidence remains local too.",
+            "# Generated evidence and release staging outputs.",
             "# End generated evidence.",
         ),
     ]
