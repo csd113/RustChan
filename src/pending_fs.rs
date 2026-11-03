@@ -1101,6 +1101,8 @@ fn sync_restore_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::File::open(parent)?.sync_all()?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
