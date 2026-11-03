@@ -177,24 +177,12 @@ pub(super) fn public_routes() -> Router<AppState> {
 pub(super) fn admin_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/admin/restart/status",
-            get(crate::handlers::admin::restart::status),
-        )
-        .route(
-            "/admin/restart",
-            post(crate::handlers::admin::restart::restart),
-        )
-        .route(
             "/admin/updates/status",
             get(crate::handlers::admin::updates::status),
         )
         .route(
             "/admin/updates/check",
             post(crate::handlers::admin::updates::check),
-        )
-        .route(
-            "/admin/updates/install",
-            post(crate::handlers::admin::updates::install),
         )
         .merge(admin_auth_routes())
         .route(

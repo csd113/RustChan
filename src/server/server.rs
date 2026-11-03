@@ -190,21 +190,11 @@ fn protect_tls_plaintext_backend(
 /// Returns an error when configuration validation, filesystem or database
 /// initialization, listener startup, or coordinated listener execution fails.
 pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+    crate::updates::check_legacy_state()?;
     let (ready, started) = tokio::sync::oneshot::channel();
-    if !crate::updates::managed() && !crate::restart::container_restart_enabled() {
-        let result = run_server_lifecycle(port_override, ready).await;
-        drop(started);
-        return result;
-    }
-    let server = run_server_lifecycle(port_override, ready);
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => result,
-        initialized = tokio::time::timeout(crate::restart::STARTUP_TIMEOUT, started) => {
-            initialized.context("RustChan initialization timed out")?.context("RustChan initialization stopped before readiness")?;
-            server.await
-        }
-    }
+    let result = run_server_lifecycle(port_override, ready).await;
+    drop(started);
+    result
 }
 
 #[expect(
@@ -220,7 +210,6 @@ async fn run_server_lifecycle(
     port_override: Option<u16>,
     ready: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
-    crate::updates::await_startup().await?;
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
     // Err but never panics, so the let _ discard is intentional.
@@ -231,7 +220,6 @@ async fn run_server_lifecycle(
     migrate_runtime_layout_if_needed()?;
 
     generate_settings_file_if_missing();
-    let startup_digest = crate::restart::startup_digest()?;
 
     // Validate critical configuration values immediately — fail fast with a
     // clear error rather than discovering misconfiguration at runtime (#8).
@@ -620,6 +608,7 @@ async fn run_server_lifecycle(
             CONFIG.auto_full_backup_split_zip_part_size_bytes,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        version_check: Arc::new(crate::updates::CheckState::default()),
         data_access: live_data_access,
         media_upload_gate: crate::middleware::MediaUploadGate::new(),
         request_work_gate: crate::middleware::WorkGate::new(256),
@@ -1194,7 +1183,6 @@ async fn run_server_lifecycle(
         let conn = pool.get()?;
         crate::db::database_ready_probe(&conn)?;
     }
-    crate::restart::started(startup_digest).await?;
     state.runtime_ready.store(true, Ordering::Release);
     ready
         .send(())

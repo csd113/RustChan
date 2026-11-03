@@ -27,12 +27,6 @@ pub(super) async fn track_requests(
     {
         return recovery_unavailable();
     }
-    if req.uri().path() != "/readyz"
-        && crate::updates::managed()
-        && !crate::updates::requests_allowed().await
-    {
-        return recovery_unavailable();
-    }
     let permit = match state.request_work_gate.try_begin() {
         Ok(permit) => permit,
         Err(error) => return axum::response::IntoResponse::into_response(error),

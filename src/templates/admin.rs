@@ -92,7 +92,7 @@ mod restart;
 mod search;
 /// Site-health rendering.
 mod site_health;
-/// Software update and pre-upgrade backup views.
+/// Manual version checks and official release links.
 mod updates;
 
 /// Render authenticated network configuration status and controls.
@@ -485,23 +485,12 @@ pub fn render_application_state(
 
 /// Render administrator-only software status inside the existing admin workspace.
 #[must_use]
-pub fn render_software_updates(
-    status: &crate::updates::Status,
-    csrf: &str,
-    managed: bool,
-    container: bool,
-) -> String {
-    updates::render(status, csrf, managed, container)
+pub fn render_software_updates(status: &crate::updates::Status, csrf: &str) -> String {
+    updates::render(status, csrf)
 }
 
-/// Render pre-upgrade snapshot history inside the existing Backups workspace.
+/// Render read-only settings status and manual restart guidance.
 #[must_use]
-pub fn render_update_backups(status: &crate::updates::Status) -> String {
-    updates::backups(status)
-}
-
-/// Render durable configuration restart state and its POST-only action.
-#[must_use]
-pub fn render_restart(view: &crate::restart::View, csrf: &str) -> String {
-    restart::render(view, csrf)
+pub fn render_restart(view: &crate::restart::View) -> String {
+    restart::render(view)
 }

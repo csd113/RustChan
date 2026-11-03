@@ -6,34 +6,6 @@ use std::io::{stderr, stdout, Write as _};
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
-/// Validate the persisted settings syntax and known field types before update backup.
-///
-/// # Errors
-/// Returns an error for malformed TOML or invalid `RustChan` settings field types.
-pub(crate) fn validate_update_settings(text: &str, data: &Path) -> anyhow::Result<()> {
-    let settings = parse_settings_file_str(text)
-        .map_err(|_error| anyhow::anyhow!("configuration backup is not valid RustChan settings"))?;
-    if let Some(tls) = settings.tls {
-        if tls.acme.enabled {
-            let cache = Path::new(&tls.acme.cache_dir);
-            let cache = if cache.is_absolute() {
-                cache.to_path_buf()
-            } else {
-                data.join(cache)
-            };
-            anyhow::ensure!(
-                cache.starts_with(data.join("runtime"))
-                    && cache
-                        .components()
-                        .all(|part| !matches!(part, Component::ParentDir)),
-                "managed updates require ACME state inside the protected runtime directory"
-            );
-        }
-    }
-    Ok(())
-}
-
 use std::sync::{LazyLock, OnceLock};
 
 /// Validated admin runtime configuration and atomic persistence.
@@ -47,8 +19,6 @@ mod persistence;
 /// Settings-file template rendering.
 mod template;
 pub use backup_storage::{prepare_backup_directory, update_settings_file_backup_directory};
-#[cfg(unix)]
-pub(crate) use persistence::SettingsLease;
 pub(crate) use persistence::{atomic_replace, settings_lease};
 
 /// Explicit process-wide data-directory override.
@@ -56,12 +26,6 @@ static DATA_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Launcher port selected before immutable configuration is initialized.
 static CLI_PORT_OVERRIDE: OnceLock<u16> = OnceLock::new();
-
-/// Preserve only the original launcher port in startup-authenticated internal actors.
-#[cfg(target_os = "linux")]
-pub(crate) fn launcher_port() -> Option<u16> {
-    CLI_PORT_OVERRIDE.get().copied()
-}
 
 /// Absolute path to the directory the running binary lives in.
 fn binary_dir() -> PathBuf {

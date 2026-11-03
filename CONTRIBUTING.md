@@ -78,8 +78,12 @@ cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
-The focused regressions cover upload rejection responses, log-event counting,
-and backup safety. They use small synthetic inputs without starting a server.
+The focused regressions cover CSRF and upload responses, version checks, retained
+recovery admission, log-event counting, and backup safety. They use small
+synthetic inputs without starting a server. Release validation and manually
+requested CI also run [binary upgrade checks](src/db/tests/binary_upgrade.py)
+against disposable 1.7.1 installations; this slower gate is separate from normal
+Cargo tests.
 
 Use a small runtime smoke check with disposable local data when application
 startup or request handling changes. Keep generated evidence out of commits.

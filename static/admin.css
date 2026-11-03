@@ -5160,29 +5160,7 @@ html[data-theme] .admin-flash.flash-error {
   text-transform: none;
   letter-spacing: 0;
 }
-#admin-update-install {
-  display: flex;
-  flex-direction: column;
-  gap: .65rem;
-  align-items: stretch;
-}
-#admin-update-install input {
-  width: 100%;
-  box-sizing: border-box;
-  min-height: 2.75rem;
-}
-#admin-update-install button { align-self: start; }
-
-/* Keep the restart confirmation beside its action instead of stretching Check. */
-#software-updates .admin-settings-grid:has(#admin-update-install) {
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
-}
 #admin-update-check {
   align-self: start;
   justify-self: start;
-}
-#admin-update-install {
-  width: 100%;
-  max-width: 38rem;
 }

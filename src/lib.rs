@@ -27,7 +27,7 @@ pub mod media;
 pub mod models;
 /// Durable filesystem-operation journal and recovery.
 pub mod pending_fs;
-/// Settings restart coordination and supervisor recovery.
+/// Manual settings-restart guidance and graceful shutdown budgets.
 pub mod restart;
 /// Server-rendered HTML templates.
 pub mod templates;
@@ -35,7 +35,7 @@ pub mod templates;
 pub mod theme;
 /// Custom theme configuration and CSS generation.
 pub mod theme_builder;
-/// Signed release discovery and isolated native update transactions.
+/// Official release version checks and manual download links.
 pub mod updates;
 /// Cryptographic, filesystem, sanitization, and redirect helpers.
 pub mod utils;

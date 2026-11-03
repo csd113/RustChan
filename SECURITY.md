@@ -79,9 +79,9 @@ Cargo dependency advisory exceptions are maintained in
 [deny.toml](deny.toml) and [.cargo/audit.toml](.cargo/audit.toml). Re-review the
 Arti-related RSA vulnerability and `paste` maintenance exceptions on Arti
 upgrades; do not treat an ignored advisory as permanently resolved. FFmpeg and
-the host/container environment need independent patch maintenance. Signed native
-update packages have their own verification contract; a signature does not
-establish all deployment or power-loss recovery guarantees.
+the host/container environment need independent patch maintenance. Version checks
+provide official release links; operators verify downloads and perform upgrades
+with complete stopped backups. See [software updates](docs/software-updates.md).
 
 ## Private reporting status
 

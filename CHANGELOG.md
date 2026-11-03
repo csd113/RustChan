@@ -5,11 +5,15 @@ Release highlights and upgrade cautions. For current operating instructions, use
 [software updates](docs/software-updates.md). Earlier implementation details
 remain in Git history.
 
-## Unreleased
+## RustChan 1.7.5 — 2026-11-03
 
 - Fixed banner and favicon uploads rejected by conflicting document and HTTP
   referrer policies. Thanks to @jfkn1ght for reporting the banner problem in #123.
 - Tightened CSRF checks for forms, login redirects, backups, and browser origins.
+- Replaced the automatic updater with a version check and a GitHub download link.
+  Upgrades and settings restarts now use your normal launcher or deployment tools.
+- Added an Intel Mac download alongside Apple Silicon and the existing Linux and
+  Windows builds. Issue reports now ask only for version, platform, and the issue.
 
 - Corrected upload rejection status mapping, including secondary audio type and
   size errors, while keeping filesystem and decoder diagnostics private.

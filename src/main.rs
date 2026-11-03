@@ -43,7 +43,7 @@ pub mod middleware;
 pub mod models;
 /// Durable filesystem-operation journal and recovery.
 pub mod pending_fs;
-/// Settings restart coordination and supervisor recovery.
+/// Manual settings-restart guidance and graceful shutdown budgets.
 pub mod restart;
 /// HTTP runtime, terminal console, and administration CLI.
 pub mod server;
@@ -55,7 +55,7 @@ pub mod theme;
 pub mod theme_builder;
 /// TLS certificate loading and acceptor construction used by the server.
 pub mod tls;
-/// Signed release discovery and isolated native update transactions.
+/// Official release version checks and manual download links.
 pub mod updates;
 /// Cryptographic, filesystem, sanitization, and redirect helpers.
 pub mod utils;
@@ -139,64 +139,20 @@ fn relaunch_in_terminal_if_needed() -> anyhow::Result<bool> {
 // can be tuned via `blocking_threads` in settings.toml or the
 // CHAN_BLOCKING_THREADS environment variable.
 
-/// Print update compatibility without creating runtime state or opening the database.
-///
-/// # Errors
-///
-/// Returns an error if writing the probe response fails.
-fn print_update_info() -> anyhow::Result<()> {
-    writeln!(
-        io::stdout().lock(),
-        "{}",
-        serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"), "target": updates::platform_target(),
-            "schema": db::baseline_schema_version(), "minimum_schema": "1.5.0", "updater_protocol": 2_u32
-        })
-    )?;
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
-    if updates::native_entry()? {
-        return Ok(());
-    }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == "--update-info")
-    {
-        print_update_info()?;
-        return Ok(());
-    }
     // Parse before terminal attachment, filesystem creation, logging, settings
     // generation, or CONFIG access. Clap handles --help and --version here and
     // exits successfully without mutating runtime state.
     let cli = server::cli::Cli::parse();
-    let startup_data = cli
-        .data_dir
-        .as_deref()
-        .or_else(|| updates::admitted_data_dir());
-    config::configure_data_dir(startup_data)?;
+    config::configure_data_dir(cli.data_dir.as_deref())?;
+    updates::check_legacy_state()?;
     config::configure_port_override(cli.port)?;
-
-    if updates::managed() {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(updates::await_startup())?;
-    }
 
     // Double-click / no-TTY guard
     // When launched from a file manager (Linux) or Explorer (Windows), stdout
     // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
     // and keyboard console are visible to the user.
     if relaunch_in_terminal_if_needed()? {
-        return Ok(());
-    }
-
-    if updates::supervise_native(matches!(
-        &cli.command,
-        Some(server::cli::Command::Admin { action: _ })
-    ))? {
         return Ok(());
     }
 
@@ -224,9 +180,6 @@ fn main() -> anyhow::Result<()> {
     }
     generate_settings_file_if_missing();
 
-    if matches!(&cli.command, None | Some(server::cli::Command::Serve)) {
-        restart::prepare_startup()?;
-    }
     logging::init_logging(&log_dir);
 
     // Install a panic hook that restores the terminal before printing the

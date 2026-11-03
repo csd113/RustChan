@@ -122,8 +122,7 @@ pub(crate) fn settings_lease(path: &Path) -> anyhow::Result<SettingsLease> {
             metadata.nlink() == 1,
             "settings lease must not be hardlinked"
         );
-        // The updater may establish this inode during an upgrade from a pre-restart build.
-        // Keep the fixed lock accessible to the web-owned data directory after handoff.
+        // Preserve access to existing settings locks after a supported ownership handoff.
         let owner = std::fs::metadata(&parent)?;
         if (metadata.uid(), metadata.gid()) != (owner.uid(), owner.gid()) {
             rustix::fs::fchown(

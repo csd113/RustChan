@@ -1618,8 +1618,8 @@ pub(in crate::server) async fn admin_panel(
     updates::authorize(&state, &jar)
         .await
         .map(|_completed_value| ())?;
-    let update_status = updates::snapshot().await;
-    let restart_view = restart::snapshot(Some(&update_status)).await;
+    let update_status = state.version_check.snapshot();
+    let restart_view = restart::snapshot().await;
     let auto_full_backup_settings = state.auto_full_backup_settings.snapshot();
     let html = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
@@ -1653,9 +1653,8 @@ pub(in crate::server) async fn admin_panel(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
-    let html = html.replace("<!-- settings-restart -->", &crate::templates::admin::render_restart(&restart_view, &csrf))
-        .replace("<!-- software-updates -->", &crate::templates::admin::render_software_updates(&update_status, &csrf, crate::updates::managed(), crate::updates::container_managed()))
-        .replace("<!-- update-backups -->", &crate::templates::admin::render_update_backups(&update_status))
+    let html = html.replace("<!-- settings-restart -->", &crate::templates::admin::render_restart(&restart_view))
+        .replace("<!-- software-updates -->", &crate::templates::admin::render_software_updates(&update_status, &csrf))
         .replace("<!-- update-notification -->", if update_status.available_release().is_some() { r#" <span class="admin-state-pill admin-state-pill-informational">Update available</span>"# } else { "" });
     Ok((jar, Html(html)))
 }

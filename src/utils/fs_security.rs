@@ -1,6 +1,46 @@
 use anyhow::{Context as _, Result};
 use std::path::{Component, Path, PathBuf};
 
+/// Read bounded regular-file bytes without following symlinks or accepting hardlinks.
+///
+/// # Errors
+/// Rejects unsafe file types, links, oversized content, or I/O failures.
+pub fn read_bounded_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    reject_symlink_components(path)?;
+    assert_regular_file_no_symlink(path)?;
+    let mut options = std::fs::File::options();
+    let _read_options = options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let _platform_options = options.custom_flags(i32::try_from(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits(),
+        )?);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "payload must be a regular file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        anyhow::ensure!(metadata.nlink() == 1, "payload must not be hardlinked");
+    }
+    let mut bytes = Vec::new();
+    file.take(
+        limit
+            .checked_add(1)
+            .context("payload byte limit overflow")?,
+    )
+    .read_to_end(&mut bytes)
+    .map(|_bytes_read| ())?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len())? <= limit,
+        "payload exceeds limit"
+    );
+    Ok(bytes)
+}
+
 /// Validate a runtime path fragment before joining it to a trusted root.
 ///
 /// # Errors

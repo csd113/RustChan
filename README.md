@@ -18,7 +18,7 @@ Conversations are organized into **boards** (topics such as photography or techn
 
 RustChan runs as a single app, with a built-in database. You do not need to set up a separate database server.
 
-**Source version:** v1.7.1. **Downloads:** [latest published release](https://github.com/csd113/RustChan/releases/latest). **Docker image:** `ghcr.io/csd113/rustchan:latest`.
+**Source version:** v1.7.5. **Downloads:** [latest published release](https://github.com/csd113/RustChan/releases/latest). **Docker image:** `ghcr.io/csd113/rustchan:latest`.
 
 ## Quick start
 
@@ -70,14 +70,15 @@ For **Docker Compose, updates, backups, or a public website**, follow the [conta
 
 Open the [latest release](https://github.com/csd113/RustChan/releases/latest), download the ZIP for your operating system, and extract it into a folder where the app can save files.
 
-ZIP names include the release version; the v1.7.1 names are shown below. Choose the matching files from the published release you download.
+ZIP names include the release version; the v1.7.5 names are shown below. Choose the matching files from the published release you download.
 
 | Your computer | Download |
 |---|---|
-| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.7.1-linux-x86_64.zip` |
-| Linux, ARM64 | `rustchan-cli-v1.7.1-linux-arm64.zip` |
-| macOS, Apple silicon | `rustchan-cli-v1.7.1-macos-apple-silicon.zip` |
-| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.7.1-windows-x86_64.zip` |
+| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-linux-x86_64.zip` |
+| Linux, ARM64 | `rustchan-cli-v1.7.5-linux-arm64.zip` |
+| macOS, Intel 64-bit | `rustchan-cli-v1.7.5-macos-intel.zip` |
+| macOS, Apple silicon | `rustchan-cli-v1.7.5-macos-apple-silicon.zip` |
+| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-windows-x86_64.zip` |
 
 From a terminal in the extracted folder, run:
 
@@ -222,7 +223,7 @@ workspace lint policy, and development workflow.
 | [Setup guide](SETUP.md) | Installation, server deployment, HTTPS, Tor, and troubleshooting |
 | [Media capabilities](docs/media-capabilities.md) | Supported formats, processing backends, and preview limits |
 | [Database guide](docs/sqlite-engineering.md) | SQLite architecture, migrations, maintenance, and recovery |
-| [Software updates](docs/software-updates.md) | Signed native Linux updates, manual upgrades, and rollback |
+| [Software updates](docs/software-updates.md) | Version checks, manual upgrades, and recovery |
 | [Settings restarts](docs/settings-restarts.md) | Live settings, restart requirements, and configuration recovery |
 | [Contributing](CONTRIBUTING.md) | Development and contribution workflow |
 | [Security policy](SECURITY.md) | Reporting vulnerabilities and security scope |
@@ -230,4 +231,4 @@ workspace lint policy, and development workflow.
 | [Changelog](CHANGELOG.md) | Release history |
 | [License](LICENSE) | MIT license |
 
-Administrator-controlled native Linux updates, signed release verification, verified pre-upgrade snapshots and automatic rollback are described in [Software Updates](docs/software-updates.md). Containers and other deployments remain check-only. `/readyz` reports the running package version and never exposes update availability.
+The admin [Software Updates](docs/software-updates.md) page checks for a newer stable release and links to its download. Upgrade with your usual deployment tools after stopping RustChan and backing up the complete data directory and old binary. `/readyz` reports the running package version and never exposes update availability.

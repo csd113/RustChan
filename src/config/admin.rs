@@ -15,9 +15,6 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-// Retain the existing crate-visible persistence paths for restart/update callers.
-#[cfg(unix)]
-pub(crate) use super::SettingsLease;
 pub(crate) use super::{atomic_replace, settings_lease};
 
 /// Serializes all in-process settings writers through read/validate/replace.
@@ -575,12 +572,6 @@ fn save_root_locked(
     )?)?;
     validate(&resolve_file(&after, environment)?)?;
     validate_restart_candidate(&after, environment)?;
-    if crate::restart::container_restart_enabled() {
-        ensure!(
-            !crate::restart::container_status()?.phase.active(),
-            "A restart is in progress; settings cannot be changed"
-        );
-    }
     atomic_replace(path, &after)
 }
 
@@ -689,7 +680,10 @@ pub(super) fn rewrite_root_settings(
 /// # Errors
 /// Rejects an unreadable or invalid settings file.
 pub fn restart_pending() -> anyhow::Result<bool> {
-    let bytes = crate::restart::Store::read(&super::settings_file_path(), 4 * 1024 * 1024)?;
+    let bytes = crate::utils::fs_security::read_bounded_regular_file(
+        &super::settings_file_path(),
+        4 * 1024 * 1024,
+    )?;
     pending_from(std::str::from_utf8(&bytes)?, &CONFIG, &Environment::Process)
 }
 
@@ -711,16 +705,6 @@ fn pending_from(
         || active.cookie_secret != next.cookie_secret
         || active.database_path != next.database_path
         || active.upload_dir != next.upload_dir)
-}
-
-/// Compare two saved files using the centralized immutable-setting registry.
-///
-/// # Errors
-/// Rejects invalid saved or previously initialized configuration.
-#[cfg(unix)]
-pub(crate) fn restart_files_differ(previous: &str, candidate: &str) -> anyhow::Result<bool> {
-    let active = resolve_file(previous, &Environment::Process)?;
-    pending_from(candidate, &active, &Environment::Process)
 }
 
 /// Validate the entire saved and effective configuration without creating startup resources.

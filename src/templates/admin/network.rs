@@ -44,7 +44,7 @@ pub(super) fn render_section(
 <form method="POST" action="{action}" id="admin-{form_key}-settings">
 <input type="hidden" name="_csrf" value="{csrf}">
 {controls}
-<div class="admin-settings-save"><button type="submit">Save for next restart</button><span>Review saved values, then use Restart RustChan in Configuration restart.</span></div>
+<div class="admin-settings-save"><button type="submit">Save for next restart</button><span>Review saved values, then stop and start RustChan using your usual launcher.</span></div>
 </form></section>"#,
         label = escape_html(label),
         description = escape_html(description),

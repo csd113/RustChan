@@ -30,7 +30,7 @@ pub(in crate::server) async fn update_network_settings(
         require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
         let save_result = crate::config::admin::save_network(&form);
         match save_result {
-            Ok(()) => Ok(admin_panel_redirect_anchor(if crate::config::admin::restart_pending().unwrap_or(true) { "Settings saved. Restart required: use Restart RustChan to apply these changes." } else { "Settings saved. No restart is required for the effective configuration." }, "network-security").into_response()),
+            Ok(()) => Ok(admin_panel_redirect_anchor(if crate::config::admin::restart_pending().unwrap_or(true) { "Settings saved. Stop and start RustChan using your usual launcher or service manager to apply these changes." } else { "Settings saved. No restart is required for the effective configuration." }, "network-security").into_response()),
             Err(error) => {
                 let mut fields = crate::config::admin::network_snapshot().map_err(|snapshot_error| { tracing::warn!(error = %snapshot_error, "operator settings snapshot unavailable"); "unavailable".to_owned() });
                 if let Ok(fields) = &mut fields {

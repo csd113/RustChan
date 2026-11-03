@@ -1,0 +1,175 @@
+name: Binary upgrade
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release_artifacts:
+        description: Test the exact archives built by the calling release workflow
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: 1
+
+jobs:
+  upgrade:
+    name: Upgrade 1.7.1 (${{ matrix.asset }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            asset: macos-intel
+            old_sha256: source
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            asset: macos-apple-silicon
+            old_sha256: ca42bb5ee8b282da4422111a6046c45c92278ce7569631bd86f0909669bf2210
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            asset: linux-x86_64
+            old_sha256: 40715ed3eabbf4e180d9c1649d04a9b7a6a44cee625cabb98fc1d1aeedc8548b
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            asset: linux-arm64
+            old_sha256: d0b148e40b8323af2ad8f75fdc1392f4e97c91f8d22c7b1d33c7ac02cfc43a09
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: binary-upgrade
+          key: ${{ matrix.target }}
+
+      - name: Build candidate for pre-release validation
+        if: ${{ !inputs.release_artifacts }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Download exact release archive
+        if: ${{ inputs.release_artifacts }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustchan-cli-${{ matrix.asset }}
+          path: ${{ runner.temp }}/candidate-artifact
+
+      - name: Prepare candidate executable
+        env:
+          FROM_ARCHIVE: ${{ inputs.release_artifacts }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil, zipfile
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          destination = root / "candidate" / "rustchan-cli"
+          destination.parent.mkdir()
+          if os.environ["FROM_ARCHIVE"] == "true":
+              archives = list((root / "candidate-artifact").glob("*.zip"))
+              if len(archives) != 1:
+                  raise SystemExit("expected one candidate archive")
+              with zipfile.ZipFile(archives[0]) as archive:
+                  entries = [item for item in archive.infolist() if pathlib.PurePosixPath(item.filename).name == "rustchan-cli"]
+                  if len(entries) != 1 or entries[0].file_size > 256 * 1024 * 1024:
+                      raise SystemExit("invalid candidate executable entry")
+                  destination.write_bytes(archive.read(entries[0]))
+          else:
+              shutil.copy2(pathlib.Path("target") / os.environ["TARGET"] / "release/rustchan-cli", destination)
+          destination.chmod(0o755)
+          PY
+
+      - name: Checkout exact 1.7.1 source for Intel Mac baseline
+        if: matrix.old_sha256 == 'source'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 57bc576d413049161d83fa86907a95bb02c8567e
+          path: old171
+          persist-credentials: false
+
+      - name: Build reproducible Intel Mac 1.7.1 source baseline
+        if: matrix.old_sha256 == 'source'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          cargo build --locked --release --manifest-path old171/Cargo.toml --target x86_64-apple-darwin
+          mkdir -p "$RUNNER_TEMP/old171"
+          cp target/x86_64-apple-darwin/release/rustchan-cli "$RUNNER_TEMP/old171/rustchan-cli"
+          git -C old171 rev-parse HEAD
+
+      - name: Fetch checksum-pinned official 1.7.1 baseline
+        if: matrix.old_sha256 != 'source'
+        env:
+          ASSET: ${{ matrix.asset }}
+          EXPECTED_SHA256: ${{ matrix.old_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, os, pathlib, urllib.request, zipfile
+          name = "rustchan-cli-v1.7.1-" + os.environ["ASSET"] + ".zip"
+          url = "https://github.com/csd113/RustChan/releases/download/v1.7.1/" + name
+          with urllib.request.urlopen(url, timeout=60) as response:
+              data = response.read(256 * 1024 * 1024 + 1)
+          if len(data) > 256 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != os.environ["EXPECTED_SHA256"]:
+              raise SystemExit("official baseline checksum mismatch")
+          destination = pathlib.Path(os.environ["RUNNER_TEMP"]) / "old171" / "rustchan-cli"
+          destination.parent.mkdir()
+          with zipfile.ZipFile(io.BytesIO(data)) as archive:
+              entries = [item for item in archive.infolist() if pathlib.PurePosixPath(item.filename).name == "rustchan-cli"]
+              if len(entries) != 1 or entries[0].file_size > 256 * 1024 * 1024:
+                  raise SystemExit("invalid baseline executable entry")
+              destination.write_bytes(archive.read(entries[0]))
+          destination.chmod(0o755)
+          print(name + " SHA256 " + os.environ["EXPECTED_SHA256"])
+          PY
+
+      - name: Verify native architecture and launch
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          file "$RUNNER_TEMP/candidate/rustchan-cli" "$RUNNER_TEMP/old171/rustchan-cli"
+          "$RUNNER_TEMP/candidate/rustchan-cli" --version
+          "$RUNNER_TEMP/old171/rustchan-cli" --version
+          if [[ "$TARGET" == *apple-darwin ]]; then
+            if [[ "$TARGET" == x86_64-* ]]; then arch=x86_64; else arch=arm64; fi
+            lipo -verify_arch "$arch" "$RUNNER_TEMP/candidate/rustchan-cli"
+            lipo -verify_arch "$arch" "$RUNNER_TEMP/old171/rustchan-cli"
+            xcrun vtool -show-build "$RUNNER_TEMP/candidate/rustchan-cli"
+          fi
+
+      - name: Verify data-preserving binary-only upgrade and rollback
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          context=()
+          if [[ "$TARGET" == *linux* ]]; then context=(--managed-linux-baseline); fi
+          python3 src/db/tests/binary_upgrade.py \
+            --old-bin "$RUNNER_TEMP/old171/rustchan-cli" \
+            --new-bin "$RUNNER_TEMP/candidate/rustchan-cli" \
+            --expected-version "$version" \
+            --output "$RUNNER_TEMP/upgrade-evidence" "${context[@]}"
+
+      - name: Preserve concise verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upgrade-evidence-${{ matrix.asset }}
+          path: ${{ runner.temp }}/upgrade-evidence
+          if-no-files-found: warn
+          retention-days: 7

@@ -10,7 +10,6 @@ docker volume create rustchan-data
 docker run -d --name rustchan --restart unless-stopped --stop-timeout 90 \
   -p 8080:8080 \
   -e CHAN_HOST=0.0.0.0 -e CHAN_PORT=8080 -e CHAN_TOR_SUPPORT=false \
-  -e RUSTCHAN_RESTART_ON_EXIT=1 \
   -v rustchan-data:/data \
   ghcr.io/csd113/rustchan:latest
 ```
@@ -80,4 +79,9 @@ Administrators can check stable RustChan releases in Software Updates. Container
 
 ## Applying saved settings
 
-Compose opts into graceful administrator settings restarts using its existing restart policy. The docker run command above pairs the same opt-in with `--restart unless-stopped`. Saving never restarts the container; choose **Restart RustChan** after reviewing pending settings. A bounded readiness check commits the replacement, and failed startup restores the last healthy configuration before the next startup. Keep the loopback HTTP health listener on CHAN_PORT available. Do not set RUSTCHAN_RESTART_ON_EXIT without an automatic process restart policy. See [settings restarts](settings-restarts.md) for classification, shutdown and recovery details.
+After saving startup settings, use `docker compose stop` and `docker compose start`
+(or `docker stop` and `docker start`) to apply them. Keep the same data volume and
+allow graceful shutdown. Review `/readyz` and logs after startup. RustChan does
+not restart its own container or restore configuration automatically. See
+[settings restarts](settings-restarts.md) for live/restart classification and
+settings-only recovery.

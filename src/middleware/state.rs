@@ -440,7 +440,7 @@ impl Drop for MaintenanceGuard {
 )]
 /// Shared runtime services and capability state used by request handlers.
 pub struct AppState {
-    /// Admit normal HTTP work only after initialization and supervisor observation.
+    /// Admit normal HTTP work only after initialization.
     pub runtime_ready: Arc<AtomicBool>,
     /// Database connection pool.
     pub db: crate::db::DbPool,
@@ -464,6 +464,8 @@ pub struct AppState {
     pub auto_full_backup_settings: AutoFullBackupSettings,
     /// Gate preventing overlapping maintenance operations.
     pub maintenance_gate: MaintenanceGate,
+    /// Cached administrator-requested version check; independent of maintenance work.
+    pub version_check: Arc<crate::updates::CheckState>,
     /// Drain live-state users before backup or restore.
     pub(crate) data_access: super::data_access::DataAccess,
     /// Gate limiting concurrent public media parsing and processing.

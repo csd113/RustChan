@@ -4550,9 +4550,7 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
- "futures-channel",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -4694,7 +4692,7 @@ dependencies = [
 
 [[package]]
 name = "rustchan"
-version = "1.7.1"
+version = "1.7.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4730,7 +4728,6 @@ dependencies = [
  "rcgen 0.14.10",
  "regex",
  "reqwest",
- "ring",
  "rusqlite",
  "rustix",
  "rustls",
@@ -4744,7 +4741,6 @@ dependencies = [
  "sha3 0.12.0",
  "subtle",
  "symphonia",
- "tar",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -5801,16 +5797,6 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
-
-[[package]]
-name = "tar"
-version = "0.4.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
-dependencies = [
- "filetime",
- "libc",
-]
 
 [[package]]
 name = "tempfile"

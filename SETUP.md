@@ -1,7 +1,7 @@
 # RustChan Setup Guide
 
 RustChan runs on Linux, macOS, and Windows as one executable with embedded
-SQLite, templates, and static assets. The source version is `1.7.1`.
+SQLite, templates, and static assets. The source version is `1.7.5`.
 [README.md](README.md) covers downloads and the quick start;
 [the container guide](docs/containers.md) covers Docker and Compose.
 
@@ -103,7 +103,7 @@ rustchan-data/
 │   │   └── cache/
 │   ├── favicon/
 │   └── tmp/
-└── .software-updates/       # Eligible native Linux update/recovery state
+└── .software-updates/       # Retained recovery evidence from older installations
 ```
 
 RustChan generates `settings.toml` and a random `cookie_secret` on first run.
@@ -142,7 +142,7 @@ board settings apply live. File-backed runtime settings generally require a
 restart; saving never restarts the process automatically. The panel shows active,
 saved, and next-start values, including environment overrides.
 [Settings restarts](docs/settings-restarts.md) lists the classification and
-supported supervision/recovery contracts. Changing storage paths does not move data.
+manual restart and recovery guidance. Changing storage paths does not move data.
 
 New boards allow images and video by default; audio, PDF, arbitrary files,
 CAPTCHA, and NSFW status are opt-in. Arbitrary uploads also require the global
@@ -184,8 +184,8 @@ redirect listener. With built-in Tor, HTTPS-only mode retains a loopback backend
 restricted to connections registered by the in-process Tor proxy.
 
 For public access, use valid certificates and configure the intended public
-hosts. Administrator restarts and updates require a usable local readiness probe;
-review [settings restarts](docs/settings-restarts.md) before listener changes.
+hosts. Review [settings restarts](docs/settings-restarts.md) before listener changes,
+and verify `/readyz` after manually restarting.
 
 ## Linux service setup
 
@@ -246,9 +246,6 @@ the selected data directory writable by the service account. For overrides, use
 Environment=CHAN_BIND=127.0.0.1:8080
 Environment=CHAN_REQUIRE_FFMPEG=true
 ```
-
-The separate updater/polkit files in `deploy/systemd/` describe older managed
-installations. Do not use them as the current single-executable service setup.
 
 ## Reverse proxy notes
 
