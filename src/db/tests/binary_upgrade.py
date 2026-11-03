@@ -228,6 +228,7 @@ class Smoke:
         self.log_handle = None
         self.log_paths = []
         self.checks = []
+        self.baseline_observations = {}
         self.password = "Upgrade-fixture-only-" + secrets.token_hex(12)
         self.username = "upgrade_fixture_admin"
         self.media = png(24, 16)
@@ -274,6 +275,16 @@ class Smoke:
 
     def launch(self, binary, label):
         require(self.process is None, "an owned server is already running")
+        if os.name == "nt":
+            import ctypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            # CI shells can pass an inheritable "ignore Ctrl+C" attribute to
+            # children. Clear it before creating the server's isolated console.
+            # A verifier launched without a console needs its own console first.
+            if not kernel.SetConsoleCtrlHandler(None, False):
+                require(ctypes.get_last_error() == 6 and kernel.AllocConsole()
+                        and kernel.SetConsoleCtrlHandler(None, False),
+                        "could not enable Ctrl+C inheritance for the owned Windows server")
         log = self.temporary / (label + ".log")
         self.log_paths.append(log)
         self.log_handle = log.open("wb")
@@ -457,12 +468,25 @@ time.sleep(0.2)
         settings.write_text(text)
         return thread
 
-    def readable(self, client, thread, banner_id, banner_hash):
+    def readable(self, client, thread, banner_id, banner_hash, legacy_data=None):
         status, _, content = client.request("/test/thread/" + str(thread))
         require(status == 200 and b"upgrade-retained-original" in content
                 and b"upgrade-retained-reply" in content, "retained posts were not readable")
         status, _, content = client.request("/boards/test/" + self.media_name)
-        require(status == 200 and digest(content) == digest(self.media), "retained media was not readable")
+        if os.name == "nt" and legacy_data is not None:
+            previous = self.baseline_observations.setdefault("windows_171_media_http_status", status)
+            require(previous == status, "rolled-back Windows media behavior differs from its baseline")
+        if os.name == "nt" and legacy_data is not None and status == 404:
+            # The official Windows 1.7.1 binary stats an incomplete canonical
+            # drive prefix and rejects board media. Keep that defect visible,
+            # verify its fixture directly, and require HTTP 200 from the candidate.
+            media_file = legacy_data / "boards" / "test" / self.media_name
+            require(media_file.is_file() and digest(media_file.read_bytes()) == digest(self.media),
+                    "legacy Windows media fixture is absent or changed on disk")
+            self.baseline_observations["windows_171_media_verified_on_disk"] = True
+        else:
+            require(status == 200 and digest(content) == digest(self.media),
+                    "retained media was not readable (HTTP " + str(status) + ")")
         status, _, content = client.request("/banner/assets/" + str(banner_id))
         require(status == 200 and digest(content) == banner_hash, "retained banner was not readable")
         public = Client(self.origin)
@@ -524,7 +548,7 @@ time.sleep(0.2)
         status, _, content = client.request("/banner/assets/" + str(banner_id))
         require(status == 200, "old binary could not read its own banner")
         banner_hash = digest(content)
-        self.readable(client, thread, banner_id, banner_hash)
+        self.readable(client, thread, banner_id, banner_hash, legacy_data=data)
         status, _, _ = client.request("/admin/backup/create", {
             "_csrf": client.csrf(), "storage_mode": "directory"}, timeout=60)
         require(status == 303, "old binary could not create a saved full backup")
@@ -674,7 +698,7 @@ time.sleep(0.2)
         self.ready("1.7.1")
         rollback_client = Client(self.origin)
         rollback_client.login(self.username, self.password)
-        self.readable(rollback_client, thread, banner_id, banner_hash)
+        self.readable(rollback_client, thread, banner_id, banner_hash, legacy_data=data)
         expected_rollback_rows = self.completed_pending_job(original_rows, data, pending_job)
         self.stop()
         inspect_database(data / "chan.db", "1.7.1")
@@ -794,6 +818,11 @@ def main():
                 report["success"] = False
                 exit_code = 1
             report["checks"] = smoke.checks
+            report["baseline_observations"] = smoke.baseline_observations
+            if smoke.baseline_observations.get("windows_171_media_http_status") == 404:
+                report["limits"].append(
+                    "Windows 1.7.1 cannot serve board media: baseline and rollback verify the file on disk; "
+                    "candidate upgrade and restart still require HTTP 200 and exact media bytes")
             report["sanitized_logs"] = str(smoke.logs)
         if temporary is not None:
             if smoke is not None and smoke.process is not None:

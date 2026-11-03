@@ -66,6 +66,10 @@ jobs:
         with:
           shared-key: binary-upgrade
           key: ${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Check strict upgrade verifier contract
+        run: python3 src/db/tests/binary_upgrade_contract.py
 
       - name: Build candidate for pre-release validation
         if: ${{ !inputs.release_artifacts }}

@@ -85,6 +85,12 @@ requested CI also run [binary upgrade checks](src/db/tests/binary_upgrade.py)
 against disposable 1.7.1 installations; this slower gate is separate from normal
 Cargo tests.
 
+The official Windows 1.7.1 binary has a canonical drive-prefix bug that returns
+404 for board media. Its upgrade report records that baseline limitation and
+verifies the original file on disk, including after rollback. The candidate must
+serve the retained media with HTTP 200 and exact bytes after upgrade and restart;
+the old baseline exception never applies to the candidate.
+
 Use a small runtime smoke check with disposable local data when application
 startup or request handling changes. Keep generated evidence out of commits.
 
