@@ -150,7 +150,7 @@ jobs:
           if [[ "$TARGET" == *apple-darwin ]]; then
             if [[ "$TARGET" == x86_64-* ]]; then arch=x86_64; else arch=arm64; fi
             file "$binary"
-            lipo -verify_arch "$arch" "$binary"
+            lipo "$binary" -verify_arch "$arch"
             xcrun vtool -show-build "$binary"
           fi
 

@@ -131,7 +131,7 @@ class Client:
 
     def csrf(self, route="/admin/panel"):
         status, _, content = self.request(route)
-        require(status == 200, "CSRF form could not be read: " + route)
+        require(status == 200, "CSRF form could not be read: " + route + " status=" + str(status))
         parser = Inputs()
         parser.feed(content.decode("utf-8"))
         require(parser.tokens, "CSRF form missing its token: " + route)
@@ -293,7 +293,13 @@ class Smoke:
                     value = json.loads(content)
                     require(value.get("version") == expected_version,
                             "running server version did not match requested executable")
-                    return
+                    # The old Linux supervisor can expose /readyz before its
+                    # controller admits ordinary application requests.
+                    admin_status = client.request("/admin", timeout=1)[0]
+                    if admin_status == 200:
+                        return
+                    require(admin_status == 503,
+                            "administrator route unavailable after readiness: " + str(admin_status))
             except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError):
                 pass
             time.sleep(0.1)

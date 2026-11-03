@@ -147,8 +147,8 @@ jobs:
           "$RUNNER_TEMP/old171/rustchan-cli" --version
           if [[ "$TARGET" == *apple-darwin ]]; then
             if [[ "$TARGET" == x86_64-* ]]; then arch=x86_64; else arch=arm64; fi
-            lipo -verify_arch "$arch" "$RUNNER_TEMP/candidate/rustchan-cli"
-            lipo -verify_arch "$arch" "$RUNNER_TEMP/old171/rustchan-cli"
+            lipo "$RUNNER_TEMP/candidate/rustchan-cli" -verify_arch "$arch"
+            lipo "$RUNNER_TEMP/old171/rustchan-cli" -verify_arch "$arch"
             xcrun vtool -show-build "$RUNNER_TEMP/candidate/rustchan-cli"
           fi
 
