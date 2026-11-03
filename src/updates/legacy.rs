@@ -139,14 +139,12 @@ fn lease(path: &Path, data: &Path) -> anyhow::Result<File> {
             "legacy lease changed while opening"
         );
     }
-    // Older roots hold admission exclusively; shared admission belongs only to
-    // this manual-update generation. Lifetime proof below still excludes orphans.
-    match file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(std::fs::TryLockError::WouldBlock) => file.try_lock_shared(),
-        Err(error) => Err(error),
-    }
-    .context("An older RustChan process still owns the data. Stop it normally before upgrading.")?;
+    // Old roots require exclusive admission. One shared acquisition excludes
+    // them while allowing compatible new writers; lifetime proof excludes old
+    // orphan writers. Re-locking would retain the exclusive lock on Windows.
+    file.try_lock_shared().context(
+        "An older RustChan process still owns the data. Stop it normally before upgrading.",
+    )?;
     Ok(file)
 }
 
@@ -263,12 +261,7 @@ fn admit(data: &Path) -> anyhow::Result<Admission> {
         }
     }
     terminal_journal(&data.join("runtime/settings-restart/status.json"), data)?;
-    // Compatible new server/CLI processes share these leases. Older exclusive
-    // monitors remain excluded for the complete lifetime of every new writer.
-    for lock in &locks {
-        lock.try_lock_shared()
-            .context("Legacy admission changed during upgrade")?;
-    }
+    // Keep both shared leases through validation and every admitted writer's lifetime.
     Ok(Admission {
         data: data.to_owned(),
         _locks: locks,

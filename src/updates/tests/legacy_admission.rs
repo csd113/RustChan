@@ -36,10 +36,17 @@ fn clean_legacy_installation_preserves_journals_and_holds_writer_exclusion() -> 
         .write(true)
         .open(data.join(".software-updates/data-writers.lock"))?;
     ensure!(competing.try_lock().is_err());
+    let older_root = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(data.join(".software-updates/admission.lock"))?;
+    ensure!(older_root.try_lock().is_err());
     ensure!(std::fs::read(path)? == before);
     drop(admission);
     competing.try_lock()?;
     drop(competing);
+    older_root.try_lock()?;
+    drop(older_root);
     std::fs::remove_file(data.join(".software-updates/origin.json"))?;
     let _protected_old_install = admit(&data)?;
     Ok(())
