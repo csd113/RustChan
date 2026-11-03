@@ -137,7 +137,7 @@ fn check_routing(route: Route) -> Result<()> {
                 "terminal output omits source suffix"
             );
             ensure!(
-                main_file.contains("(logging/tests/regressions.rs:"),
+                main_file.contains("regressions.rs:"),
                 "file warning retains source suffix"
             );
             vec![terminal, main_file]

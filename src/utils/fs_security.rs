@@ -133,8 +133,20 @@ pub fn canonical_parent_for_new_child(root: &Path, path: &Path) -> Result<PathBu
 /// Reject any existing symlink component in a path without following it.
 pub(crate) fn reject_symlink_components(path: &Path) -> Result<()> {
     let mut cursor = PathBuf::new();
-    for component in path.components() {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
         cursor.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_)) {
+            anyhow::ensure!(
+                path.is_absolute(),
+                "Prefixed runtime paths must be absolute."
+            );
+            // Inspect a partial Windows volume prefix after RootDir completes
+            // it. A prefix-only path must still be inspected as supplied.
+            if matches!(components.peek(), Some(Component::RootDir)) {
+                continue;
+            }
+        }
         let metadata = std::fs::symlink_metadata(&cursor)
             .with_context(|| format!("Inspect runtime path component {}", cursor.display()))?;
         if metadata.file_type().is_symlink() {
