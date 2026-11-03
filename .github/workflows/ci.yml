@@ -13,7 +13,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Keep the old-version build evidence from manual release checks.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   CARGO_TERM_COLOR: always
