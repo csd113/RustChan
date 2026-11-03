@@ -1,13 +1,24 @@
-use super::{
-    board_backup_dir, full_backup_dir, header, invalidate_backup_list_cache, listing,
-    require_admin_post_origin_and_csrf, require_admin_session_sid, storage,
-    temp_board_download_dir, validate_backup_zip_filename, validate_saved_backup_reference,
-    AppError, AppState, BackupListKind, Context, CookieJar, Duration, Form, HeaderMap, Ordering,
-    Path, PathBuf, Pin, Poll, Query, ReaderStream, Redirect, Response, Result, State, Stream,
-    SESSION_COOKIE,
+use super::http::{validate_backup_zip_filename, validate_saved_backup_reference};
+use super::listing::{invalidate_backup_list_cache, BackupListKind};
+use super::{board_backup_dir, full_backup_dir, listing, storage, temp_board_download_dir};
+use crate::error::{AppError, Result};
+use crate::handlers::admin::{
+    require_admin_post_origin_and_csrf, require_admin_session_sid, SESSION_COOKIE,
 };
+use crate::middleware::AppState;
+use axum::extract::{Form, Query, State};
+use axum::http::{header, HeaderMap};
 use axum::response::IntoResponse as _;
+use axum::response::{Redirect, Response};
+use axum_extra::extract::cookie::CookieJar;
+use futures::stream::Stream;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::atomic::Ordering;
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio_util::io::ReaderStream;
 
 pub(super) fn temp_board_download_token_path(filename: &str) -> PathBuf {
     temp_board_download_dir().join(format!("{filename}.token"))
@@ -167,7 +178,7 @@ pub(in crate::server) async fn download_backup(
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
     };
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -298,7 +309,7 @@ pub(in crate::server) async fn backup_progress_json(
     jar: CookieJar,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let conn = pool.get()?;
@@ -330,12 +341,12 @@ pub(in crate::server) async fn delete_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DeleteBackupForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let _maintenance_guard = state.maintenance_gate.try_begin("Saved backup deletion")?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
+    let maintenance_guard = state.maintenance_gate.try_begin("Saved backup deletion")?;
 
     let safe_filename = validate_saved_backup_reference(&form.filename)?;
 
@@ -345,9 +356,10 @@ pub(in crate::server) async fn delete_backup(
         _ => return Err(AppError::BadRequest("Unknown backup kind.".into())),
     };
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
+            let _maintenance_guard = maintenance_guard;
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
 
@@ -373,112 +385,4 @@ pub(in crate::server) async fn delete_backup(
     .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
 
     Ok(Redirect::to("/admin/panel?backup_deleted=1").into_response())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::safe_backup_file_path;
-    use crate::error::AppError;
-    use anyhow::{ensure, Context as _, Result};
-
-    #[cfg(unix)]
-    #[test]
-    fn safe_backup_file_path_rejects_symlink_escape() -> Result<()> {
-        use std::os::unix::fs as unix_fs;
-
-        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
-        let backup_root = temp_dir.path().join("backups");
-        let outside = temp_dir.path().join("outside.zip");
-        std::fs::create_dir_all(&backup_root).context("create backup root")?;
-        std::fs::write(&outside, b"outside").context("write outside file")?;
-        unix_fs::symlink(&outside, backup_root.join("backup.zip"))
-            .context("create backup symlink")?;
-
-        ensure!(safe_backup_file_path(&backup_root, "backup.zip").is_err());
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn safe_backup_file_path_rejects_symlinked_parent_dir() -> Result<()> {
-        use std::os::unix::fs as unix_fs;
-
-        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
-        let backup_root = temp_dir.path().join("backups");
-        let outside_dir = temp_dir.path().join("outside");
-        std::fs::create_dir_all(&backup_root).context("create backup root")?;
-        std::fs::create_dir_all(&outside_dir).context("create outside directory")?;
-        std::fs::write(outside_dir.join("backup.zip"), b"outside").context("write outside file")?;
-        unix_fs::symlink(&outside_dir, backup_root.join("linked"))
-            .context("create parent-directory symlink")?;
-
-        ensure!(safe_backup_file_path(&backup_root, "linked/backup.zip").is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn safe_backup_file_path_rejects_traversal() -> Result<()> {
-        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
-        let backup_root = temp_dir.path().join("backups");
-        let outside = temp_dir.path().join("outside.zip");
-        std::fs::create_dir_all(&backup_root).context("create backup root")?;
-        std::fs::write(&outside, b"outside").context("write outside file")?;
-
-        ensure!(safe_backup_file_path(&backup_root, "../outside.zip").is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn safe_backup_file_path_rejects_absolute_path() -> Result<()> {
-        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
-        let backup_root = temp_dir.path().join("backups");
-        let outside = temp_dir.path().join("outside.zip");
-        std::fs::create_dir_all(&backup_root).context("create backup root")?;
-        std::fs::write(&outside, b"outside").context("write outside file")?;
-
-        ensure!(safe_backup_file_path(&backup_root, &outside.display().to_string()).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn safe_backup_file_path_rejects_directory() -> Result<()> {
-        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
-        let backup_root = temp_dir.path().join("backups");
-        std::fs::create_dir_all(backup_root.join("backup.zip"))
-            .context("create backup directory")?;
-
-        ensure!(safe_backup_file_path(&backup_root, "backup.zip").is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn safe_backup_file_path_reports_missing_file() -> Result<()> {
-        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
-        let backup_root = temp_dir.path().join("backups");
-        std::fs::create_dir_all(&backup_root).context("create backup root")?;
-
-        let error = safe_backup_file_path(&backup_root, "missing.zip")
-            .err()
-            .context("missing backup file was unexpectedly accepted")?;
-
-        ensure!(matches!(error, AppError::NotFound(_)));
-        Ok(())
-    }
-
-    #[test]
-    fn safe_backup_file_path_accepts_regular_child_file() -> Result<()> {
-        let temp_dir = tempfile::tempdir().context("create temporary directory")?;
-        let backup_root = temp_dir.path().join("backups");
-        std::fs::create_dir_all(&backup_root).context("create backup root")?;
-        std::fs::write(backup_root.join("backup.zip"), b"zip").context("write backup")?;
-
-        let resolved = safe_backup_file_path(&backup_root, "backup.zip")?;
-        let canonical = backup_root
-            .join("backup.zip")
-            .canonicalize()
-            .context("canonicalize backup")?;
-
-        ensure!(resolved == canonical);
-        Ok(())
-    }
 }

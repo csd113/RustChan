@@ -64,7 +64,7 @@ pub(in crate::server) async fn index(
         board_badges,
         homepage_reply_badges_enabled,
         board_reply_badges,
-    ) = tokio::task::spawn_blocking({
+    ) = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let board_activity_markers = board_activity_markers.clone();
         let thread_activity_markers = thread_activity_markers.clone();
@@ -280,7 +280,7 @@ pub(in crate::server) async fn board_index(
         can_post,
         can_view: _,
     } = access_context;
-    let page_data = tokio::task::spawn_blocking({
+    let page_data = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let current_path = return_to.clone();
         move || -> Result<BoardIndexLoadResult> {
@@ -437,7 +437,7 @@ pub(in crate::server) async fn board_index(
         "board-banner-image",
     );
     // HTML assembly is CPU work on already-owned data; keep it off the async workers.
-    let html = tokio::task::spawn_blocking(move || {
+    let html = crate::middleware::data_access::spawn_blocking(move || {
         render::render_board_page(
             &page_data,
             &csrf,

@@ -9,21 +9,24 @@
 //
 // Respects the RUST_LOG environment variable if set.
 
+mod events;
+
+use events::{
+    is_external_source, is_tor_target, prepare_event_fields, write_event_fields, LogEventFields,
+    TorDescriptorTimeoutLimiter, TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW,
+};
+
 use std::fmt;
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
 
-use tracing::field::{Field, Visit};
-use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
-use tracing_subscriber::fmt::{FmtContext, MakeWriter};
-use tracing_subscriber::registry::LookupSpan;
+use tracing::{Event, Level, Metadata, Subscriber};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::{
-    filter::filter_fn,
-    layer::{Layer as _, SubscriberExt as _},
+    layer::{Context, Layer, SubscriberExt as _},
     util::SubscriberInitExt as _,
     EnvFilter,
 };
@@ -40,12 +43,11 @@ static CONSOLE_MUTEX: LazyLock<parking_lot::Mutex<()>> =
 // Non-blocking file writer guard
 // `tracing_appender::non_blocking()` spawns a background thread that drains a
 // channel and flushes writes to disk after every batch.  The returned
-// `WorkerGuard` MUST stay alive for the entire process lifetime — dropping it
-// stops the background thread, which silently discards any buffered log lines
-// that have not yet been flushed, producing blank or truncated log files.
+// `WorkerGuard` must stay alive while logging is active. `shutdown()` takes and
+// drops both guards to drain queued output at the end of the executable lifecycle.
 //
-// Using a module-level OnceLock means the guard is stored here without
-// requiring callers to thread it through their own state, and without changing
+// Module-level mutex-held Options own the guards without requiring callers
+// to thread them through their own state, and without changing
 // the public `init_logging(&Path)` signature.
 /// Keeps the main log writer's background worker alive for the process lifetime.
 static MAIN_FILE_GUARD: parking_lot::Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
@@ -104,16 +106,6 @@ const fn detect_ansi_enabled(tty: bool) -> bool {
 /// address box in detect.rs) must check this and skip its output — the TUI
 /// dashboard owns the screen and will display the information itself.
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Window used to coalesce repeated Tor descriptor-upload timeout warnings.
-const TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW: Duration = Duration::from_mins(10);
-/// Process-wide limiter shared by the terminal and file formatters.
-static TOR_DESCRIPTOR_TIMEOUT_LIMITER: LazyLock<parking_lot::Mutex<TorDescriptorTimeoutLimiter>> =
-    LazyLock::new(|| {
-        parking_lot::Mutex::new(TorDescriptorTimeoutLimiter::new(
-            TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW,
-        ))
-    });
 
 /// Records whether the full-screen terminal interface currently owns stdout.
 pub fn set_tui_active(active: bool) {
@@ -237,11 +229,6 @@ fn is_main_log_target(target: &str) -> bool {
     is_app_log_target(target) || is_ffmpeg_log_target(target)
 }
 
-/// Returns whether a tracing target is routed to the dependency log.
-fn is_dependency_log_target(target: &str) -> bool {
-    !is_main_log_target(target)
-}
-
 /// Extract the useful short name from a tracing target (module path).
 ///
 /// `rustchan::server::server` → `server`
@@ -314,683 +301,6 @@ fn write_component_tag(writer: &mut Writer<'_>, target: &str, ansi: bool) -> fmt
     write!(writer, "{open}[{display:<8}]{close} ")
 }
 
-/// Removes ANSI control sequences from a captured field value.
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        out.push(ch);
-    }
-
-    out
-}
-
-/// Converts a structured field name into a human-readable label.
-fn humanize_field_name(name: &str) -> String {
-    match name {
-        "addr" => "address".to_owned(),
-        "admin_id" => "admin ID".to_owned(),
-        "archived_cap" => "archive limit".to_owned(),
-        "board_id" => "board ID".to_owned(),
-        "bytes" => "size".to_owned(),
-        "error" => "error".to_owned(),
-        "failure_rate" => "failure rate".to_owned(),
-        "files_removed" => "files removed".to_owned(),
-        "freed_kib" => "freed KiB".to_owned(),
-        "has_csrf_cookie" => "CSRF cookie".to_owned(),
-        "has_session_cookie" => "session cookie".to_owned(),
-        "attempts" => "attempts".to_owned(),
-        "reason" => "reason".to_owned(),
-        "uri" => "URI".to_owned(),
-        "id" => "ID".to_owned(),
-        "latency_ms" => "latency".to_owned(),
-        "mime" => "MIME type".to_owned(),
-        "post_id" => "post ID".to_owned(),
-        "remaining_kib" => "remaining KiB".to_owned(),
-        "retry_in" => "retry in".to_owned(),
-        "saved_as" => "saved as".to_owned(),
-        "thread_id" => "thread ID".to_owned(),
-        "thumb" => "thumbnail".to_owned(),
-        "url" => "URL".to_owned(),
-        other => other.replace('_', " "),
-    }
-}
-
-/// Returns whether a source path belongs to a dependency or the Rust toolchain.
-fn is_external_source(file: &str) -> bool {
-    file.contains("/.cargo/registry/src/") || file.contains("/rustc/")
-}
-
-/// Returns whether a display component belongs to the Tor stack.
-fn is_tor_component(component: &str) -> bool {
-    matches!(
-        component,
-        "bootstrap"
-            | "chanmgr"
-            | "circmgr"
-            | "config"
-            | "descriptor"
-            | "dirmgr"
-            | "guard"
-            | "guardmgr"
-            | "hspool"
-            | "lib"
-            | "mgr"
-            | "publish"
-            | "reactor"
-            | "sqlite"
-            | "state"
-    )
-}
-
-/// Returns whether a tracing target belongs to Arti or another Tor crate.
-fn is_tor_target(target: &str) -> bool {
-    target == "arti_client"
-        || target.starts_with("arti_client::")
-        || target.starts_with("tor_")
-        || target.starts_with("tor-")
-}
-
-/// Uppercases an initial ASCII lowercase letter without changing other text.
-fn title_case_message(message: &str) -> String {
-    let mut chars = message.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_lowercase() => {
-            format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
-        }
-        _ => message.to_owned(),
-    }
-}
-
-/// Parses a debug-formatted duration into compact human-readable text.
-fn parse_formatted_duration(value: &str) -> Option<String> {
-    let inner = value
-        .strip_prefix("FormattedDuration(")?
-        .strip_suffix(')')?
-        .strip_suffix('s')?;
-    let seconds = inner.parse::<f64>().ok()?;
-
-    if seconds >= 60.0 {
-        let total = Duration::from_secs_f64(seconds.round()).as_secs();
-        let minutes = total / 60;
-        let secs = total % 60;
-        if secs == 0 {
-            Some(format!("{minutes}m"))
-        } else {
-            Some(format!("{minutes}m {secs}s"))
-        }
-    } else if seconds >= 10.0 {
-        Some(format!(
-            "{}s",
-            Duration::from_secs_f64(seconds.round()).as_secs()
-        ))
-    } else {
-        Some(format!("{seconds:.1}s"))
-    }
-}
-
-/// Formats a duration represented as nanoseconds using compact units.
-fn format_duration_parts(total_nanos: u128) -> String {
-    let total_millis = (total_nanos.saturating_add(500_000)) / 1_000_000;
-    if total_millis == 0 {
-        return "0s".to_owned();
-    }
-
-    let total_secs = (total_millis.saturating_add(500)) / 1000;
-    if total_secs >= 60 {
-        let minutes = total_secs / 60;
-        let secs = total_secs % 60;
-        if secs == 0 {
-            format!("{minutes}m")
-        } else {
-            format!("{minutes}m {secs}s")
-        }
-    } else if total_secs >= 10 {
-        format!("{total_secs}s")
-    } else {
-        format!(
-            "{}.{:01}s",
-            total_millis / 1000,
-            (total_millis % 1000) / 100
-        )
-    }
-}
-
-/// Parses whitespace-separated duration parts such as `29s 999ms`.
-fn parse_compound_duration(value: &str) -> Option<String> {
-    let trimmed = value.trim().trim_end_matches('.');
-    if !trimmed.contains(char::is_whitespace) {
-        return None;
-    }
-
-    let mut total_nanos = 0u128;
-    let mut saw_unit = false;
-    for part in trimmed.split_whitespace() {
-        let split = part
-            .find(|ch: char| !ch.is_ascii_digit())
-            .filter(|&index| index > 0)?;
-        let (number, unit) = part.split_at(split);
-        let duration_value = number.parse::<u128>().ok()?;
-        let nanos = match unit {
-            "h" => duration_value.saturating_mul(3_600_000_000_000),
-            "m" => duration_value.saturating_mul(60_000_000_000),
-            "s" => duration_value.saturating_mul(1_000_000_000),
-            "ms" => duration_value.saturating_mul(1_000_000),
-            "us" | "µs" => duration_value.saturating_mul(1_000),
-            "ns" => duration_value,
-            _ => return None,
-        };
-        total_nanos = total_nanos.saturating_add(nanos);
-        saw_unit = true;
-    }
-
-    saw_unit.then(|| format_duration_parts(total_nanos))
-}
-
-/// Normalizes either supported upstream duration representation.
-fn normalize_duration(value: &str) -> Option<String> {
-    parse_formatted_duration(value).or_else(|| parse_compound_duration(value))
-}
-
-/// Redacts volatile Tor guard and circuit identifiers from a field value.
-fn scrub_tor_value(value: &str) -> String {
-    let mut out = value.to_owned();
-
-    while let Some(start) = out.find("GuardId(") {
-        let Some(remainder) = out.get(start..) else {
-            break;
-        };
-        let Some(relative_end) = remainder.find(')') else {
-            break;
-        };
-        let Some(end) = start.checked_add(relative_end) else {
-            break;
-        };
-        out.replace_range(start..=end, "[scrubbed guard]");
-    }
-
-    while let Some(start) = out.find(" via Circ ") {
-        let Some(token_value_start) = start.checked_add(" via Circ ".len()) else {
-            break;
-        };
-        let Some(remainder) = out.get(token_value_start..) else {
-            break;
-        };
-        let end = remainder
-            .find(char::is_whitespace)
-            .and_then(|offset| token_value_start.checked_add(offset))
-            .unwrap_or(out.len());
-        out.replace_range(start..end, "");
-    }
-
-    out
-}
-
-/// Normalizes one structured log field for human-readable output.
-fn normalize_field_value(name: &str, value: &str) -> String {
-    if let Some(duration) = normalize_duration(value) {
-        return duration;
-    }
-
-    if name == "guard" && value.starts_with("GuardId(") {
-        return "[scrubbed]".to_owned();
-    }
-
-    if name == "latency_ms" {
-        return format!("{value} ms");
-    }
-
-    scrub_tor_value(value)
-}
-
-/// Returns whether an empty or redundant structured field should be omitted.
-fn should_hide_field(name: &str, value: &str) -> bool {
-    (matches!(value, "" | "<missing>")
-        && matches!(name, "content_type" | "content_length" | "mime" | "path"))
-        || (name == "guard" && value == "[scrubbed]")
-}
-
-#[derive(Default)]
-/// Captured and normalized fields for one tracing event.
-struct LogEventFields {
-    /// Optional event message.
-    message: Option<String>,
-    /// Remaining structured name/value pairs.
-    fields: Vec<(String, String)>,
-}
-
-impl LogEventFields {
-    /// Normalizes and stores one recorded tracing field.
-    fn push_field(&mut self, field: &Field, value: &str) {
-        let clean = normalize_field_value(field.name(), &strip_ansi(value.trim()));
-        if field.name() == "message" {
-            if !clean.is_empty() {
-                self.message = Some(clean);
-            }
-            return;
-        }
-        if should_hide_field(field.name(), &clean) {
-            return;
-        }
-        self.fields.push((field.name().to_owned(), clean));
-    }
-}
-
-impl Visit for LogEventFields {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.push_field(field, value);
-    }
-
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        self.push_field(field, if value { "yes" } else { "no" });
-    }
-
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.push_field(field, &value.to_string());
-    }
-
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        self.push_field(field, &value.to_string());
-    }
-
-    fn record_i128(&mut self, field: &Field, value: i128) {
-        self.push_field(field, &value.to_string());
-    }
-
-    fn record_u128(&mut self, field: &Field, value: u128) {
-        self.push_field(field, &value.to_string());
-    }
-
-    fn record_f64(&mut self, field: &Field, value: f64) {
-        self.push_field(field, &value.to_string());
-    }
-
-    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.push_field(field, &value.to_string());
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.push_field(field, &format!("{value:?}"));
-    }
-}
-
-/// Inserts or replaces a structured field by name.
-fn upsert_field(fields: &mut Vec<(String, String)>, name: &str, value: String) {
-    if let Some((_, existing)) = fields.iter_mut().find(|(field_name, _)| field_name == name) {
-        *existing = value;
-    } else {
-        fields.push((name.to_owned(), value));
-    }
-}
-
-/// Removes a structured field by name and returns its value.
-fn remove_field(fields: &mut Vec<(String, String)>, name: &str) -> Option<String> {
-    fields
-        .iter()
-        .position(|(field_name, _)| field_name == name)
-        .map(|index| fields.remove(index).1)
-}
-
-/// Extracts the numeric token immediately preceding the first percent sign.
-fn extract_percent(message: &str) -> Option<String> {
-    let percent_index = message.find('%')?;
-    let before_percent = message.get(..percent_index)?;
-    let number = before_percent
-        .rsplit_once(' ')
-        .map_or(before_percent, |(_, value)| value);
-    Some(format!("{number}%"))
-}
-
-/// Extracts a Tor bootstrap attempt count from its upstream message.
-fn extract_attempt_count(message: &str) -> Option<String> {
-    let before = message
-        .strip_prefix("We failed ")?
-        .split_once(" times to bootstrap")?
-        .0;
-    before.parse::<u64>().ok().map(|count| count.to_string())
-}
-
-/// Rewrites common verbose Tor errors into concise operator-facing text.
-fn short_tor_error(error: &str) -> String {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("invalid document from directory server") {
-        "directory server sent invalid data".to_owned()
-    } else if lower.contains("timed out") || lower.contains("timeout") {
-        "network timeout".to_owned()
-    } else if lower.contains("unusable guard") || lower.contains("could not connect to guard") {
-        "could not connect to a Tor guard".to_owned()
-    } else if lower.contains("consensus") && lower.contains("expired") {
-        "network directory consensus expired".to_owned()
-    } else {
-        scrub_tor_value(error)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Output action selected for a descriptor-upload timeout event.
-enum TorDescriptorTimeoutDecision {
-    /// Emit the original warning.
-    EmitOriginal,
-    /// Suppress this repeated warning.
-    Suppress,
-    /// Emit a summary of warnings suppressed during a completed window.
-    EmitSummary {
-        /// Number of repeated warnings suppressed.
-        suppressed: u64,
-        /// Suppression window represented by the summary.
-        window: Duration,
-    },
-}
-
-#[derive(Debug)]
-/// Coalesces repeated Tor descriptor-upload timeout warnings.
-struct TorDescriptorTimeoutLimiter {
-    /// Duration of one suppression window.
-    window: Duration,
-    /// Start time of the active suppression window.
-    window_started_at: Option<Instant>,
-    /// Number of repeated warnings suppressed in the active window.
-    suppressed: u64,
-    /// Decision cached for the second formatter that observes the same event.
-    duplicate_formatter_decision: Option<TorDescriptorTimeoutDecision>,
-}
-
-impl TorDescriptorTimeoutLimiter {
-    /// Creates an idle limiter with the supplied window.
-    const fn new(window: Duration) -> Self {
-        Self {
-            window,
-            window_started_at: None,
-            suppressed: 0,
-            duplicate_formatter_decision: None,
-        }
-    }
-
-    /// Selects one decision and reuses it for the second event formatter.
-    fn decide(&mut self, now: Instant) -> TorDescriptorTimeoutDecision {
-        // The terminal and file formatters both see the same tracing event.
-        // Reuse one decision for the second formatter so the limiter counts
-        // the event once while keeping both outputs consistent.
-        if let Some(decision) = self.duplicate_formatter_decision.take() {
-            return decision;
-        }
-
-        let decision = self.decide_once(now);
-        self.duplicate_formatter_decision = Some(decision);
-        decision
-    }
-
-    /// Selects a rate-limit decision for one logical tracing event.
-    fn decide_once(&mut self, now: Instant) -> TorDescriptorTimeoutDecision {
-        let Some(window_started_at) = self.window_started_at else {
-            self.window_started_at = Some(now);
-            return TorDescriptorTimeoutDecision::EmitOriginal;
-        };
-
-        if now.duration_since(window_started_at) >= self.window {
-            let suppressed = self.suppressed;
-            self.window_started_at = Some(now);
-            self.suppressed = 0;
-            if suppressed == 0 {
-                TorDescriptorTimeoutDecision::EmitOriginal
-            } else {
-                TorDescriptorTimeoutDecision::EmitSummary {
-                    suppressed,
-                    window: self.window,
-                }
-            }
-        } else {
-            self.suppressed = self.suppressed.saturating_add(1);
-            TorDescriptorTimeoutDecision::Suppress
-        }
-    }
-}
-
-/// Detects Tor descriptor-upload timeout warnings eligible for coalescing.
-fn is_tor_descriptor_upload_timeout_event(target: &str, fields: &LogEventFields) -> bool {
-    if !is_tor_target(target) {
-        return false;
-    }
-
-    let message = fields.message.as_deref().unwrap_or_default();
-    let message_lower = message.to_ascii_lowercase();
-    let joined_fields = fields
-        .fields
-        .iter()
-        .map(|(_, value)| value.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
-    let haystack = format!("{message_lower} {joined_fields}");
-
-    haystack.contains("descriptor")
-        && (haystack.contains("failed to upload descriptor")
-            || haystack.contains("unable to upload")
-            || haystack.contains("descriptor upload"))
-        && (haystack.contains("timeout exceeded")
-            || haystack.contains("timed out")
-            || haystack.contains("network timeout"))
-}
-
-/// Applies descriptor-timeout coalescing and returns whether to emit the event.
-fn apply_tor_descriptor_timeout_rate_limit(fields: &mut LogEventFields) -> bool {
-    let decision = TOR_DESCRIPTOR_TIMEOUT_LIMITER.lock().decide(Instant::now());
-    match decision {
-        TorDescriptorTimeoutDecision::EmitOriginal => true,
-        TorDescriptorTimeoutDecision::Suppress => false,
-        TorDescriptorTimeoutDecision::EmitSummary { suppressed, window } => {
-            fields.message = Some(format!(
-                "Tor descriptor upload timeouts are still occurring; suppressed {suppressed} repeated warnings in the last {} minutes",
-                window.as_secs() / 60
-            ));
-            fields.fields.clear();
-            true
-        }
-    }
-}
-
-/// Normalizes punctuation, whitespace, and capitalization in a log message.
-fn normalize_message_text(message: &str) -> String {
-    let mut cleaned = message.trim().replace('—', "-").replace('…', "...");
-    if cleaned.contains('→') {
-        cleaned = cleaned.replace('→', " to ");
-    }
-    while cleaned.contains("  ") {
-        cleaned = cleaned.replace("  ", " ");
-    }
-    title_case_message(&cleaned)
-}
-
-#[expect(
-    clippy::cognitive_complexity,
-    reason = "message rewriting intentionally centralizes the closed set of upstream log patterns"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeping the closed message-rewrite table together makes overlapping upstream patterns auditable"
-)]
-/// Rewrites known upstream messages and fields into stable operator-facing text.
-fn rewrite_message(target: &str, file: Option<&str>, fields: &mut LogEventFields) {
-    let Some(message) = fields.message.clone() else {
-        return;
-    };
-
-    let component = extract_component(target);
-    fields.message = Some(normalize_message_text(&message));
-
-    match component {
-        "guard" => {
-            if let Some((_, retry)) = message.split_once("Retrying in ") {
-                let retry = retry.trim_end_matches('.');
-                let retry = normalize_duration(retry).unwrap_or_else(|| retry.to_owned());
-                fields.message = Some("Tor guard connection failed".to_owned());
-                upsert_field(&mut fields.fields, "retry_in", retry);
-            } else if message.contains("Next retry time unknown") {
-                fields.message = Some("Tor guard connection failed".to_owned());
-                upsert_field(&mut fields.fields, "retry_in", "unknown".to_owned());
-            } else if message.starts_with("Questionable guard:") {
-                fields.message = Some("Tor marked a guard as unstable".to_owned());
-                if let Some(rate) = extract_percent(&message) {
-                    upsert_field(&mut fields.fields, "failure_rate", rate);
-                }
-            } else if message.starts_with("Disabling guard:") {
-                fields.message = Some("Tor disabled an unstable guard".to_owned());
-                if let Some(rate) = extract_percent(&message) {
-                    upsert_field(&mut fields.fields, "failure_rate", rate);
-                }
-            }
-        }
-        "hspool" => {
-            if message == "Too many preemptive onion service circuits failed; waiting a while." {
-                fields.message = Some(
-                    "Tor onion-service circuits are failing; waiting before retrying".to_owned(),
-                );
-            } else if message.starts_with("unknown vanguard mode") {
-                fields.message = Some("Tor onion-service vanguard mode is unknown".to_owned());
-            }
-        }
-        "reactor" => {
-            if message.eq_ignore_ascii_case("removing circuit leg") {
-                fields.message = Some("Tor circuit closed".to_owned());
-                let _previous_value = remove_field(&mut fields.fields, "tunnel_id");
-            } else if message.contains("descriptor upload")
-                || message.contains("Unable to upload")
-                || message.contains("publish")
-            {
-                fields.message =
-                    Some(normalize_message_text(&message).replace("HS", "onion service"));
-            }
-        }
-        "bootstrap" => {
-            if message == "Unable to advance downloading state" {
-                fields.message = Some("Tor directory bootstrap stalled".to_owned());
-            } else if message.starts_with("We failed ") && message.contains("times to bootstrap") {
-                fields.message = Some("Tor directory bootstrap failed".to_owned());
-                if let Some(attempts) = extract_attempt_count(&message) {
-                    upsert_field(&mut fields.fields, "attempts", attempts);
-                }
-            }
-        }
-        "lib" => {
-            if message == "Bootstrapping task exited before finishing." {
-                fields.message =
-                    Some("Tor directory bootstrap stopped before finishing".to_owned());
-            } else if message == "Got a new NetDir, but it's older than the one we currently have!"
-            {
-                fields.message = Some(
-                    "Tor received an older network directory; keeping current copy".to_owned(),
-                );
-            }
-        }
-        "state" => {
-            if message.starts_with("Problem with certificate received from") {
-                fields.message = Some("Tor directory certificate was rejected".to_owned());
-            } else if message.starts_with("Discarding certificates") {
-                fields.message =
-                    Some("Tor discarded unrequested directory certificates".to_owned());
-            } else if message.starts_with("Received microdescriptor") {
-                fields.message = Some("Tor discarded an unrequested relay descriptor".to_owned());
-            } else if message == "Found a mismatched microdescriptor in cache; ignoring" {
-                fields.message =
-                    Some("Tor ignored a mismatched cached relay descriptor".to_owned());
-            }
-        }
-        "sqlite" if message.starts_with("Removing unreferenced file") => {
-            fields.message = Some("Tor removed an unreferenced cache file".to_owned());
-        }
-        "mgr" => {
-            if message == "All tunnel attempts failed due to timeout" {
-                fields.message = Some("Tor circuit build timed out".to_owned());
-            } else if message == "Reached circuit build retry limit, exiting..." {
-                fields.message = Some("Tor circuit build retry limit reached".to_owned());
-            } else if message == "Request failed" {
-                fields.message = Some("Tor circuit request failed".to_owned());
-            }
-        }
-        _ => {}
-    }
-
-    if message.starts_with("Error while adding directory info") {
-        fields.message = Some("Tor directory update failed".to_owned());
-        if let Some(error) = remove_field(&mut fields.fields, "error") {
-            upsert_field(&mut fields.fields, "reason", short_tor_error(&error));
-        }
-    }
-
-    if let Some(file) = file {
-        if (is_external_source(file) || is_tor_target(target)) && is_tor_component(component) {
-            if let Some(msg) = fields.message.as_mut() {
-                if !msg.starts_with("Tor ") {
-                    *msg = format!("Tor: {msg}");
-                }
-            }
-        }
-    }
-}
-
-/// Returns whether a noisy rewritten event should be omitted entirely.
-fn should_suppress_event(target: &str, fields: &LogEventFields) -> bool {
-    matches!(
-        (extract_component(target), fields.message.as_deref()),
-        (
-            "hspool",
-            Some("Tor onion-service circuits are failing; waiting before retrying")
-        )
-    )
-}
-
-/// Records, normalizes, rewrites, and rate-limits fields for one event.
-fn prepare_event_fields(
-    target: &str,
-    file: Option<&str>,
-    event: &Event<'_>,
-) -> Option<LogEventFields> {
-    let mut fields = LogEventFields::default();
-    event.record(&mut fields);
-    rewrite_message(target, file, &mut fields);
-    if *event.metadata().level() == Level::WARN
-        && is_tor_descriptor_upload_timeout_event(target, &fields)
-        && !apply_tor_descriptor_timeout_rate_limit(&mut fields)
-    {
-        return None;
-    }
-    (!should_suppress_event(target, &fields)).then_some(fields)
-}
-
-/// Writes normalized event fields in the shared human-readable format.
-fn write_event_fields(writer: &mut Writer<'_>, fields: &LogEventFields) -> fmt::Result {
-    let has_message = fields.message.is_some();
-
-    if let Some(message) = fields.message.as_deref() {
-        write!(writer, "{message}")?;
-    }
-
-    if !fields.fields.is_empty() {
-        if has_message {
-            write!(writer, " - ")?;
-        }
-
-        for (index, (name, value)) in fields.fields.iter().enumerate() {
-            if index > 0 {
-                write!(writer, ", ")?;
-            }
-            write!(writer, "{}: {}", humanize_field_name(name), value)?;
-        }
-    }
-
-    Ok(())
-}
-
 /// Builds the default INFO-level filter used when `RUST_LOG` is absent.
 fn default_env_filter() -> EnvFilter {
     EnvFilter::new(
@@ -1036,44 +346,32 @@ fn env_filter() -> EnvFilter {
 ///
 /// Columns are fixed-width so the message text always starts at the same
 /// horizontal position, making it easy to scan down a busy log stream.
-struct TerminalFormatter;
+fn format_terminal_event(
+    mut writer: Writer<'_>,
+    event: &Event<'_>,
+    fields: &LogEventFields,
+) -> fmt::Result {
+    let tty = IS_TTY.load(Ordering::Relaxed);
+    let ansi = ANSI_ENABLED.load(Ordering::Relaxed);
+    let meta = event.metadata();
 
-impl<S, N> FormatEvent<S, N> for TerminalFormatter
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-    N: for<'a> FormatFields<'a> + 'static,
-{
-    fn format_event(
-        &self,
-        _ctx: &FmtContext<'_, S, N>,
-        mut writer: Writer<'_>,
-        event: &Event<'_>,
-    ) -> fmt::Result {
-        let tty = IS_TTY.load(Ordering::Relaxed);
-        let ansi = ANSI_ENABLED.load(Ordering::Relaxed);
-        let meta = event.metadata();
-        let Some(fields) = prepare_event_fields(meta.target(), meta.file(), event) else {
-            return Ok(());
-        };
-
-        let now = chrono::Local::now();
-        if tty {
-            write!(writer, "{} ", now.format("%H:%M:%S%.3f"))?;
-        } else {
-            write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
-        }
-
-        let level = *meta.level();
-        write_level_tag(&mut writer, level, ansi)?;
-        write_component_tag(&mut writer, meta.target(), ansi)?;
-
-        // Message and structured fields
-        // tracing_subscriber writes the `message` field first, then all other
-        // key=value fields separated by spaces — e.g.:
-        //   "Request received  method=GET path=/b/ latency_ms=4"
-        write_event_fields(&mut writer, &fields)?;
-        writeln!(writer)
+    let now = chrono::Local::now();
+    if tty {
+        write!(writer, "{} ", now.format("%H:%M:%S%.3f"))?;
+    } else {
+        write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
     }
+
+    let level = *meta.level();
+    write_level_tag(&mut writer, level, ansi)?;
+    write_component_tag(&mut writer, meta.target(), ansi)?;
+
+    // Message and structured fields
+    // tracing_subscriber writes the `message` field first, then all other
+    // key=value fields separated by spaces — e.g.:
+    //   "Request received  method=GET path=/b/ latency_ms=4"
+    write_event_fields(&mut writer, fields)?;
+    writeln!(writer)
 }
 
 // File formatter
@@ -1084,59 +382,47 @@ where
 ///   `2026-03-18 14:22:01.456 [ERROR] [error   ] DB query failed  err=no such table  (src/db/posts.rs:79)`.
 ///
 /// Differences from the terminal format:
-///   • Always UTC with the full date — the file is an archive, not a live view.
+///   • Local time with the full date; the terminal shows local time without the date.
 ///   • No ANSI colour codes — clean for `grep`, `less`, and text editors.
 ///   • WARN and ERROR lines append `(file:line)` at the end so you can jump
 ///     directly to the call site without having to search the source tree.
-struct FileFormatter;
+fn format_file_event(
+    mut writer: Writer<'_>,
+    event: &Event<'_>,
+    fields: &LogEventFields,
+) -> fmt::Result {
+    let meta = event.metadata();
 
-impl<S, N> FormatEvent<S, N> for FileFormatter
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-    N: for<'a> FormatFields<'a> + 'static,
-{
-    fn format_event(
-        &self,
-        _ctx: &FmtContext<'_, S, N>,
-        mut writer: Writer<'_>,
-        event: &Event<'_>,
-    ) -> fmt::Result {
-        let meta = event.metadata();
-        let Some(fields) = prepare_event_fields(meta.target(), meta.file(), event) else {
-            return Ok(());
-        };
+    let now = chrono::Local::now();
+    write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
 
-        let now = chrono::Local::now();
-        write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
+    let level = *event.metadata().level();
+    write_level_tag(&mut writer, level, false)?;
+    write_component_tag(&mut writer, meta.target(), false)?;
 
-        let level = *event.metadata().level();
-        write_level_tag(&mut writer, level, false)?;
-        write_component_tag(&mut writer, meta.target(), false)?;
+    write_event_fields(&mut writer, fields)?;
 
-        write_event_fields(&mut writer, &fields)?;
-
-        // Source location suffix for WARN and ERROR
-        // Only attached at these levels because:
-        //   • INFO/DEBUG events fire thousands of times per minute on a busy
-        //     board; the call site is rarely the interesting part.
-        // • WARN/ERROR events are rare and almost always need follow-up
-        //     having the exact file:line avoids a grep → blame cycle.
-        if matches!(level, Level::ERROR | Level::WARN) {
-            if let (Some(file), Some(line)) = (meta.file(), meta.line()) {
-                if is_external_source(file) {
-                    writeln!(writer)?;
-                    return Ok(());
-                }
-                // Trim the leading "src/" that Rust adds to all file paths so
-                // the suffix stays compact: "(db/posts.rs:79)" not
-                // "(src/db/posts.rs:79)".
-                let trimmed = file.strip_prefix("src/").unwrap_or(file);
-                write!(writer, "  ({trimmed}:{line})")?;
+    // Source location suffix for WARN and ERROR
+    // Only attached at these levels because:
+    //   • INFO/DEBUG events fire thousands of times per minute on a busy
+    //     board; the call site is rarely the interesting part.
+    // • WARN/ERROR events are rare and almost always need follow-up
+    //     having the exact file:line avoids a grep → blame cycle.
+    if matches!(level, Level::ERROR | Level::WARN) {
+        if let (Some(file), Some(line)) = (meta.file(), meta.line()) {
+            if is_external_source(file) {
+                writeln!(writer)?;
+                return Ok(());
             }
+            // Trim the leading "src/" that Rust adds to all file paths so
+            // the suffix stays compact: "(db/posts.rs:79)" not
+            // "(src/db/posts.rs:79)".
+            let trimmed = file.strip_prefix("src/").unwrap_or(file);
+            write!(writer, "  ({trimmed}:{line})")?;
         }
-
-        writeln!(writer)
     }
+
+    writeln!(writer)
 }
 
 // MakeWriter: routes terminal writes through CONSOLE_MUTEX
@@ -1184,44 +470,105 @@ impl<'a> MakeWriter<'a> for ConsoleLock {
     }
 }
 
+/// Routes one prepared event to its enabled terminal and file outputs.
+struct OutputLayer<T, M, D> {
+    /// Terminal writer, serialized with the interactive console.
+    terminal: T,
+    /// Writer for application and `FFmpeg` events.
+    main_file: M,
+    /// Writer for third-party events.
+    dependency_file: D,
+    /// One constant-space suppression state shared by all outputs.
+    descriptor_timeouts: std::sync::Arc<parking_lot::Mutex<TorDescriptorTimeoutLimiter>>,
+}
+
+impl<T, M, D> OutputLayer<T, M, D> {
+    /// Creates the process's routing layer with an idle warning limiter.
+    fn new(terminal: T, main_file: M, dependency_file: D) -> Self {
+        Self {
+            terminal,
+            main_file,
+            dependency_file,
+            descriptor_timeouts: std::sync::Arc::new(parking_lot::Mutex::new(
+                TorDescriptorTimeoutLimiter::new(TOR_DESCRIPTOR_TIMEOUT_SUPPRESSION_WINDOW),
+            )),
+        }
+    }
+}
+
+impl<S, T, M, D> Layer<S> for OutputLayer<T, M, D>
+where
+    S: Subscriber,
+    T: for<'a> MakeWriter<'a> + 'static,
+    M: for<'a> MakeWriter<'a> + 'static,
+    D: for<'a> MakeWriter<'a> + 'static,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let meta = event.metadata();
+        // Decide once before writer fanout. The limiter never holds a lock
+        // while formatting or writing, and no decision survives its event.
+        let Some(fields) =
+            prepare_event_fields(meta.target(), meta.file(), event, &self.descriptor_timeouts)
+        else {
+            return;
+        };
+        if is_main_log_target(meta.target()) {
+            write_output(&self.terminal, meta, |writer| {
+                format_terminal_event(writer, event, &fields)
+            });
+            write_output(&self.main_file, meta, |writer| {
+                format_file_event(writer, event, &fields)
+            });
+        } else {
+            write_output(&self.dependency_file, meta, |writer| {
+                format_file_event(writer, event, &fields)
+            });
+        }
+    }
+}
+
+/// Formats one line before acquiring its output writer, matching formatter I/O.
+fn write_output<'a, W: MakeWriter<'a>>(
+    make_writer: &'a W,
+    metadata: &Metadata<'_>,
+    format_event: impl FnOnce(Writer<'_>) -> fmt::Result,
+) {
+    let mut buffer = String::new();
+    if format_event(Writer::new(&mut buffer)).is_ok() {
+        let mut writer = make_writer.make_writer_for(metadata);
+        drop(writer.write_all(buffer.as_bytes()));
+    }
+}
+
 // Initialisation
 /// Initialise the global tracing subscriber. Call exactly once at startup,
 /// before any `tracing::info!` or `tracing::warn!` calls are made.
 ///
 /// Detects whether stdout is an interactive terminal and stores the result
-/// in `IS_TTY` for the process lifetime. Installs three layers:
+/// in `IS_TTY` for the process lifetime. Installs one routing layer with three outputs:
 ///
-/// 1. **Terminal layer** — `TerminalFormatter` writes via `ConsoleLock`
+/// 1. **Terminal output** — writes via `ConsoleLock`
 ///    (`CONSOLE_MUTEX`). Human-readable, coloured when TTY, plain otherwise.
 ///    Serialised with `console.rs` output via the shared mutex. `RustChan` and
 ///    `FFMPEG` targets only.
 ///
-/// 2. **Main file layer** — `FileFormatter`, daily rotation, filtered by
+/// 2. **Main file output** — daily rotation, filtered by
 ///    `RUST_LOG` or the default INFO-level filter.
 ///    Written to `{log_dir}/rustchan.YYYY-MM-DD.log`.
 ///    One human-readable line per event; WARN/ERROR include source location.
 ///    `RustChan` and `FFMPEG` targets only.
 ///
-/// 3. **Dependency file layer** — `FileFormatter`, written to
+/// 3. **Dependency file output** — written to
 ///    `{log_dir}/dep_log.log`. Receives third-party dependency targets that
 ///    are hidden from the terminal/main log.
 ///    Independent of the console lock; uses `tracing-appender`'s own lock.
 ///
-/// To switch the file layer to JSON for a log aggregator (Loki, Datadog, …):
-/// replace `FileFormatter` with `.json()` and add `.with_file(true)
-/// .with_line_number(true)` to the layer builder.
 pub fn init_logging(log_dir: &Path) {
     use std::io::IsTerminal as _;
 
     let tty = io::stdout().is_terminal();
     IS_TTY.store(tty, Ordering::Relaxed);
     ANSI_ENABLED.store(detect_ansi_enabled(tty), Ordering::Relaxed);
-
-    let terminal_layer = tracing_subscriber::fmt::layer()
-        .event_format(TerminalFormatter)
-        .with_writer(ConsoleLock)
-        .with_filter(filter_fn(|meta| is_main_log_target(meta.target())))
-        .with_filter(env_filter());
 
     // FIX (filename): tracing_appender::rolling::daily(dir, "rustchan.log")
     // appends the date *after* the full string → "rustchan.log.2024-01-15"
@@ -1251,26 +598,17 @@ pub fn init_logging(log_dir: &Path) {
     let (main_file_writer, main_guard) = tracing_appender::non_blocking(rolling);
     *MAIN_FILE_GUARD.lock() = Some(main_guard);
 
-    let file_layer = tracing_subscriber::fmt::layer()
-        .event_format(FileFormatter)
-        .with_writer(main_file_writer)
-        .with_filter(filter_fn(|meta| is_main_log_target(meta.target())))
-        .with_filter(env_filter());
-
     let dependency_log = tracing_appender::rolling::never(log_dir, DEPENDENCY_LOG_FILE_NAME);
     let (dependency_file_writer, dependency_guard) = tracing_appender::non_blocking(dependency_log);
     *DEPENDENCY_FILE_GUARD.lock() = Some(dependency_guard);
 
-    let dependency_file_layer = tracing_subscriber::fmt::layer()
-        .event_format(FileFormatter)
-        .with_writer(dependency_file_writer)
-        .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target())))
-        .with_filter(env_filter());
-
     tracing_subscriber::registry()
-        .with(terminal_layer)
-        .with(file_layer)
-        .with(dependency_file_layer)
+        .with(OutputLayer::new(
+            ConsoleLock,
+            main_file_writer,
+            dependency_file_writer,
+        ))
+        .with(env_filter())
         .init();
 }
 
@@ -1307,504 +645,5 @@ pub fn shutdown() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        dependency_log_path, display_component, extract_component, humanize_field_name,
-        is_dependency_log_target, is_external_source, is_ffmpeg_log_target, is_main_log_file,
-        is_main_log_target, is_tor_descriptor_upload_timeout_event, normalize_duration,
-        normalize_field_value, normalize_message_text, parse_formatted_duration, read_log_tail,
-        rewrite_message, FileFormatter, LogEventFields, TorDescriptorTimeoutDecision,
-        TorDescriptorTimeoutLimiter, DEPENDENCY_LOG_FILE_NAME,
-    };
-    use std::io;
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
-    use tracing_subscriber::fmt::MakeWriter;
-    use tracing_subscriber::{filter::filter_fn, layer::Layer as _, layer::SubscriberExt as _};
-
-    #[derive(Clone, Default)]
-    struct SharedBuffer {
-        inner: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl SharedBuffer {
-        fn content(&self) -> String {
-            let bytes = self
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            String::from_utf8_lossy(&bytes).into_owned()
-        }
-    }
-
-    struct SharedBufferWriter {
-        inner: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl io::Write for SharedBufferWriter {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.inner
-                .lock()
-                .map_err(|_poisoned| io::Error::other("buffer lock poisoned"))?
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for SharedBuffer {
-        type Writer = SharedBufferWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            SharedBufferWriter {
-                inner: Arc::clone(&self.inner),
-            }
-        }
-    }
-
-    fn rewrite_for_test(target: &str, message: &str, fields: &[(&str, &str)]) -> LogEventFields {
-        let mut event_fields = LogEventFields {
-            message: Some(message.to_owned()),
-            fields: fields
-                .iter()
-                .filter_map(|(name, value)| {
-                    let clean = normalize_field_value(name, value);
-                    (!super::should_hide_field(name, &clean)).then(|| ((*name).to_owned(), clean))
-                })
-                .collect(),
-        };
-        rewrite_message(
-            target,
-            Some("/Users/example/.cargo/registry/src/index.crates.io/tor-test/src/lib.rs"),
-            &mut event_fields,
-        );
-        event_fields
-    }
-
-    #[test]
-    fn parses_formatted_duration_into_plain_text() {
-        assert_eq!(
-            parse_formatted_duration("FormattedDuration(29.99997625s)").as_deref(),
-            Some("30s")
-        );
-        assert_eq!(
-            parse_formatted_duration("FormattedDuration(125.0s)").as_deref(),
-            Some("2m 5s")
-        );
-        assert_eq!(
-            normalize_duration("29s 999ms 988us 413ns").as_deref(),
-            Some("30s")
-        );
-    }
-
-    #[test]
-    fn normalizes_common_field_names_and_values() {
-        assert_eq!(humanize_field_name("thread_id"), "thread ID");
-        assert_eq!(humanize_field_name("latency_ms"), "latency");
-        assert_eq!(normalize_field_value("latency_ms", "42"), "42 ms");
-        assert_eq!(normalize_field_value("guard", "GuardId(foo)"), "[scrubbed]");
-        assert_eq!(
-            normalize_field_value(
-                "error",
-                "Invalid document from directory server [scrubbed] via Circ 8.98"
-            ),
-            "Invalid document from directory server [scrubbed]"
-        );
-    }
-
-    #[test]
-    fn cleans_up_message_text() {
-        assert_eq!(
-            normalize_message_text("removing circuit leg"),
-            "Removing circuit leg"
-        );
-        assert_eq!(
-            normalize_message_text("image→webp: converted"),
-            "Image to webp: converted"
-        );
-    }
-
-    #[test]
-    fn detects_external_source_locations() {
-        assert!(is_external_source(
-            "/Users/example/.cargo/registry/src/index.crates.io-xxx/tor-proto/src/client/reactor.rs"
-        ));
-        assert!(!is_external_source("src/server/server.rs"));
-        assert_eq!(extract_component("rustchan::server::server"), "server");
-        assert_eq!(display_component("tor_dirmgr::bootstrap"), "tor-dir");
-        assert_eq!(display_component("tor_guardmgr::guard"), "tor-net");
-        assert_eq!(display_component("tor_circmgr::hspool"), "onion");
-    }
-
-    #[test]
-    fn classifies_dependency_and_app_log_targets() {
-        assert!(is_main_log_target("rustchan::server::server"));
-        assert!(is_main_log_target("chan::media::ffmpeg"));
-        assert!(is_main_log_target("convert"));
-        assert!(is_main_log_target("media_prune"));
-        assert!(is_main_log_target("workers"));
-        assert!(is_dependency_log_target("tokio::runtime"));
-        assert!(is_dependency_log_target("hyper::proto"));
-        assert!(is_dependency_log_target("axum::routing"));
-        assert!(is_dependency_log_target("tower::buffer"));
-        assert!(is_dependency_log_target("tower_http::trace"));
-        assert!(is_dependency_log_target("rustls::server"));
-        assert!(is_dependency_log_target("arti_client::builder"));
-        assert!(is_dependency_log_target("tracing::span"));
-        assert!(is_dependency_log_target("url::parse"));
-        assert!(is_dependency_log_target("rusqlite::inner"));
-        assert!(is_dependency_log_target("r2d2::pool"));
-        assert!(!is_dependency_log_target("admin"));
-        assert!(!is_dependency_log_target("convert"));
-        assert!(!is_dependency_log_target("media_prune"));
-        assert!(!is_main_log_target("rustchannel::server"));
-        assert!(!is_main_log_target("convert::third_party"));
-    }
-
-    #[test]
-    fn keeps_ffmpeg_targets_in_main_log_route() {
-        for target in [
-            "ffmpeg",
-            "ffmpeg::codec",
-            "ffmpeg_next",
-            "ffmpeg_next::codec",
-            "rustchan::media::ffmpeg",
-        ] {
-            assert!(is_ffmpeg_log_target(target));
-            assert!(is_main_log_target(target));
-            assert!(!is_dependency_log_target(target));
-        }
-    }
-
-    #[test]
-    fn recognizes_main_and_dependency_log_paths() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        anyhow::ensure!(
-            dependency_log_path(dir.path())
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some(DEPENDENCY_LOG_FILE_NAME),
-            "dependency log path used an unexpected filename"
-        );
-        anyhow::ensure!(
-            is_main_log_file(&dir.path().join("rustchan.2026-04-02.log")),
-            "dated RustChan log was not recognized"
-        );
-        anyhow::ensure!(
-            is_main_log_file(&dir.path().join("rustchan.log")),
-            "undated RustChan log was not recognized"
-        );
-        anyhow::ensure!(
-            !is_main_log_file(&dir.path().join(DEPENDENCY_LOG_FILE_NAME)),
-            "dependency log was misclassified as a main log"
-        );
-        anyhow::ensure!(
-            !is_main_log_file(&dir.path().join("tower_http.log")),
-            "third-party log was misclassified as a main log"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn route_filters_write_dependency_events_only_to_dependency_output() {
-        let main_log = SharedBuffer::default();
-        let dependency_log = SharedBuffer::default();
-        let subscriber = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(FileFormatter)
-                    .with_writer(main_log.clone())
-                    .with_filter(filter_fn(|meta| is_main_log_target(meta.target()))),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(FileFormatter)
-                    .with_writer(dependency_log.clone())
-                    .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target()))),
-            );
-
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::info!(target: "tokio::runtime", "dependency event");
-        });
-
-        assert!(!main_log.content().contains("Dependency event"));
-        assert!(dependency_log.content().contains("Dependency event"));
-    }
-
-    #[test]
-    fn route_filters_keep_app_and_ffmpeg_events_in_main_output() {
-        let main_log = SharedBuffer::default();
-        let dependency_log = SharedBuffer::default();
-        let subscriber = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(FileFormatter)
-                    .with_writer(main_log.clone())
-                    .with_filter(filter_fn(|meta| is_main_log_target(meta.target()))),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(FileFormatter)
-                    .with_writer(dependency_log.clone())
-                    .with_filter(filter_fn(|meta| is_dependency_log_target(meta.target()))),
-            );
-
-        tracing::subscriber::with_default(subscriber, || {
-            tracing::info!(target: "startup", "app event");
-            tracing::info!(target: "media_prune", "alias event");
-            tracing::warn!(target: "ffmpeg::stderr", "ffmpeg event");
-        });
-
-        let main_content = main_log.content();
-        assert!(main_content.contains("App event"));
-        assert!(main_content.contains("Alias event"));
-        assert!(main_content.contains("Ffmpeg event"));
-        assert!(!dependency_log.content().contains("App event"));
-        assert!(!dependency_log.content().contains("Alias event"));
-        assert!(!dependency_log.content().contains("Ffmpeg event"));
-    }
-
-    #[test]
-    fn rewrites_common_tor_guard_messages() {
-        let fields = rewrite_for_test(
-            "tor_guardmgr::guard",
-            "Could not connect to guard $AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA. Retrying in 29s 999ms 988us 413ns.",
-            &[],
-        );
-
-        assert_eq!(
-            fields.message.as_deref(),
-            Some("Tor guard connection failed")
-        );
-        assert_eq!(
-            fields.fields,
-            vec![("retry_in".to_owned(), "30s".to_owned())]
-        );
-
-        let disabled_guard_fields = rewrite_for_test(
-            "tor_guardmgr::guard",
-            "Disabling guard: 72.5% of circuits died under mysterious circumstances, exceeding threshold of 70.0%",
-            &[("guard", "GuardId(abc)")],
-        );
-        assert_eq!(
-            disabled_guard_fields.message.as_deref(),
-            Some("Tor disabled an unstable guard")
-        );
-        assert_eq!(
-            disabled_guard_fields.fields,
-            vec![("failure_rate".to_owned(), "72.5%".to_owned())]
-        );
-    }
-
-    #[test]
-    fn rewrites_common_tor_directory_messages() {
-        let fields = rewrite_for_test(
-            "tor_dirmgr::bootstrap",
-            "Error while adding directory info",
-            &[(
-                "error",
-                "Invalid document from directory server [scrubbed] via Circ 8.98",
-            )],
-        );
-        assert_eq!(
-            fields.message.as_deref(),
-            Some("Tor directory update failed")
-        );
-        assert_eq!(
-            fields.fields,
-            vec![(
-                "reason".to_owned(),
-                "directory server sent invalid data".to_owned()
-            )]
-        );
-
-        let bootstrap_failure_fields = rewrite_for_test(
-            "tor_dirmgr::bootstrap",
-            "We failed 3 times to bootstrap a directory. We're going to give up.",
-            &[],
-        );
-        assert_eq!(
-            bootstrap_failure_fields.message.as_deref(),
-            Some("Tor directory bootstrap failed")
-        );
-        assert_eq!(
-            bootstrap_failure_fields.fields,
-            vec![("attempts".to_owned(), "3".to_owned())]
-        );
-    }
-
-    #[test]
-    fn rewrites_common_onion_and_circuit_messages() {
-        let fields = rewrite_for_test(
-            "tor_circmgr::hspool",
-            "Too many preemptive onion service circuits failed; waiting a while.",
-            &[],
-        );
-        assert_eq!(
-            fields.message.as_deref(),
-            Some("Tor onion-service circuits are failing; waiting before retrying")
-        );
-
-        let circuit_fields = rewrite_for_test(
-            "tor_proto::client::reactor",
-            "removing circuit leg",
-            &[("tunnel_id", "Circ 8.98"), ("reason", "closed")],
-        );
-        assert_eq!(
-            circuit_fields.message.as_deref(),
-            Some("Tor circuit closed")
-        );
-        assert_eq!(
-            circuit_fields.fields,
-            vec![("reason".to_owned(), "closed".to_owned())]
-        );
-    }
-
-    #[test]
-    fn suppresses_repetitive_onion_retry_warning() {
-        let mut fields = LogEventFields {
-            message: Some(
-                "Too many preemptive onion service circuits failed; waiting a while.".to_owned(),
-            ),
-            fields: Vec::new(),
-        };
-        rewrite_message("tor_circmgr::hspool", Some("src/logging.rs"), &mut fields);
-        assert!(super::should_suppress_event("tor_circmgr::hspool", &fields));
-    }
-
-    #[test]
-    fn detects_tor_descriptor_upload_timeout_warning_only() {
-        let fields = rewrite_for_test(
-            "tor_hsservice::publish",
-            "Failed to upload descriptor for service rustchan (redacted) - error: Timeout exceeded",
-            &[],
-        );
-        assert!(is_tor_descriptor_upload_timeout_event(
-            "tor_hsservice::publish",
-            &fields
-        ));
-
-        let non_timeout = rewrite_for_test(
-            "tor_hsservice::publish",
-            "Failed to upload descriptor for service rustchan (redacted) - error: permission denied",
-            &[],
-        );
-        assert!(!is_tor_descriptor_upload_timeout_event(
-            "tor_hsservice::publish",
-            &non_timeout
-        ));
-
-        let unrelated_tor_warning = rewrite_for_test(
-            "tor_circmgr::mgr",
-            "All tunnel attempts failed due to timeout",
-            &[],
-        );
-        assert!(!is_tor_descriptor_upload_timeout_event(
-            "tor_circmgr::mgr",
-            &unrelated_tor_warning
-        ));
-    }
-
-    #[test]
-    fn rate_limits_repeated_tor_descriptor_upload_timeout_warnings() {
-        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_mins(10));
-        let start = Instant::now();
-
-        assert_eq!(
-            limiter.decide_once(start),
-            TorDescriptorTimeoutDecision::EmitOriginal
-        );
-        assert_eq!(
-            limiter.decide_once(start + Duration::from_secs(1)),
-            TorDescriptorTimeoutDecision::Suppress
-        );
-        assert_eq!(
-            limiter.decide_once(start + Duration::from_secs(2)),
-            TorDescriptorTimeoutDecision::Suppress
-        );
-        assert_eq!(
-            limiter.decide_once(start + Duration::from_secs(601)),
-            TorDescriptorTimeoutDecision::EmitSummary {
-                suppressed: 2,
-                window: Duration::from_mins(10),
-            }
-        );
-        assert_eq!(
-            limiter.decide_once(start + Duration::from_secs(602)),
-            TorDescriptorTimeoutDecision::Suppress
-        );
-    }
-
-    #[test]
-    fn rate_limiter_reuses_decision_for_second_formatter() {
-        let mut limiter = TorDescriptorTimeoutLimiter::new(Duration::from_mins(10));
-        let start = Instant::now();
-
-        assert_eq!(
-            limiter.decide(start),
-            TorDescriptorTimeoutDecision::EmitOriginal
-        );
-        assert_eq!(
-            limiter.decide(start),
-            TorDescriptorTimeoutDecision::EmitOriginal
-        );
-        assert_eq!(
-            limiter.decide(start + Duration::from_secs(1)),
-            TorDescriptorTimeoutDecision::Suppress
-        );
-        assert_eq!(
-            limiter.decide(start + Duration::from_secs(1)),
-            TorDescriptorTimeoutDecision::Suppress
-        );
-        assert_eq!(limiter.suppressed, 1);
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "assertion failures are the intended failure mechanism for this test"
-    )]
-    /// Reads only the newest suffix of a log file.
-    fn log_tail_reads_only_the_configured_suffix() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("rustchan.log");
-        std::fs::write(&path, "discard-this-line\nkeep-one\nkeep-two\n")?;
-
-        let (tail, truncated) = read_log_tail(&path, 20).map_err(anyhow::Error::msg)?;
-
-        assert!(truncated, "a short byte limit should report truncation");
-        assert!(
-            !tail.contains("discard"),
-            "discarded prefix should not be loaded"
-        );
-        assert!(
-            tail.contains("keep-two"),
-            "newest complete line should remain"
-        );
-        Ok(())
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "assertions verify exact-boundary tail reads"
-    )]
-    /// Keeps a complete UTF-8 line that starts exactly at the read boundary.
-    fn log_tail_keeps_a_complete_line_at_the_byte_limit() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("rustchan.log");
-        std::fs::write(&path, "old\n界-new\n")?;
-        let (tail, truncated) =
-            read_log_tail(&path, "界-new\n".len()).map_err(anyhow::Error::msg)?;
-        assert!(truncated, "prefix must be marked omitted");
-        assert_eq!(
-            tail, "界-new\n",
-            "a complete UTF-8 line at the read boundary must survive"
-        );
-        Ok(())
-    }
-}
+#[path = "logging/tests/regressions.rs"]
+mod tests;

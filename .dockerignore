@@ -15,11 +15,7 @@ settings.toml
 *.key
 *.p12
 *.pfx
-node_modules
 output
-playwright-report
-test-results
-.playwright-cli
 .codex-pet-runs
 .DS_Store
 .idea
@@ -28,9 +24,5 @@ test-results
 *.tmp
 *.log
 docs
-tests
 *.md
-package.json
-package-lock.json
-playwright*.config.*
 deny.toml

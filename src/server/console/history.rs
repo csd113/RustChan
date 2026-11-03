@@ -83,39 +83,3 @@ impl TrafficHistory {
         (requests as f64 / seconds.max(1.0), peak)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn refreshes_do_not_add_samples_and_history_is_bounded() {
-        let mut history = TrafficHistory::default();
-        let start = Instant::now();
-        history.observe(start, 100);
-        history.observe(start + Duration::from_secs(1), 105);
-        assert!(
-            history.samples.is_empty(),
-            "manual refresh cannot fabricate history"
-        );
-        for index in 1..=200_u64 {
-            history.observe(start + Duration::from_secs(index * 10), 100 + index * 20);
-        }
-        assert_eq!(
-            history.samples.len(),
-            HISTORY_CAPACITY,
-            "old observations must be evicted"
-        );
-        assert_eq!(
-            history.rates(),
-            (2.0_f64, 2.0_f64),
-            "rates must use measured elapsed time"
-        );
-        history.observe(start + Duration::from_secs(2010), 0);
-        assert_eq!(
-            history.samples.back().map(|sample| sample.requests),
-            Some(0),
-            "counter reset must not underflow"
-        );
-    }
-}

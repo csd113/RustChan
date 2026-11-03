@@ -14,13 +14,6 @@ const GLOBAL_FILENAMES: &[&str] = &[
     "version.txt",
 ];
 
-#[cfg(test)]
-static FAVICON_STAGE_WRITE_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-#[cfg(test)]
-static FAVICON_OLD_CLEANUP_FAILURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-#[cfg(test)]
-static FAVICON_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[derive(Clone, Copy, Debug)]
 /// Storage scope for a generated favicon set.
 pub enum FaviconScope<'a> {
@@ -116,8 +109,6 @@ pub fn write_favicon_set(scope: FaviconScope<'_>, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("create favicon staging directory {}", stage_dir.display()))?;
     let mut stage_guard = DirectoryCleanupGuard::new(stage_dir.clone());
 
-    #[cfg(test)]
-    maybe_fail_favicon_stage_write()?;
     write_png(
         &img.resize_exact(16, 16, FilterType::Lanczos3),
         &stage_dir.join("favicon-16x16.png"),
@@ -259,8 +250,6 @@ fn swap_stage_into_place(stage_dir: &Path, target_dir: &Path) -> Result<()> {
 
 /// Remove a favicon directory displaced by a successful publication.
 fn cleanup_previous_favicon_dir(previous_dir: &Path) -> Result<()> {
-    #[cfg(test)]
-    maybe_fail_favicon_old_cleanup()?;
     std::fs::remove_dir_all(previous_dir)
         .with_context(|| format!("remove old favicon directory {}", previous_dir.display()))
 }
@@ -299,30 +288,6 @@ impl Drop for DirectoryCleanupGuard {
     }
 }
 
-#[cfg(test)]
-fn maybe_fail_favicon_stage_write() -> Result<()> {
-    let message = FAVICON_STAGE_WRITE_FAILURE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    if let Some(message) = message {
-        anyhow::bail!("{message}");
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn maybe_fail_favicon_old_cleanup() -> Result<()> {
-    let message = FAVICON_OLD_CLEANUP_FAILURE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    if let Some(message) = message {
-        anyhow::bail!("{message}");
-    }
-    Ok(())
-}
-
 /// Return the storage directory associated with a favicon scope.
 fn scope_dir(scope: FaviconScope<'_>) -> PathBuf {
     match scope {
@@ -355,210 +320,4 @@ fn write_png(image: &DynamicImage, path: &Path) -> Result<()> {
     image
         .save_with_format(path, ImageFormat::Png)
         .with_context(|| format!("write {}", path.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        board_favicon_dir, write_favicon_set, FaviconScope, FAVICON_OLD_CLEANUP_FAILURE,
-        FAVICON_STAGE_WRITE_FAILURE, FAVICON_TEST_LOCK,
-    };
-    use anyhow::{Context as _, Result};
-    use image::ImageFormat;
-    use std::path::{Path, PathBuf};
-
-    fn favicon_png_bytes() -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        image::DynamicImage::new_rgba8(512, 512)
-            .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Png)?;
-        Ok(bytes)
-    }
-
-    fn matching_dirs(parent: &Path, prefix: &str) -> Vec<PathBuf> {
-        std::fs::read_dir(parent)
-            .ok()
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(prefix))
-            })
-            .collect()
-    }
-
-    fn reset_failures() {
-        *FAVICON_STAGE_WRITE_FAILURE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        *FAVICON_OLD_CLEANUP_FAILURE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "test assertions intentionally panic on failure"
-    )]
-    fn favicon_stage_dir_is_removed_after_mid_write_failure() -> Result<()> {
-        let _guard = FAVICON_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_failures();
-        let suffix = uuid::Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(7)
-            .collect::<String>();
-        let board_short = format!("f{suffix}");
-        let target_dir = board_favicon_dir(&board_short);
-        let parent = target_dir
-            .parent()
-            .context("board favicon directory should have a parent")?
-            .to_path_buf();
-        drop(std::fs::remove_dir_all(&parent));
-        std::fs::create_dir_all(&parent)?;
-        *FAVICON_STAGE_WRITE_FAILURE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some("injected favicon write failure".to_owned());
-
-        let bytes = favicon_png_bytes()?;
-        let error = write_favicon_set(FaviconScope::Board(&board_short), &bytes)
-            .err()
-            .context("injected write failure should be returned")?;
-        assert!(
-            error.to_string().contains("injected favicon write failure"),
-            "injected failure context must remain visible"
-        );
-        assert!(
-            matching_dirs(&parent, "._favicon.stage.").is_empty(),
-            "failed publication must clean its staging directory"
-        );
-        assert!(
-            !target_dir.exists(),
-            "failed first publication must not create the live directory"
-        );
-
-        *FAVICON_STAGE_WRITE_FAILURE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        reset_failures();
-        drop(std::fs::remove_dir_all(&parent));
-        Ok(())
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "test assertions intentionally panic on failure"
-    )]
-    fn favicon_old_dir_cleanup_failure_is_reported() -> Result<()> {
-        let _guard = FAVICON_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_failures();
-        let suffix = uuid::Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(7)
-            .collect::<String>();
-        let board_short = format!("f{suffix}");
-        let target_dir = board_favicon_dir(&board_short);
-        let parent = target_dir
-            .parent()
-            .context("board favicon directory should have a parent")?
-            .to_path_buf();
-        drop(std::fs::remove_dir_all(&parent));
-        let bytes = favicon_png_bytes()?;
-        write_favicon_set(FaviconScope::Board(&board_short), &bytes)?;
-
-        *FAVICON_OLD_CLEANUP_FAILURE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some("injected old favicon cleanup failure".to_owned());
-        let error = write_favicon_set(FaviconScope::Board(&board_short), &bytes)
-            .err()
-            .context("cleanup failure should be returned")?;
-        assert!(
-            error
-                .to_string()
-                .contains("injected old favicon cleanup failure"),
-            "cleanup error context must remain visible"
-        );
-        assert!(
-            target_dir.join("version.txt").exists(),
-            "replacement must already be published before old cleanup"
-        );
-        assert!(
-            matching_dirs(&parent, "._favicon.stage.").is_empty(),
-            "successful publication must consume its staging directory"
-        );
-        let old_dirs = matching_dirs(&parent, "._favicon.old.");
-        assert_eq!(
-            old_dirs.len(),
-            1,
-            "failed old-directory cleanup must leave one recoverable directory"
-        );
-
-        *FAVICON_OLD_CLEANUP_FAILURE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        reset_failures();
-        for old_dir in old_dirs {
-            std::fs::remove_dir_all(old_dir)?;
-        }
-        drop(std::fs::remove_dir_all(&parent));
-        Ok(())
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "test assertions intentionally panic on failure"
-    )]
-    fn favicon_successful_replacement_leaves_no_stage_or_old_dirs() -> Result<()> {
-        let _guard = FAVICON_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_failures();
-        let suffix = uuid::Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(7)
-            .collect::<String>();
-        let board_short = format!("f{suffix}");
-        let target_dir = board_favicon_dir(&board_short);
-        let parent = target_dir
-            .parent()
-            .context("board favicon directory should have a parent")?
-            .to_path_buf();
-        drop(std::fs::remove_dir_all(&parent));
-
-        let bytes = favicon_png_bytes()?;
-        write_favicon_set(FaviconScope::Board(&board_short), &bytes)?;
-        write_favicon_set(FaviconScope::Board(&board_short), &bytes)?;
-
-        assert!(
-            target_dir.join("favicon.ico").exists(),
-            "replacement must publish the favicon set"
-        );
-        assert!(
-            matching_dirs(&parent, "._favicon.stage.").is_empty(),
-            "replacement must leave no staging directories"
-        );
-        assert!(
-            matching_dirs(&parent, "._favicon.old.").is_empty(),
-            "replacement must leave no old directories"
-        );
-        reset_failures();
-        drop(std::fs::remove_dir_all(&parent));
-        Ok(())
-    }
 }

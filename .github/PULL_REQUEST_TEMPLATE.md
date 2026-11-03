@@ -12,7 +12,7 @@ State "None" where appropriate.
 
 ## Validation
 
-<!-- List exact commands run, focused tests, and results. -->
+<!-- List exact validation commands run and results. -->
 
 ## Checklist
 
@@ -20,10 +20,11 @@ State "None" where appropriate.
 - [ ] I have not included credentials, private keys, databases, backups, logs,
       private media, personal information, sensitive instance data, runtime
       data, or large generated artifacts.
-- [ ] Tests cover changed behavior and relevant failure paths, or I have
-      explained why no test applies.
-- [ ] Formatting, Clippy, Rust tests, and/or focused Playwright checks were run
-      as appropriate to the change.
+- [ ] Any new test protects essential behavior or a confirmed regression; its
+      failure, need, maintenance cost, execution cost, and subsystem discovery
+      wiring are explained.
+- [ ] Formatting, Clippy, builds, and applicable disposable runtime smoke checks
+      were run.
 - [ ] Documentation and the top `CHANGELOG.md` section were updated when
       behavior, configuration, deployment, or operator expectations changed.
 - [ ] Schema changes use a forward migration and cover fresh, upgrade, failure,

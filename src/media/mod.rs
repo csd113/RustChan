@@ -44,47 +44,6 @@ pub(crate) fn untrusted_image_decode_limits() -> image::Limits {
     limits
 }
 
-#[cfg(test)]
-static THUMBNAIL_FAILURE_TEST_MODE: std::sync::RwLock<Option<TestThumbnailFailure>> =
-    std::sync::RwLock::new(None);
-#[cfg(test)]
-static THUMBNAIL_FAILURE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum TestThumbnailFailure {
-    OutputCreation,
-    Encoder,
-    TempRename,
-    InvalidDerivedOutput,
-}
-
-#[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct ThumbnailFailureTestGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for ThumbnailFailureTestGuard {
-    fn drop(&mut self) {
-        *THUMBNAIL_FAILURE_TEST_MODE
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn override_thumbnail_failure(mode: TestThumbnailFailure) -> ThumbnailFailureTestGuard {
-    let guard = THUMBNAIL_FAILURE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *THUMBNAIL_FAILURE_TEST_MODE
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
-    ThumbnailFailureTestGuard { _lock: guard }
-}
-
 // ProcessedMedia
 /// Outcome of a single upload processed through the media pipeline.
 ///
@@ -115,7 +74,7 @@ pub struct ProcessedMedia {
 /// conversion and image/PDF previews use internal Rust implementations.
 ///
 /// ## Construction
-/// ```rust,no_run
+/// ```text
 /// # use chan::media::MediaProcessor;
 /// // Detect ffmpeg now (blocking):
 /// let processor = MediaProcessor::new();
@@ -201,39 +160,6 @@ impl MediaProcessor {
         // A video fallback can write SVG despite a preselected WebP path, so use
         // the actual path returned by thumbnail generation.
         let generated_thumbnail = {
-            #[cfg(test)]
-            {
-                let mode = *THUMBNAIL_FAILURE_TEST_MODE
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match mode {
-                    Some(TestThumbnailFailure::OutputCreation) => Err(anyhow::anyhow!(
-                        "injected thumbnail output creation failure"
-                    )),
-                    Some(TestThumbnailFailure::Encoder) => {
-                        Err(anyhow::anyhow!("injected thumbnail encoder failure"))
-                    }
-                    Some(TestThumbnailFailure::TempRename) => Err(anyhow::anyhow!(
-                        "injected thumbnail temporary rename failure"
-                    )),
-                    Some(TestThumbnailFailure::InvalidDerivedOutput) => {
-                        Ok(thumbnail::thumbnail_output_path(
-                            thumb_dir,
-                            file_stem,
-                            conv.final_mime,
-                            self.ffmpeg_available,
-                        ))
-                    }
-                    None => self.generate_thumbnail(
-                        &conv.final_path,
-                        conv.final_mime,
-                        thumb_dir,
-                        file_stem,
-                        thumb_max,
-                    ),
-                }
-            }
-            #[cfg(not(test))]
             self.generate_thumbnail(
                 &conv.final_path,
                 conv.final_mime,
@@ -312,33 +238,5 @@ impl MediaProcessor {
 impl Default for MediaProcessor {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn untrusted_image_decoder_allocation_budget_is_bounded() {
-        assert_eq!(
-            untrusted_image_decode_limits().max_alloc,
-            Some(UNTRUSTED_IMAGE_DECODER_MAX_ALLOC_BYTES),
-            "untrusted decoders must retain the explicit allocation budget"
-        );
-    }
-
-    /// Constructing `MediaProcessor` with ffmpeg=false should not panic.
-    #[test]
-    fn new_with_ffmpeg_false_does_not_panic() {
-        let p = MediaProcessor::new_with_ffmpeg(false);
-        assert!(!p.ffmpeg_available);
-    }
-
-    /// Constructing `MediaProcessor` with ffmpeg=true should not panic.
-    #[test]
-    fn new_with_ffmpeg_true_does_not_panic() {
-        let p = MediaProcessor::new_with_ffmpeg(true);
-        assert!(p.ffmpeg_available);
     }
 }

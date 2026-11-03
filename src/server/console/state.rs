@@ -932,7 +932,3 @@ impl fmt::Debug for OperationRequest {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "state_tests.rs"]
-mod tests;

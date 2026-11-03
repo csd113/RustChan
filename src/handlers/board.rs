@@ -17,9 +17,7 @@ use crate::{
     middleware::{validate_csrf, validate_signed_csrf, AppState, SecureCookieContext},
     models::{Board, Pagination, SearchQuery, SEARCH_QUERY_MAX_CHARS},
     templates,
-    utils::crypto::{
-        hash_ip, make_scoped_csrf_form_token, new_csrf_token, sha256_hex, verify_password,
-    },
+    utils::crypto::{hash_ip, make_scoped_csrf_form_token, new_csrf_token, sha256_hex},
 };
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
@@ -29,21 +27,17 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 use time::Duration;
 
+mod access;
 mod access_preferences;
-#[cfg(test)]
-mod action_tests;
 mod catalog;
 mod create_thread;
 mod media;
 mod pages;
 mod reports;
-#[cfg(test)]
-mod tests;
 
+pub(in crate::server) use access::*;
 pub(in crate::server) use access_preferences::*;
 pub(in crate::server) use catalog::*;
 pub(in crate::server) use create_thread::*;
@@ -82,50 +76,10 @@ const NSFW_CONSENT_COOKIE: &str = "rustchan_nsfw_ok";
 const VISITOR_ID_COOKIE: &str = "rustchan_visitor_id";
 /// Admin session cookie used by this handler.
 pub(in crate::server) const ADMIN_SESSION_COOKIE: &str = "chan_admin_session";
-/// Board access cookie prefix used by this handler.
-const BOARD_ACCESS_COOKIE_PREFIX: &str = "rustchan_board_access_";
-/// Board access cookie TTL days used by this handler.
-fn board_access_cookie_days() -> i64 {
-    CONFIG.operator.board_access_cookie_days
-}
-/// Board unlock fail limit used by this handler.
-fn board_password_fail_limit() -> u32 {
-    CONFIG.operator.board_password_fail_limit
-}
-/// Board unlock fail window secs used by this handler.
-fn board_password_fail_window_secs() -> u64 {
-    CONFIG.operator.board_password_fail_window_secs
-}
 /// HTML cache control used by this handler.
 const HTML_CACHE_CONTROL: &str = crate::cache::CACHE_CONTROL_DYNAMIC_PUBLIC;
 /// X rustchan redirect header used by this handler.
 const X_RUSTCHAN_REDIRECT_HEADER: &str = "x-rustchan-redirect";
-
-/// Bounded board-password failure state, independent of public visitor cookies.
-static BOARD_UNLOCK_FAILS: LazyLock<crate::middleware::RateTable> =
-    LazyLock::new(crate::middleware::RateTable::default);
-
-pub(super) struct BoardAccessContext {
-    pub board: Board,
-    pub is_admin: bool,
-    pub can_view: bool,
-    pub can_post: bool,
-}
-
-pub(super) enum BoardAccessRequirement {
-    View,
-    Post,
-}
-
-pub(super) struct BoardAccessDenial {
-    pub context: BoardAccessContext,
-    pub return_to: String,
-}
-
-pub(super) enum BoardAccessDecision {
-    Allowed(BoardAccessContext),
-    Denied(BoardAccessDenial),
-}
 
 type CatalogRenderData = (
     Board,
@@ -370,29 +324,7 @@ pub(super) fn check_menu_action_csrf(
     if cookie.is_some() && !cookie_bound {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
-    let fetch_site = headers
-        .get("sec-fetch-site")
-        .and_then(|value| value.to_str().ok());
-    if fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("cross-site")) {
-        return Err(AppError::Forbidden("Cross-site action denied.".into()));
-    }
-    let null_origin_without_referer = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        == Some("null")
-        && !headers.contains_key(header::REFERER);
-    if null_origin_without_referer {
-        // The site's no-referrer policy makes native form POSTs send Origin:
-        // null in supported browsers. Fetch metadata or a bound Strict cookie
-        // distinguishes these from a cross-site signed-token replay.
-        if cookie_bound || fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
-        {
-            return Ok(());
-        }
-        return Err(AppError::Forbidden("Cross-site action denied.".into()));
-    }
-    crate::handlers::admin::require_same_origin_or_valid_csrf(headers, peer.peer, cookie_bound)
+    crate::handlers::admin::require_same_origin_request(headers, peer)
 }
 
 pub(super) fn admin_scoped_csrf_token(
@@ -418,60 +350,6 @@ pub(super) fn admin_scoped_csrf_token(
 fn has_nsfw_consent(jar: &CookieJar) -> bool {
     jar.get(NSFW_CONSENT_COOKIE)
         .is_some_and(|cookie| cookie.value() == "1")
-}
-
-fn board_access_cookie_name(board_short: &str) -> String {
-    format!("{BOARD_ACCESS_COOKIE_PREFIX}{board_short}")
-}
-
-pub(super) fn board_access_cookie_from_jar(jar: &CookieJar, board_short: &str) -> Option<String> {
-    let cookie_name = board_access_cookie_name(board_short);
-    jar.get(cookie_name.as_str())
-        .map(|cookie| cookie.value().to_owned())
-}
-
-fn expected_board_access_cookie_value(board_short: &str, password_hash: &str) -> Option<String> {
-    if password_hash.is_empty() {
-        return None;
-    }
-    Some(sha256_hex(
-        format!(
-            "{}:board-access:{board_short}:{password_hash}",
-            CONFIG.cookie_secret
-        )
-        .as_bytes(),
-    ))
-}
-
-fn has_valid_board_access_cookie(
-    board_short: &str,
-    password_hash: &str,
-    cookie_value: Option<&str>,
-) -> bool {
-    let Some(expected) = expected_board_access_cookie_value(board_short, password_hash) else {
-        return false;
-    };
-    cookie_value.is_some_and(|value| value == expected)
-}
-
-fn can_view_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
-    is_admin
-        || !board.access_mode.requires_view_password()
-        || has_valid_board_access_cookie(
-            &board.short_name,
-            &board.access_password_hash,
-            access_cookie,
-        )
-}
-
-fn can_post_to_board(board: &Board, is_admin: bool, access_cookie: Option<&str>) -> bool {
-    is_admin
-        || !board.access_mode.requires_unlock_for_posting()
-        || has_valid_board_access_cookie(
-            &board.short_name,
-            &board.access_password_hash,
-            access_cookie,
-        )
 }
 
 /// Normalize a stored ban reason for display.
@@ -506,113 +384,18 @@ pub(super) fn actor_ban_reason(
 pub(super) fn ensure_actor_not_banned(
     conn: &rusqlite::Connection,
     ip_hash: &str,
-    ban_csrf_token: String,
+    ban_csrf_token: &str,
 ) -> Result<()> {
     if let Some(reason) = actor_ban_reason(conn, ip_hash)? {
         return Err(AppError::BannedUser {
             reason,
-            csrf_token: ban_csrf_token,
+            csrf_token: crate::utils::crypto::make_csrf_form_token(
+                ban_csrf_token,
+                &CONFIG.cookie_secret,
+            ),
         });
     }
     Ok(())
-}
-
-pub(super) fn load_board_access_context(
-    conn: &rusqlite::Connection,
-    board_short: &str,
-    admin_session_id: Option<&str>,
-    access_cookie: Option<&str>,
-) -> Result<BoardAccessContext> {
-    let board = db::get_board_by_short(conn, board_short)?
-        .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
-    let is_admin = posting::is_admin_session(conn, admin_session_id);
-    Ok(BoardAccessContext {
-        can_view: can_view_board(&board, is_admin, access_cookie),
-        can_post: can_post_to_board(&board, is_admin, access_cookie),
-        board,
-        is_admin,
-    })
-}
-
-pub(super) async fn board_access_preflight(
-    state: &AppState,
-    board_short: &str,
-    admin_session_id: Option<String>,
-    access_cookie: Option<String>,
-    requirement: BoardAccessRequirement,
-    return_to: String,
-) -> Result<BoardAccessDecision> {
-    let access_context = tokio::task::spawn_blocking({
-        let pool = state.db.clone();
-        let board_short = board_short.to_owned();
-        move || -> Result<BoardAccessContext> {
-            let conn = pool.get()?;
-            load_board_access_context(
-                &conn,
-                &board_short,
-                admin_session_id.as_deref(),
-                access_cookie.as_deref(),
-            )
-        }
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))??;
-
-    let allowed = match requirement {
-        BoardAccessRequirement::View => access_context.can_view,
-        BoardAccessRequirement::Post => access_context.can_post,
-    };
-
-    if allowed {
-        Ok(BoardAccessDecision::Allowed(access_context))
-    } else {
-        Ok(BoardAccessDecision::Denied(BoardAccessDenial {
-            context: access_context,
-            return_to,
-        }))
-    }
-}
-
-pub(super) fn unlock_redirect_url(board_short: &str, return_to: &str) -> String {
-    format!(
-        "/{board_short}/unlock?return_to={}",
-        templates::urlencoding_simple(return_to)
-    )
-}
-
-pub(super) fn render_board_unlock_html(
-    board: &Board,
-    csrf_token: &str,
-    return_to: &str,
-    error: Option<&str>,
-    current_theme: Option<&str>,
-) -> String {
-    let boards = templates::live_boards();
-    templates::board_access_page(
-        board,
-        csrf_token,
-        boards.as_ref(),
-        return_to,
-        error,
-        current_theme,
-        board.collapse_greentext,
-    )
-}
-
-pub(super) fn board_access_denied_response(
-    jar: CookieJar,
-    denial: &BoardAccessDenial,
-    csrf_token: &str,
-    current_theme: Option<&str>,
-) -> Response {
-    let html = render_board_unlock_html(
-        &denial.context.board,
-        csrf_token,
-        &denial.return_to,
-        None,
-        current_theme,
-    );
-    board_access_required_response(jar, html)
 }
 
 pub(in crate::server) async fn banned_page(
@@ -637,111 +420,6 @@ pub(in crate::server) async fn banned_page(
     let theme = current_theme_from_jar(&jar);
     let html = templates::ban_page_with_theme(&reason, &csrf, theme.as_deref(), None);
     (jar, Html(html)).into_response()
-}
-
-fn board_unlock_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn board_unlock_attempt_key(board_short: &str, client_ip: &str) -> String {
-    sha256_hex(format!("{board_short}:{client_ip}").as_bytes())
-}
-
-/// Return the remaining lockout or saturation interval.
-fn board_unlock_retry_after_secs(attempt_key: &str) -> Option<u64> {
-    BOARD_UNLOCK_FAILS.retry_after(
-        attempt_key,
-        board_unlock_now_secs(),
-        board_password_fail_limit(),
-    )
-}
-
-/// Record one failed password attempt without unbounded retained identity growth.
-fn record_board_unlock_failure(attempt_key: &str) -> u32 {
-    BOARD_UNLOCK_FAILS.record(
-        attempt_key,
-        board_unlock_now_secs(),
-        board_password_fail_window_secs(),
-    )
-}
-
-/// Remove an authenticated client's failure counter.
-fn clear_board_unlock_failures(attempt_key: &str) {
-    BOARD_UNLOCK_FAILS.remove(attempt_key);
-}
-
-fn board_unlock_rate_limit_message(retry_after_secs: u64) -> String {
-    let minutes = retry_after_secs / 60;
-    let seconds = retry_after_secs % 60;
-    if minutes > 0 && seconds > 0 {
-        format!(
-            "Too many incorrect board password attempts. Try again in {minutes} minute{} and {seconds} second{}.",
-            if minutes == 1 { "" } else { "s" },
-            if seconds == 1 { "" } else { "s" }
-        )
-    } else if minutes > 0 {
-        format!(
-            "Too many incorrect board password attempts. Try again in {minutes} minute{}.",
-            if minutes == 1 { "" } else { "s" }
-        )
-    } else {
-        format!(
-            "Too many incorrect board password attempts. Try again in {retry_after_secs} second{}.",
-            if retry_after_secs == 1 { "" } else { "s" }
-        )
-    }
-}
-
-fn board_unlock_default_return_to(board: &Board) -> String {
-    if board.access_mode.requires_view_password() {
-        format!("/{}/catalog", board.short_name)
-    } else {
-        format!("/{}", board.short_name)
-    }
-}
-
-fn board_access_page_response(
-    jar: CookieJar,
-    html: String,
-    status: StatusCode,
-    retry_after_secs: Option<u64>,
-) -> Response {
-    let mut resp = Html(html).into_response();
-    *resp.status_mut() = status;
-    drop(resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(crate::cache::CACHE_CONTROL_PRIVATE_NO_STORE),
-    ));
-    if let Some(retry_after_secs) = retry_after_secs {
-        if let Ok(retry_after) = HeaderValue::from_str(&retry_after_secs.to_string()) {
-            drop(resp.headers_mut().insert(header::RETRY_AFTER, retry_after));
-        }
-    }
-    (jar, resp).into_response()
-}
-
-pub(super) fn board_access_required_response(jar: CookieJar, html: String) -> Response {
-    board_access_page_response(jar, html, StatusCode::FORBIDDEN, None)
-}
-
-fn board_access_ok_response(jar: CookieJar, html: String) -> Response {
-    board_access_page_response(jar, html, StatusCode::OK, None)
-}
-
-fn board_access_rate_limited_response(
-    jar: CookieJar,
-    html: String,
-    retry_after_secs: u64,
-) -> Response {
-    board_access_page_response(
-        jar,
-        html,
-        StatusCode::TOO_MANY_REQUESTS,
-        Some(retry_after_secs),
-    )
 }
 
 fn safe_return_to(path: Option<&str>, fallback: &str) -> String {

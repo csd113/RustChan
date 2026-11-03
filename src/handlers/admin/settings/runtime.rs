@@ -14,25 +14,25 @@ pub(in crate::server) async fn update_runtime_settings(
     Path(section): Path<RuntimeSection>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BTreeMap<String, String>>,
 ) -> Result<Response> {
     require_admin_post_origin_and_csrf(
         &jar,
         &headers,
-        Some(peer),
+        secure_context,
         form.get("_csrf").map(String::as_str),
     )?;
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    tokio::task::spawn_blocking(move || -> Result<Response> {
+    crate::middleware::data_access::spawn_blocking(move || -> Result<Response> {
         let conn = state.db.get()?;
         require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
         let save_result = crate::config::admin::runtime::save_section(section, &form);
         match save_result {
-            Ok(()) => Ok(admin_panel_redirect_anchor(if crate::config::admin::restart_pending().unwrap_or(true) { "Settings saved. Restart required: use Restart RustChan to apply these changes." } else { "Settings saved. No restart is required for the effective configuration." }, section.key()).into_response()),
+            Ok(()) => Ok(admin_panel_redirect_anchor(if crate::config::admin::restart_pending().unwrap_or(true) { "Settings saved. Stop and start RustChan using your usual launcher or service manager to apply these changes." } else { "Settings saved. No restart is required for the effective configuration." }, section.key()).into_response()),
             Err(error) => {
                 let mut fields = crate::config::admin::runtime::section_snapshot(section).map_err(|snapshot_error| { tracing::warn!(error = %snapshot_error, "operator settings snapshot unavailable"); "unavailable".to_owned() });
                 if let Ok(fields) = &mut fields {

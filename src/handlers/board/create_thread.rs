@@ -103,7 +103,9 @@ pub(in crate::server) async fn create_thread(
 
     // Clones kept outside the closure so we can re-render the board page inline on error.
     let admin_session_err = admin_session_id.clone();
-    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
+    let csrf_for_error = csrf_cookie
+        .clone()
+        .unwrap_or_else(crate::utils::crypto::new_csrf_token);
 
     let board_short_err = board_short.clone();
     let identity_key = identity_key(&client_ip, &jar);
@@ -125,7 +127,7 @@ pub(in crate::server) async fn create_thread(
         captcha_id,
         captcha_answer,
     } = form;
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let job_queue = std::sync::Arc::clone(&state.job_queue);
         let ffmpeg_available = state.ffmpeg_available;
@@ -194,7 +196,7 @@ pub(in crate::server) async fn create_thread(
             let pool = state.db.clone();
             let current_theme = current_theme.clone();
             let viewer_key = super::viewer_preference_key(&client_ip, &jar);
-            let html = tokio::task::spawn_blocking(move || -> Result<String> {
+            let html = crate::middleware::data_access::spawn_blocking(move || -> Result<String> {
                 let conn = pool.get()?;
                 // Error re-render only: resolve the board for this request.
                 let board =
@@ -235,7 +237,10 @@ pub(in crate::server) async fn create_thread(
                 };
                 Ok(render::render_board_page(
                     &page_data,
-                    &csrf_for_error,
+                    &crate::utils::crypto::make_csrf_form_token(
+                        &csrf_for_error,
+                        &CONFIG.cookie_secret,
+                    ),
                     admin_csrf_for_error.as_deref(),
                     Some(&msg),
                     Some(&post_form_state),

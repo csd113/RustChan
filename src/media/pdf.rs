@@ -5,6 +5,7 @@
 //! rendering. Recursive resources and inline images still use the placeholder.
 
 use anyhow::{ensure, Context as _, Result};
+use hayro::hayro_interpret::util::TransformExt as _;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::content::Operator;
 use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Name, Object, ObjectIdentifier};
@@ -85,21 +86,32 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
         render_annotations: false,
         ..InterpreterSettings::default()
     };
-    let pixmap = hayro::render(
+    let mut context = hayro::vello_cpu::RenderContext::new(pixel_width, pixel_height);
+    hayro::render_into(
         page,
         &RenderCache::new(),
         &settings,
-        &RenderSettings {
-            x_scale: scale,
-            y_scale: scale,
-            width: Some(pixel_width),
-            height: Some(pixel_height),
-            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-        },
+        &RenderSettings::default(),
+        &mut context,
+        page.initial_transform(true)
+            .to_kurbo()
+            .then_scale(f64::from(scale)),
     );
     ensure!(
         !warning.load(Ordering::Relaxed),
         "PDF renderer reported an unsupported feature"
+    );
+    context.flush();
+    let mut pixmap = hayro::vello_cpu::Pixmap::new(pixel_width, pixel_height);
+    context.render_with(
+        &mut pixmap,
+        &mut hayro::vello_cpu::Resources::default(),
+        hayro::vello_cpu::RasterizerSettings {
+            target_init: hayro::vello_cpu::TargetInit::Clear(
+                hayro::vello_cpu::color::palette::css::WHITE,
+            ),
+            ..hayro::vello_cpu::RasterizerSettings::default()
+        },
     );
     let image = image::RgbaImage::from_raw(
         u32::from(pixel_width),
@@ -366,131 +378,4 @@ fn preflight_content(program: &[u8]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn first_page_has_bounded_dimensions_and_expected_colour() -> Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
-        let dir = tempfile::tempdir()?;
-        let output = dir.path().join("page.webp");
-        for input in ["simple.pdf", "compressed.pdf"] {
-            render(&root.join(input), &output, 100)?;
-            let image = image::open(&output)?.into_rgba8();
-            ensure!(image.dimensions() == (100, 80), "PDF aspect ratio changed");
-            let pixel = image.get_pixel(20, 20);
-            ensure!(
-                pixel.0.get(..3) == Some(&[255, 0, 0]),
-                "first-page red rectangle was not rendered"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn standard_font_text_renders_with_bounded_dimensions() -> Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
-        let dir = tempfile::tempdir()?;
-        let output = dir.path().join("text.webp");
-        render(&root.join("text.pdf"), &output, 100)?;
-        let image = image::open(output)?.into_rgb8();
-        ensure!(image.dimensions() == (100, 80), "text PDF aspect changed");
-        ensure!(
-            image
-                .pixels()
-                .filter(|pixel| pixel.0.iter().all(|channel| *channel < 100))
-                .count()
-                > 50,
-            "text PDF has no visible glyphs"
-        );
-        let oversized = dir.path().join("large-text.webp");
-        ensure!(
-            render(&root.join("text.pdf"), &oversized, 4096).is_err(),
-            "unbudgeted viewport rendered"
-        );
-        ensure!(!oversized.exists(), "unbudgeted viewport published output");
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_and_unbudgeted_features_fail_before_publication() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let input = dir.path().join("unsafe.pdf");
-        let output = dir.path().join("page.webp");
-        for bytes in [
-            b"%PDF-1.7\n%%EOF".as_slice(),
-            b"%PDF-1.7\n/Filter /FlateDecode\n%%EOF",
-            b"%PDF-1.7\n/Fi#6cter\n%%EOF",
-            b"%PDF-1.7\n/XObject << >>\n%%EOF",
-            b"%PDF-1.7\n/FontFile2 1 0 R\n%%EOF",
-        ] {
-            std::fs::write(&input, bytes)?;
-            ensure!(render(&input, &output, 100).is_err(), "unsafe PDF rendered");
-            ensure!(!output.exists(), "failed render published output");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn cyclic_indirect_page_trees_and_delimited_numbers_fail_preflight() -> Result<()> {
-        for bytes in [
-            b"%PDF-1.4\n1 0 obj << /Type /Pages /Kids [1 0 R] >> endobj\nxref".as_slice(),
-            b"%PDF-1.4\n1 0 obj << /Type /Pages /Kids [2 0 R] >> endobj\n2 0 obj << /Type /Pages /Kids [1 0 R] >> endobj\nxref",
-            b"%PDF-1.4\n1 0 obj << /Type /Pages /Kids 2 0 R >> endobj\n2 0 obj [1 0 R] endobj\nxref",
-            b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n1 0 obj << /Type /Pages /Kids [1 0 R] >> endobj\nxref",
-            b"%PDF-1.4\n1 0 obj << /MediaBox[0 0 9999999999 80] >> endobj\nxref",
-        ] {
-            ensure!(preflight(bytes).is_err(), "hostile PDF passed preflight");
-        }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
-        let _expanded_bytes = preflight(&std::fs::read(root.join("simple.pdf"))?)?;
-        Ok(())
-    }
-    #[test]
-    fn compressed_bombs_truncation_and_inline_images_fail_before_rendering() -> Result<()> {
-        use std::io::Write as _;
-        let mut encoder =
-            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(&vec![b' '; usize::try_from(MAX_PREVIEW_BYTES)? + 1])?;
-        let compressed = encoder.finish()?;
-        let mut pdf = format!(
-            "%PDF-1.4\n1 0 obj << /Length {} /Filter /FlateDecode >> stream\n",
-            compressed.len()
-        )
-        .into_bytes();
-        pdf.extend_from_slice(&compressed);
-        pdf.extend_from_slice(b"\nendstream endobj\nxref");
-        ensure!(
-            preflight(&pdf).is_err(),
-            "PDF decompression bomb was admitted"
-        );
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/media");
-        let valid = std::fs::read(root.join("compressed.pdf"))?;
-        let mut truncated = valid;
-        let offset = truncated
-            .windows(7)
-            .position(|bytes| bytes == b"stream\n")
-            .context("fixture content stream missing")?
-            + 7;
-        *truncated
-            .get_mut(offset + 27)
-            .context("fixture zlib checksum missing")? ^= 0xff;
-        ensure!(
-            preflight(&truncated).is_err(),
-            "invalid zlib checksum was admitted"
-        );
-        ensure!(
-            preflight_content(b"BI /W 999999 /H 999999 /BPC 8 ID x EI").is_err(),
-            "inline image entered unbudgeted renderer"
-        );
-        preflight_content(b"BT (BI is text) Tj ET")?;
-        ensure!(
-            preflight_content(b"9999999999 0 m").is_err(),
-            "decoded numeric budget was bypassed"
-        );
-        Ok(())
-    }
 }

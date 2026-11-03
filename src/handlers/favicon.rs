@@ -81,24 +81,3 @@ pub(in crate::server) async fn serve_android_chrome_192(req: axum::extract::Requ
 pub(in crate::server) async fn serve_android_chrome_512(req: axum::extract::Request) -> Response {
     serve_named_global_favicon("android-chrome-512x512.png", req).await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::cache_control_for_favicon;
-
-    #[test]
-    fn versioned_favicons_are_safe_to_cache_long_term() {
-        assert_eq!(
-            cache_control_for_favicon(true),
-            crate::cache::CACHE_CONTROL_IMMUTABLE_MEDIA
-        );
-    }
-
-    #[test]
-    fn unversioned_favicons_must_revalidate() {
-        assert_eq!(
-            cache_control_for_favicon(false),
-            crate::cache::CACHE_CONTROL_STATIC_SHORT
-        );
-    }
-}

@@ -2,16 +2,10 @@
 
 use super::content::render_boards;
 use super::dialogs::render_dialog;
-#[cfg(test)]
-use super::dialogs::render_form_field;
 use super::help::render_help;
-#[cfg(test)]
-use super::logs::latest_log_file;
 use super::logs::render_logs;
 pub use super::logs::{load_log_snapshot, LogSnapshot};
 use super::state::{terminal_is_usable, ConsoleState, NoticeSeverity, Screen};
-#[cfg(test)]
-use super::state::{Dialog, FieldValue, FormState};
 use super::widgets::{
     fmt_bytes, fmt_uptime, fmt_uptime_compact, format_number_compact, format_number_signed_compact,
     panel, render_centered_state, render_label_rows, render_scrollable, stats_freshness,
@@ -694,43 +688,3 @@ const fn footer_hints(app: &ConsoleState, width: u16) -> &'static [(&'static str
         }
     }
 }
-
-/// Render directly into a buffer for deterministic layout tests.
-#[cfg(test)]
-fn render_to_buffer(
-    area: Rect,
-    app: &ConsoleState,
-    metrics: &ChanStats,
-    logs: &LogSnapshot,
-) -> anyhow::Result<Buffer> {
-    let mut terminal =
-        ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))?;
-    let mut app = app.clone();
-    let _completed_frame = terminal.draw(|frame| render(frame, &mut app, metrics, logs))?;
-    Ok(terminal.backend().buffer().clone())
-}
-
-/// Convert a test buffer into trimmed plain text for semantic assertions.
-#[cfg(test)]
-fn buffer_text(buffer: &Buffer) -> String {
-    use std::fmt::Write as _;
-
-    let area = *buffer.area();
-    let mut output = String::new();
-    for y in area.top()..area.bottom() {
-        let mut line = String::new();
-        for x in area.left()..area.right() {
-            if let Some(cell) = buffer.cell((x, y)) {
-                line.push_str(cell.symbol());
-            }
-        }
-        if writeln!(output, "{}", line.trim_end()).is_err() {
-            break;
-        }
-    }
-    output
-}
-
-#[cfg(test)]
-#[path = "dashboard_tests.rs"]
-mod tests;

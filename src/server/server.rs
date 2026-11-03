@@ -11,7 +11,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, LazyLock,
 };
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crate::config::{
     check_cookie_secret_rotation, data_dir, generate_settings_file_if_missing,
@@ -20,6 +20,8 @@ use crate::config::{
 use crate::middleware::AppState;
 
 mod assets;
+/// Concrete periodic jobs owned by the server lifecycle.
+mod background;
 /// Native listener socket admission and handshake deadlines.
 mod connections;
 mod headers;
@@ -63,26 +65,6 @@ fn configured_timer_interval(
         "{label} interval exceeds the supported timer range"
     );
     Ok(interval)
-}
-
-/// Initial retry delay for a failed scheduled full backup.
-const SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS: u64 = 15 * 60;
-/// Maximum retry delay for a failed scheduled full backup.
-const SCHEDULED_FULL_BACKUP_RETRY_MAX_SECS: u64 = 6 * 60 * 60;
-
-/// Calculate the capped exponential retry delay after a scheduled backup failure.
-fn scheduled_full_backup_failure_retry_delay(
-    backup_interval: Duration,
-    failure_streak: u32,
-) -> Duration {
-    let attempt_shift = failure_streak.saturating_sub(1).min(16);
-    let multiplier = 1u64.checked_shl(attempt_shift).unwrap_or(u64::MAX);
-    let attempt_secs = SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS.saturating_mul(multiplier);
-    let capped_secs = backup_interval.as_secs().clamp(
-        SCHEDULED_FULL_BACKUP_RETRY_BASE_SECS,
-        SCHEDULED_FULL_BACKUP_RETRY_MAX_SECS,
-    );
-    Duration::from_secs(attempt_secs.min(capped_secs))
 }
 
 /// Total HTTP requests handled since startup.
@@ -208,21 +190,11 @@ fn protect_tls_plaintext_backend(
 /// Returns an error when configuration validation, filesystem or database
 /// initialization, listener startup, or coordinated listener execution fails.
 pub async fn run_server(port_override: Option<u16>) -> anyhow::Result<()> {
+    crate::updates::check_legacy_state()?;
     let (ready, started) = tokio::sync::oneshot::channel();
-    if !crate::updates::managed() && !crate::restart::container_restart_enabled() {
-        let result = run_server_lifecycle(port_override, ready).await;
-        drop(started);
-        return result;
-    }
-    let server = run_server_lifecycle(port_override, ready);
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => result,
-        initialized = tokio::time::timeout(crate::restart::STARTUP_TIMEOUT, started) => {
-            initialized.context("RustChan initialization timed out")?.context("RustChan initialization stopped before readiness")?;
-            server.await
-        }
-    }
+    let result = run_server_lifecycle(port_override, ready).await;
+    drop(started);
+    result
 }
 
 #[expect(
@@ -238,7 +210,6 @@ async fn run_server_lifecycle(
     port_override: Option<u16>,
     ready: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
-    crate::updates::await_startup().await?;
     // rustls 0.23 requires an explicit process-wide crypto provider.
     // install_default() is idempotent — a second call (e.g. in tests) returns
     // Err but never panics, so the let _ discard is intentional.
@@ -249,7 +220,6 @@ async fn run_server_lifecycle(
     migrate_runtime_layout_if_needed()?;
 
     generate_settings_file_if_missing();
-    let startup_digest = crate::restart::startup_digest()?;
 
     // Validate critical configuration values immediately — fail fast with a
     // clear error rather than discovering misconfiguration at runtime (#8).
@@ -289,19 +259,13 @@ async fn run_server_lifecycle(
     {
         let reconcile_pool = pool.clone();
         let upload_dir = CONFIG.upload_dir.clone();
-        let reconciliation = tokio::task::spawn_blocking(move || {
-            crate::pending_fs::reconcile_pending_fs_ops(&reconcile_pool, &upload_dir)
+        tokio::task::spawn_blocking(move || {
+            crate::handlers::admin::backup::reconcile_startup(&reconcile_pool, &upload_dir)
         })
         .await
-        .map_err(|error| anyhow::anyhow!("pending_fs_ops reconciliation task failed: {error}"))?;
-        if let Err(error) = reconciliation {
-            tracing::warn!(
-                target: "pending_fs",
-                error = %error,
-                "startup filesystem reconciliation left quarantined operations for retry"
-            );
-        }
+        .map_err(|error| anyhow::anyhow!("restore reconciliation task failed: {error}"))??;
     }
+
     let startup_managed_media_cursor = {
         let reconcile_pool = pool.clone();
         let upload_dir = CONFIG.upload_dir.clone();
@@ -611,7 +575,11 @@ async fn run_server_lifecycle(
             "startup thread-retention reconciliation completed"
         );
     }
-    let worker_queue = Arc::new(crate::workers::JobQueue::new(pool.clone()));
+    let live_data_access = crate::middleware::data_access::DataAccess::default();
+    let worker_queue = Arc::new(crate::workers::JobQueue::new(
+        pool.clone(),
+        live_data_access.clone(),
+    ));
     let worker_handles =
         crate::workers::start_worker_pool(&worker_queue, ffmpeg_available, ffmpeg_vp9_available);
 
@@ -640,6 +608,8 @@ async fn run_server_lifecycle(
             CONFIG.auto_full_backup_split_zip_part_size_bytes,
         ),
         maintenance_gate: crate::middleware::MaintenanceGate::new(),
+        version_check: Arc::new(crate::updates::CheckState::default()),
+        data_access: live_data_access,
         media_upload_gate: crate::middleware::MediaUploadGate::new(),
         request_work_gate: crate::middleware::WorkGate::new(256),
         password_work_gate: crate::middleware::WorkGate::new(2),
@@ -666,56 +636,16 @@ async fn run_server_lifecycle(
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut job_cursor = startup_media_reconciliation.next_job_id;
-            let mut post_cursor = startup_media_reconciliation.next_post_id;
-            let mut interval = tokio::time::interval(Duration::from_mins(1));
-            let _completed_value = interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let pass_pool = reconcile_pool.clone();
-                        let pass = tokio::task::spawn_blocking(move || {
-                            crate::workers::reconcile_media_job_states(
-                                &pass_pool,
-                                job_cursor,
-                                post_cursor,
-                                crate::workers::MEDIA_RECONCILE_BATCH,
-                            )
-                        }).await;
-                        match pass {
-                            Ok(Ok(report)) => {
-                                job_cursor = report.next_job_id;
-                                post_cursor = report.next_post_id;
-                                if report.jobs_resolved > 0 || report.posts_repaired > 0 {
-                                    tracing::info!(
-                                        target: "workers",
-                                        jobs_scanned = report.jobs_scanned,
-                                        posts_scanned = report.posts_scanned,
-                                        jobs_resolved = report.jobs_resolved,
-                                        posts_repaired = report.posts_repaired,
-                                        malformed_jobs = report.malformed_jobs,
-                                        "periodic media reconciliation repaired legacy state"
-                                    );
-                                    reconcile_queue.notify.notify_waiters();
-                                }
-                            }
-                            Ok(Err(error)) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic media reconciliation failed"
-                            ),
-                            Err(error) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic media reconciliation task failed"
-                            ),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => break,
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_worker_media_reconciliation(
+                reconcile_pool,
+                reconcile_queue,
+                cancel_clone,
+                data_access,
+                startup_media_reconciliation.next_job_id,
+                startup_media_reconciliation.next_post_id,
+            ));
     }
 
     // Managed-media auditing advances one bounded filesystem page per interval.
@@ -724,49 +654,14 @@ async fn run_server_lifecycle(
     if CONFIG.media_reconcile_interval_hours > 0 {
         let reconcile_pool = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut cursor = startup_managed_media_cursor;
-            let mut interval = tokio::time::interval(media_reconcile_interval);
-            let _completed_value = interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let pass_pool = reconcile_pool.clone();
-                        let upload_dir = CONFIG.upload_dir.clone();
-                        let pass_cursor = cursor.clone();
-                        let pass = tokio::task::spawn_blocking(move || {
-                            crate::media::reconcile::reconcile_managed_media(
-                                &pass_pool,
-                                &upload_dir,
-                                crate::media::reconcile::configured_mode(),
-                                &pass_cursor,
-                                crate::media::reconcile::configured_limits(),
-                            )
-                        }).await;
-                        match pass {
-                            Ok(Ok(report)) => cursor = report.next_cursor,
-                            Ok(Err(error)) => tracing::warn!(
-                                target: "media_reconcile",
-                                error = %error,
-                                "periodic managed-media audit failed"
-                            ),
-                            Err(error) => tracing::warn!(
-                                target: "media_reconcile",
-                                error = %error,
-                                "periodic managed-media audit task failed"
-                            ),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!(
-                            target: "media_reconcile",
-                            "managed-media audit task shutting down"
-                        );
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle = background_tasks.spawn(background::run_managed_media_audit(
+            reconcile_pool,
+            cancel_clone,
+            data_access,
+            media_reconcile_interval,
+            startup_managed_media_cursor,
+        ));
     }
 
     // Required thread-retention work is repaired independently of new posts.
@@ -776,85 +671,24 @@ async fn run_server_lifecycle(
         let reconcile_pool = pool.clone();
         let reconcile_queue = Arc::clone(&state.job_queue);
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut cursor = startup_prune_reconciliation.next_board_id;
-            let mut interval = tokio::time::interval(Duration::from_mins(1));
-            let _completed_value = interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let pass_pool = reconcile_pool.clone();
-                        let pass = tokio::task::spawn_blocking(move || {
-                            crate::workers::reconcile_thread_prune_intents(
-                                &pass_pool,
-                                cursor,
-                                crate::workers::THREAD_PRUNE_RECONCILE_BATCH,
-                            )
-                        }).await;
-                        match pass {
-                            Ok(Ok(report)) => {
-                                cursor = report.next_board_id;
-                                if report.inserted > 0 {
-                                    reconcile_queue.notify.notify_waiters();
-                                }
-                                if report.failures > 0 {
-                                    tracing::warn!(
-                                        target: "workers",
-                                        boards_scanned = report.scanned,
-                                        failures = report.failures,
-                                        "periodic thread-retention reconciliation had board failures"
-                                    );
-                                }
-                            }
-                            Ok(Err(error)) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic thread-retention reconciliation failed"
-                            ),
-                            Err(error) => tracing::error!(
-                                target: "workers",
-                                error = %error,
-                                "periodic thread-retention reconciliation task failed"
-                            ),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Thread-retention reconciliation task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_thread_retention_reconciliation(
+                reconcile_pool,
+                reconcile_queue,
+                cancel_clone,
+                data_access,
+                startup_prune_reconciliation.next_board_id,
+            ));
     }
 
     // Background: purge expired sessions hourly
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_hours(1));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let purge_pool = bg.clone();
-                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-                            let conn = purge_pool.get()?;
-                            crate::db::purge_expired_sessions(&conn)
-                        }).await;
-                        match result {
-                            Ok(Ok(n)) if n > 0 => tracing::info!(target: "sessions", purged = n, "Expired sessions purged"),
-                            Ok(Ok(_)) => {},
-                            Ok(Err(error)) => tracing::error!(error = %error, "Session purge error"),
-                            Err(error) => tracing::error!(error = %error, "Session purge blocking task failed"),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Session purge task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_session_purge(bg, cancel_clone, data_access));
     }
 
     // Background: WAL checkpoint — prevent WAL files growing unbounded.
@@ -865,74 +699,22 @@ async fn run_server_lifecycle(
         let maintenance_state = state.clone();
         let interval_secs = wal_interval.as_secs();
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            // Stagger the first run by half the interval so it doesn't fire
-            // immediately at startup alongside the session purge.
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs((interval_secs / 2).saturating_add(1))) => {}
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(wal_interval);
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        if !should_run_background_maintenance(&maintenance_state, 3) {
-                            tracing::debug!(
-                                target: "db",
-                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
-                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
-                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
-                                "Skipping WAL checkpoint while server is busy"
-                            );
-                            continue;
-                        }
-                        let checkpoint_pool = bg.clone();
-                        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                            let conn = checkpoint_pool.get()?;
-                            let (log_pages, checkpointed_pages, busy) = crate::db::run_wal_checkpoint(&conn)?;
-                            tracing::debug!(target: "db", log_pages, checkpointed_pages, busy,
-                                "WAL checkpoint completed");
-                            // Reuse the connection so a one-connection pool cannot
-                            // deadlock on a nested checkout. Both operations can
-                            // wait for SQLite and must stay off async workers.
-                            conn.execute_batch("PRAGMA optimize;")?;
-                            Ok(())
-                        }).await;
-                        match result {
-                            Ok(Ok(())) => {},
-                            Ok(Err(error)) => tracing::warn!(target: "db", error = %error, "WAL checkpoint or planner maintenance failed"),
-                            Err(error) => tracing::warn!(target: "db", error = %error, "WAL maintenance blocking task failed"),
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("WAL checkpoint task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle = background_tasks.spawn(background::run_wal_maintenance(
+            bg,
+            maintenance_state,
+            wal_interval,
+            interval_secs,
+            cancel_clone,
+            data_access,
+        ));
     }
 
     // Background: prune stale IPs from ACTIVE_IPS every 5 min
     {
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_mins(5));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let cutoff = Instant::now()
-                            .checked_sub(Duration::from_mins(5))
-                            .unwrap_or_else(Instant::now);
-                        ACTIVE_IPS.retain(|_, last_seen| *last_seen > cutoff);
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Active IP prune task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_active_ip_prune(cancel_clone));
     }
 
     // Background: prune expired entries from ADMIN_LOGIN_FAILS every 5 min.
@@ -941,20 +723,8 @@ async fn run_server_lifecycle(
     // opportunistic prune path inside clear_login_fails).
     {
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let mut iv = tokio::time::interval(Duration::from_mins(5));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        crate::handlers::admin::prune_login_fails();
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Login fail prune task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let _task_abort_handle =
+            background_tasks.spawn(background::run_login_fail_prune(cancel_clone));
     }
 
     // Scheduled VACUUM reclaims disk space from deleted posts
@@ -964,67 +734,15 @@ async fn run_server_lifecycle(
         let maintenance_state = state.clone();
         let interval_secs = vacuum_interval.as_secs();
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            // Stagger the first run by half the interval to avoid hammering the
-            // DB immediately at startup alongside WAL checkpoint and session purge.
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_secs((interval_secs / 2).saturating_add(7))) => {}
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(vacuum_interval);
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        if !should_run_background_maintenance(&maintenance_state, 0) {
-                            tracing::info!(
-                                target: "db",
-                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
-                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
-                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
-                                "Skipping scheduled VACUUM because the server is busy"
-                            );
-                            continue;
-                        }
-                        let Ok(_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled VACUUM") else {
-                            tracing::debug!(target: "db", "Skipping scheduled VACUUM because maintenance is already running");
-                            continue;
-                        };
-                        let bg2 = bg.clone();
-                        let task_result = tokio::task::spawn_blocking(move || {
-                            if let Ok(conn) = bg2.get() {
-                                let before = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
-                                match crate::db::run_vacuum(&conn) {
-                                    Ok(()) => {
-                                        let after = crate::db::get_db_size_bytes(&conn).unwrap_or(0);
-                                        let saved = before.saturating_sub(after);
-                                        tracing::info!(
-                                            target: "db",
-                                            before_bytes = before,
-                                            after_bytes  = after,
-                                            saved_bytes  = saved,
-                                            "VACUUM complete"
-                                        );
-                                    }
-                                    Err(e) => tracing::warn!("Scheduled VACUUM failed: {e}"),
-                                }
-                            }
-                        })
-                        .await;
-                        if let Err(error) = task_result {
-                            tracing::warn!(
-                                target: "db",
-                                error = %error,
-                                "Scheduled VACUUM blocking task failed"
-                            );
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("VACUUM task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle = background_tasks.spawn(background::run_scheduled_vacuum(
+            bg,
+            maintenance_state,
+            vacuum_interval,
+            interval_secs,
+            cancel_clone,
+            data_access,
+        ));
     }
 
     // Automatic saved full backups — creates a server-side full backup on the
@@ -1034,126 +752,13 @@ async fn run_server_lifecycle(
         let bg = pool.clone();
         let maintenance_state = state.clone();
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            let scheduler_started_at = SystemTime::now();
-            let mut failure_streak = 0u32;
-            let mut retry_not_before: Option<SystemTime> = None;
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_mins(1)) => {}
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(Duration::from_mins(1));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let settings = maintenance_state.auto_full_backup_settings.snapshot();
-                        if settings.interval_hours == 0 {
-                            failure_streak = 0;
-                            retry_not_before = None;
-                            continue;
-                        }
-
-                        let interval = match configured_timer_interval(settings.interval_hours, 3600, "automatic full backup") {
-                            Ok(interval) => interval,
-                            Err(error) => {
-                                tracing::error!(target: "admin", %error, "Scheduled full backup interval is invalid");
-                                continue;
-                            }
-                        };
-                        let last_saved_at = crate::handlers::admin::latest_verified_full_backup_modified_time()
-                            .unwrap_or(scheduler_started_at);
-                        let due = SystemTime::now()
-                            .duration_since(last_saved_at)
-                            .is_ok_and(|elapsed| elapsed >= interval);
-                        if !due {
-                            failure_streak = 0;
-                            retry_not_before = None;
-                            continue;
-                        }
-                        if retry_not_before.is_some_and(|not_before| SystemTime::now() < not_before) {
-                            continue;
-                        }
-                        if !should_run_background_maintenance(&maintenance_state, 0) {
-                            tracing::info!(
-                                target: "admin",
-                                in_flight = IN_FLIGHT.load(Ordering::Relaxed),
-                                active_uploads = ACTIVE_UPLOADS.load(Ordering::Relaxed),
-                                maintenance_active = maintenance_state.maintenance_gate.is_active(),
-                                "Skipping scheduled full backup because the server is busy"
-                            );
-                            continue;
-                        }
-                        let Ok(_guard) = maintenance_state.maintenance_gate.try_begin("Scheduled full backup") else {
-                            tracing::debug!(target: "admin", "Skipping scheduled full backup because maintenance is already running");
-                            continue;
-                        };
-
-                        let bg2 = bg.clone();
-                        let progress = Arc::clone(&maintenance_state.backup_progress);
-                        let attempt_result = tokio::task::spawn_blocking(move || {
-                            let storage_mode = crate::handlers::admin::backup::parse_backup_storage_mode_value(
-                                Some(&settings.storage_mode),
-                            )?;
-                            crate::handlers::admin::create_full_backup_to_server(
-                                &bg2,
-                                None,
-                                &progress,
-                                settings.copies_to_keep,
-                                settings.include_tor_hidden_service_keys,
-                                storage_mode,
-                                settings.split_zip_part_size,
-                            )
-                        })
-                        .await;
-                        match attempt_result {
-                            Ok(Ok(filename)) => {
-                                failure_streak = 0;
-                                retry_not_before = None;
-                                tracing::info!(
-                                    target: "admin",
-                                    filename = %filename,
-                                    interval_hours = settings.interval_hours,
-                                    copies_to_keep = settings.copies_to_keep,
-                                    "Scheduled full backup completed"
-                                );
-                            }
-                            Ok(Err(error)) => {
-                                failure_streak = failure_streak.saturating_add(1);
-                                let retry_delay =
-                                    scheduled_full_backup_failure_retry_delay(interval, failure_streak);
-                                retry_not_before = SystemTime::now().checked_add(retry_delay);
-                                tracing::warn!(
-                                    target: "admin",
-                                    error = %error,
-                                    interval_hours = settings.interval_hours,
-                                    copies_to_keep = settings.copies_to_keep,
-                                    failure_streak,
-                                    retry_delay_secs = retry_delay.as_secs(),
-                                    "Scheduled full backup failed"
-                                );
-                            }
-                            Err(error) => {
-                                failure_streak = failure_streak.saturating_add(1);
-                                let retry_delay =
-                                    scheduled_full_backup_failure_retry_delay(interval, failure_streak);
-                                retry_not_before = SystemTime::now().checked_add(retry_delay);
-                                tracing::warn!(
-                                    target: "admin",
-                                    error = %error,
-                                    failure_streak,
-                                    retry_delay_secs = retry_delay.as_secs(),
-                                    "Scheduled full backup task join failed"
-                                );
-                            }
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Scheduled full-backup task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle = background_tasks.spawn(background::run_scheduled_full_backups(
+            bg,
+            maintenance_state,
+            cancel_clone,
+            data_access,
+        ));
     }
 
     // Purge per-IP vote rows for expired polls whose
@@ -1162,44 +767,14 @@ async fn run_server_lifecycle(
     if CONFIG.poll_cleanup_interval_hours > 0 {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_mins(10)) => {} // initial delay
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(poll_cleanup_interval);
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let bg2 = bg.clone();
-                        let task_result = tokio::task::spawn_blocking(move || {
-                            if let Ok(conn) = bg2.get() {
-                                let cutoff = chrono::Utc::now().timestamp().saturating_sub(poll_retention_cutoff_secs);
-                                match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
-                                    Ok(n) if n > 0 => {
-                                        tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => tracing::warn!("Poll vote cleanup failed: {e}"),
-                                }
-                            }
-                        })
-                        .await;
-                        if let Err(error) = task_result {
-                            tracing::warn!(
-                                target: "polls",
-                                error = %error,
-                                "Poll vote cleanup blocking task failed"
-                            );
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Poll vote cleanup task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle = background_tasks.spawn(background::run_poll_vote_cleanup(
+            bg,
+            cancel_clone,
+            data_access,
+            poll_cleanup_interval,
+            poll_retention_cutoff_secs,
+        ));
     }
 
     // Retry durable filesystem operations independently of request traffic.
@@ -1207,45 +782,14 @@ async fn run_server_lifecycle(
     {
         let bg = pool.clone();
         let cancel_clone = worker_cancel.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_mins(5)) => {}
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(Duration::from_mins(15));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let retry_pool = bg.clone();
-                        let upload_dir = CONFIG.upload_dir.clone();
-                        let task_result = tokio::task::spawn_blocking(move || {
-                            if let Err(error) = crate::pending_fs::reconcile_pending_fs_ops(
-                                &retry_pool,
-                                &upload_dir,
-                            ) {
-                                tracing::warn!(
-                                    target: "pending_fs",
-                                    error = %error,
-                                    "periodic filesystem reconciliation left quarantined operations"
-                                );
-                            }
-                        })
-                        .await;
-                        if let Err(error) = task_result {
-                            tracing::warn!(
-                                target: "pending_fs",
-                                error = %error,
-                                "Periodic filesystem reconciliation blocking task failed"
-                            );
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Filesystem reconciliation task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let maintenance_gate = state.maintenance_gate.clone();
+        let _task_abort_handle = background_tasks.spawn(background::run_pending_fs_replay(
+            bg,
+            cancel_clone,
+            data_access,
+            maintenance_gate,
+        ));
     }
 
     // Keep the waveform and thumbnail cache
@@ -1255,46 +799,13 @@ async fn run_server_lifecycle(
         let max_bytes = CONFIG.waveform_cache_max_bytes;
         let cancel_clone = worker_cancel.clone();
         let bg = pool.clone();
-        let _task_abort_handle = background_tasks.spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(Duration::from_mins(30)) => {} // initial stagger
-                () = cancel_clone.cancelled() => { return; }
-            }
-            let mut iv = tokio::time::interval(Duration::from_hours(1));
-            loop {
-                tokio::select! {
-                    _ = iv.tick() => {
-                        let upload_dir = CONFIG.upload_dir.clone();
-                        let eviction_pool = bg.clone();
-                        let task_result = tokio::task::spawn_blocking(move || {
-                            let Ok(conn) = eviction_pool.get() else {
-                                return;
-                            };
-                            let eviction_result = crate::workers::evict_thumb_cache(
-                                &conn,
-                                &upload_dir,
-                                max_bytes,
-                            );
-                            if let Err(error) = eviction_result {
-                                tracing::warn!(error = %error, "Thumbnail cache eviction failed");
-                            }
-                        })
-                        .await;
-                        if let Err(error) = task_result {
-                            tracing::warn!(
-                                target: "workers",
-                                error = %error,
-                                "Thumbnail cache eviction blocking task failed"
-                            );
-                        }
-                    }
-                    () = cancel_clone.cancelled() => {
-                        tracing::debug!("Waveform cache eviction task shutting down");
-                        return;
-                    }
-                }
-            }
-        });
+        let data_access = state.data_access.clone();
+        let _task_abort_handle = background_tasks.spawn(background::run_thumb_cache_eviction(
+            max_bytes,
+            cancel_clone,
+            bg,
+            data_access,
+        ));
     }
 
     let plaintext_server = match plaintext_app_listener(
@@ -1456,6 +967,7 @@ async fn run_server_lifecycle(
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
         let operation_pool = pool.clone();
+        let operation_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             loop {
                 let next_key = tokio::select! {
@@ -1503,6 +1015,7 @@ async fn run_server_lifecycle(
                         return;
                     }
                     ConsoleAction::Submit(request) => {
+                        let Some(access) = operation_access.try_read() else { continue; };
                         let request_for_work = request.clone();
                         let pool_for_work = operation_pool.clone();
                         let state_for_work = Arc::clone(&console);
@@ -1510,6 +1023,7 @@ async fn run_server_lifecycle(
                         let redraw_after_work = Arc::clone(&redraw);
                         drop(tokio::spawn(async move {
                             let result = tokio::task::spawn_blocking(move || {
+                                let _access = access;
                                 super::console::wizard::execute(&request_for_work, &pool_for_work)
                             })
                             .await
@@ -1669,7 +1183,6 @@ async fn run_server_lifecycle(
         let conn = pool.get()?;
         crate::db::database_ready_probe(&conn)?;
     }
-    crate::restart::started(startup_digest).await?;
     state.runtime_ready.store(true, Ordering::Release);
     ready
         .send(())
@@ -2261,448 +1774,4 @@ async fn onion_location_middleware(
     }
 
     resp
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        build_redirect_response, configured_timer_interval, format_redirect_authority,
-        next_listener_exit, protect_tls_plaintext_backend, redirect_host,
-        redirect_trusted_hosts_with, run_plain_http, scheduled_full_backup_failure_retry_delay,
-        seed_initial_default_theme, PlaintextAppListener,
-    };
-
-    use axum::{
-        body::Body,
-        extract::{ConnectInfo, Request},
-        http::{header, StatusCode},
-        middleware::from_fn,
-        routing::any,
-        Router,
-    };
-    use std::{net::SocketAddr, time::Duration};
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tower::ServiceExt as _;
-
-    /// Disabled intervals and ordinary hours survive validation; huge values fail before scheduling.
-    #[test]
-    fn configured_timer_intervals_reject_overflow_and_preserve_disable() -> anyhow::Result<()> {
-        anyhow::ensure!(
-            configured_timer_interval(0, 3600, "test")? == Duration::ZERO,
-            "zero must preserve the disabled timer sentinel"
-        );
-        anyhow::ensure!(
-            configured_timer_interval(24, 3600, "test")? == Duration::from_hours(24),
-            "valid hours must retain their exact duration"
-        );
-        anyhow::ensure!(
-            configured_timer_interval(u64::MAX, 3600, "test").is_err(),
-            "hour-to-second overflow must fail before timer creation"
-        );
-        anyhow::ensure!(
-            configured_timer_interval(u64::MAX, 1, "test").is_err(),
-            "an unrepresentable timer deadline must fail even when seconds fit u64"
-        );
-        Ok(())
-    }
-
-    /// Build a test request containing the supplied Host header.
-    fn request_with_host(host: &str) -> anyhow::Result<Request> {
-        Request::builder()
-            .uri("/demo?x=1")
-            .header(header::HOST, host)
-            .body(Body::empty())
-            .map_err(|error| anyhow::anyhow!("build request: {error}"))
-    }
-
-    /// Open an isolated test database connection.
-    fn test_conn() -> anyhow::Result<r2d2::PooledConnection<r2d2_sqlite::SqliteConnectionManager>> {
-        let pool = crate::db::init_test_pool()?;
-        pool.get().map_err(anyhow::Error::from)
-    }
-
-    /// Build the application used to exercise the plaintext Tor backend gate.
-    fn tls_backend_app(redirect_http: bool) -> Router {
-        protect_tls_plaintext_backend(
-            Router::new().route("/", any(|| async { StatusCode::NO_CONTENT })),
-            8443,
-            redirect_http,
-        )
-    }
-
-    /// Build a test request carrying the supplied connection peer.
-    fn request_from_peer(peer: SocketAddr) -> anyhow::Result<Request> {
-        Request::builder()
-            .uri("/")
-            .header(header::HOST, "127.0.0.1")
-            .extension(ConnectInfo(peer))
-            .body(Body::empty())
-            .map_err(|error| anyhow::anyhow!("build request: {error}"))
-    }
-
-    /// Send one raw HTTP request and collect its response bytes.
-    async fn raw_http_request(address: SocketAddr, request: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut stream = tokio::net::TcpStream::connect(address).await?;
-        stream.write_all(request).await?;
-        let mut response = Vec::new();
-        let read_result =
-            tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
-                .await
-                .map_err(|error| anyhow::anyhow!("response timeout: {error}"))?;
-        if let Err(error) = read_result {
-            anyhow::ensure!(
-                error.kind() == std::io::ErrorKind::ConnectionReset && !response.is_empty(),
-                "read response: {error}"
-            );
-        }
-        Ok(response)
-    }
-
-    /// Verify the status code fragment in a raw HTTP response.
-    fn ensure_raw_status(response: &[u8], expected: &[u8]) -> anyhow::Result<()> {
-        let status_line = response
-            .split(|byte| *byte == b'\n')
-            .next()
-            .unwrap_or_default();
-        anyhow::ensure!(
-            status_line
-                .windows(expected.len())
-                .any(|part| part == expected),
-            "unexpected response status: {}",
-            String::from_utf8_lossy(status_line)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn native_tls_requires_explicit_https_only_mode_to_disable_plaintext() {
-        assert_eq!(
-            super::plaintext_app_listener(false, false, false),
-            PlaintextAppListener::Public
-        );
-        assert_eq!(
-            super::plaintext_app_listener(false, true, false),
-            PlaintextAppListener::Public
-        );
-        assert_eq!(
-            super::plaintext_app_listener(true, false, false),
-            PlaintextAppListener::Public
-        );
-        assert_eq!(
-            super::plaintext_app_listener(true, false, true),
-            PlaintextAppListener::Public
-        );
-        assert_eq!(
-            super::plaintext_app_listener(true, true, false),
-            PlaintextAppListener::Disabled
-        );
-        assert_eq!(
-            super::plaintext_app_listener(true, true, true),
-            PlaintextAppListener::TorBackend
-        );
-    }
-
-    #[tokio::test]
-    async fn tls_tor_backend_redirects_direct_plaintext_requests() -> anyhow::Result<()> {
-        let peer = "127.0.0.1:61001".parse()?;
-        let response = tls_backend_app(true)
-            .oneshot(request_from_peer(peer)?)
-            .await?;
-
-        anyhow::ensure!(response.status() == StatusCode::PERMANENT_REDIRECT);
-        anyhow::ensure!(
-            response
-                .headers()
-                .get(header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-                == Some("https://127.0.0.1:8443/"),
-            "redirect should point to the configured HTTPS port"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn tls_tor_backend_rejects_direct_plaintext_without_redirect_listener(
-    ) -> anyhow::Result<()> {
-        let peer = "127.0.0.1:61003".parse()?;
-        let response = tls_backend_app(false)
-            .oneshot(request_from_peer(peer)?)
-            .await?;
-
-        anyhow::ensure!(response.status() == StatusCode::UPGRADE_REQUIRED);
-        anyhow::ensure!(
-            response.headers().get(header::CONNECTION)
-                == Some(&header::HeaderValue::from_static("close")),
-            "rejected plaintext connections should be closed"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn tls_tor_backend_allows_only_registered_tor_proxy_peers() -> anyhow::Result<()> {
-        let peer: SocketAddr = "127.0.0.1:61002".parse()?;
-        let same_port_other_loopback: SocketAddr = "127.0.0.2:61002".parse()?;
-        let _previous_value = crate::detect::TOR_STREAM_TOKENS.insert(peer, "tor:test".into());
-
-        let response = tls_backend_app(true)
-            .oneshot(request_from_peer(peer)?)
-            .await?;
-        let spoofed = tls_backend_app(true)
-            .oneshot(request_from_peer(same_port_other_loopback)?)
-            .await?;
-        let _removed_stream_token = crate::detect::TOR_STREAM_TOKENS.remove(&peer);
-
-        anyhow::ensure!(response.status() == StatusCode::NO_CONTENT);
-        anyhow::ensure!(spoofed.status() == StatusCode::PERMANENT_REDIRECT);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn tls_tor_backend_rejects_ambiguous_framing_before_redirect_gate() -> anyhow::Result<()>
-    {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let server_cancel = cancel.clone();
-        let server = tokio::spawn(async move {
-            run_plain_http(listener, tls_backend_app(true), server_cancel).await
-        });
-
-        let ambiguous = raw_http_request(
-            address,
-            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
-        )
-        .await?;
-        ensure_raw_status(&ambiguous, b"400")?;
-
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(3), server).await???;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn listener_supervisor_reports_unexpected_listener_failure() -> anyhow::Result<()> {
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let mut listeners: tokio::task::JoinSet<super::ListenerTaskResult> =
-            tokio::task::JoinSet::new();
-        let _task_abort_handle =
-            listeners.spawn(async { ("HTTPS", Err(anyhow::anyhow!("injected listener failure"))) });
-
-        let Err(error) = next_listener_exit(&mut listeners, &cancel).await else {
-            anyhow::bail!("unexpected listener failure must stop the runtime");
-        };
-        let message = format!("{error:#}");
-        anyhow::ensure!(message.contains("HTTPS listener failed"));
-        anyhow::ensure!(message.contains("injected listener failure"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn plain_http_boundary_rejects_te_cl_and_large_request_heads() -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let app = Router::new()
-            .route("/", any(|| async { StatusCode::NO_CONTENT }))
-            .layer(from_fn(super::headers::request_boundary_middleware));
-        let server_cancel = cancel.clone();
-        let server =
-            tokio::spawn(async move { run_plain_http(listener, app, server_cancel).await });
-
-        let valid = raw_http_request(
-            address,
-            b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
-        )
-        .await?;
-        ensure_raw_status(&valid, b"204")?;
-
-        let exact_header_value = format!(
-            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Boundary: {}\r\nConnection: close\r\n\r\n",
-            "a".repeat(super::headers::HTTP_MAX_HEADER_VALUE_BYTES)
-        );
-        let exact_header_value = raw_http_request(address, exact_header_value.as_bytes()).await?;
-        ensure_raw_status(&exact_header_value, b"204")?;
-
-        let ambiguous = raw_http_request(
-            address,
-            b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nContent-Length: 4\r\nConnection: close\r\n\r\n4\r\ntest\r\n0\r\n\r\n",
-        )
-        .await?;
-        ensure_raw_status(&ambiguous, b"400")?;
-
-        let oversized = format!(
-            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Large: {}\r\nConnection: close\r\n\r\n",
-            "a".repeat(super::headers::HTTP_MAX_HEADER_BYTES)
-        );
-        let oversized = raw_http_request(address, oversized.as_bytes()).await?;
-        ensure_raw_status(&oversized, b"431")?;
-
-        cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(3), server).await???;
-        Ok(())
-    }
-
-    #[test]
-    fn initial_default_theme_seeds_enabled_non_hard_default_theme() -> anyhow::Result<()> {
-        let conn = test_conn()?;
-
-        seed_initial_default_theme(&conn, "terminal");
-
-        anyhow::ensure!(
-            crate::db::get_site_setting(&conn, "default_theme")?.as_deref() == Some("terminal"),
-            "configured enabled theme should seed the default"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn initial_default_theme_does_not_overwrite_existing_db_setting() -> anyhow::Result<()> {
-        let conn = test_conn()?;
-        crate::db::set_site_setting(&conn, "default_theme", "blue-sky")?;
-
-        seed_initial_default_theme(&conn, "terminal");
-
-        anyhow::ensure!(
-            crate::db::get_site_setting(&conn, "default_theme")?.as_deref() == Some("blue-sky"),
-            "an existing database setting should take precedence"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn initial_default_theme_skips_invalid_theme() -> anyhow::Result<()> {
-        let conn = test_conn()?;
-
-        seed_initial_default_theme(&conn, "missing-theme");
-
-        anyhow::ensure!(
-            crate::db::get_site_setting(&conn, "default_theme")?.is_none(),
-            "an unknown theme should not seed the default"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn initial_default_theme_skips_disabled_theme() -> anyhow::Result<()> {
-        let conn = test_conn()?;
-        conn.execute("UPDATE themes SET enabled = 0 WHERE slug = 'terminal'", [])
-            .map_err(|error| anyhow::anyhow!("disable terminal theme: {error}"))
-            .map(|_completed_value| ())?;
-
-        seed_initial_default_theme(&conn, "terminal");
-
-        anyhow::ensure!(
-            crate::db::get_site_setting(&conn, "default_theme")?.is_none(),
-            "a disabled theme should not seed the default"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn redirect_rejects_untrusted_hosts_without_allowlist() -> anyhow::Result<()> {
-        let request = request_with_host("evil.example")?;
-        anyhow::ensure!(redirect_host(&request).is_none());
-        anyhow::ensure!(build_redirect_response(&request, 8443).is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn redirect_allows_local_hosts_without_allowlist() -> anyhow::Result<()> {
-        let request = request_with_host("127.0.0.1")?;
-        anyhow::ensure!(redirect_host(&request).as_deref() == Some("127.0.0.1"));
-        Ok(())
-    }
-
-    #[test]
-    fn redirect_formats_ipv6_authorities_with_brackets() {
-        assert_eq!(format_redirect_authority("::1", 8443), "[::1]:8443");
-    }
-
-    #[test]
-    fn redirect_trusted_hosts_include_configured_public_hosts_for_manual_cert_setups() {
-        let hosts = redirect_trusted_hosts_with(
-            &["example.com".to_owned(), "www.example.com".to_owned()],
-            false,
-            &[],
-            "0.0.0.0:8080",
-        );
-        assert!(hosts.iter().any(|host| host == "example.com"));
-        assert!(hosts.iter().any(|host| host == "www.example.com"));
-    }
-
-    #[test]
-    fn scheduled_full_backup_retry_delay_uses_exponential_backoff() {
-        let interval = Duration::from_hours(24);
-        assert_eq!(
-            scheduled_full_backup_failure_retry_delay(interval, 1),
-            Duration::from_mins(15)
-        );
-        assert_eq!(
-            scheduled_full_backup_failure_retry_delay(interval, 2),
-            Duration::from_mins(30)
-        );
-        assert_eq!(
-            scheduled_full_backup_failure_retry_delay(interval, 3),
-            Duration::from_hours(1)
-        );
-    }
-
-    #[test]
-    fn scheduled_full_backup_retry_delay_caps_at_backup_interval() {
-        let interval = Duration::from_hours(1);
-        assert_eq!(
-            scheduled_full_backup_failure_retry_delay(interval, 10),
-            interval
-        );
-    }
-}
-
-#[cfg(test)]
-/// Actual HTTP listener tests for the bounded graceful drain.
-mod shutdown_tests {
-    use super::*;
-    use axum::{routing::get, Router};
-
-    /// An accepted request can finish after cancellation while new connections stop.
-    #[tokio::test]
-    async fn graceful_shutdown_drains_an_in_flight_http_response() -> anyhow::Result<()> {
-        drop(rustls::crypto::ring::default_provider().install_default());
-        let accepted = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let handler_accepted = Arc::clone(&accepted);
-        let handler_release = Arc::clone(&release);
-        let app = Router::new().route(
-            "/",
-            get(move || {
-                let request_accepted = Arc::clone(&handler_accepted);
-                let resume_response = Arc::clone(&handler_release);
-                async move {
-                    request_accepted.notify_one();
-                    resume_response.notified().await;
-                    "completed"
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let server_cancel = cancel.clone();
-        let server =
-            tokio::spawn(async move { run_plain_http(listener, app, server_cancel).await });
-        let request = tokio::spawn(async move {
-            reqwest::get(format!("http://{address}/"))
-                .await?
-                .text()
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(3), accepted.notified()).await?;
-        cancel.cancel();
-        release.notify_one();
-        anyhow::ensure!(
-            tokio::time::timeout(Duration::from_secs(3), request).await??? == "completed",
-            "accepted response must finish during graceful drain"
-        );
-        tokio::time::timeout(Duration::from_secs(3), server).await???;
-        Ok(())
-    }
 }

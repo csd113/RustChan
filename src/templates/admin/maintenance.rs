@@ -1,6 +1,7 @@
 //! Media-pipeline and database-maintenance sections of the admin panel.
 
-use super::{escape_html, format_file_size, AdminPanelViewModel};
+use super::{base_layout, escape_html, format_file_size, AdminPanelViewModel};
+use crate::db::DbHealthReport;
 
 /// Pre-rendered values interpolated into the maintenance section.
 struct MaintenanceSectionView<'a> {
@@ -387,5 +388,455 @@ fn render_admin_maintenance_section(view: &MaintenanceSectionView<'_>) -> String
             .setup_close_control
             .replace("{csrf}", &escape_html(view.csrf_token)),
         tor_section = view.tor_section,
+    )
+}
+
+// VACUUM result
+#[must_use]
+/// Renders the space reclaimed by a completed `SQLite` `VACUUM`.
+pub fn admin_vacuum_result_page(
+    size_before: i64,
+    size_after: i64,
+    csrf_token: &str,
+    current_theme: Option<&str>,
+) -> String {
+    let saved = size_before.saturating_sub(size_after);
+    let pct = if size_before > 0 {
+        saved
+            .max(0)
+            .saturating_mul(100)
+            .checked_div(size_before)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ VACUUM complete ]</h1>
+<section class="admin-section">
+<h2>// result</h2>
+<div class="admin-table-wrap admin-table-wrap-compact">
+<table class="admin-table admin-result-table">
+<tbody>
+  <tr><td>Before</td><td><strong>{before}</strong></td></tr>
+  <tr><td>After</td><td><strong>{after}</strong></td></tr>
+  <tr><td>Reclaimed</td><td><strong class="admin-status-ok">{saved}</strong> ({pct}%)</td></tr>
+</tbody>
+</table>
+</div>
+<p class="admin-result-actions">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        before = format_file_size(size_before),
+        after = format_file_size(size_after),
+        saved = format_file_size(saved),
+        pct = pct,
+    );
+
+    base_layout(
+        "VACUUM result",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        current_theme,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the health report keeps one cohesive diagnostic result document"
+)]
+#[must_use]
+/// Renders database health checks and an optional repair result.
+pub fn admin_db_health_result_page(
+    report: &DbHealthReport,
+    attempted_repair: bool,
+    csrf_token: &str,
+    repair_job_id: Option<u64>,
+    current_theme: Option<&str>,
+) -> String {
+    let title = if attempted_repair {
+        "[ database repair ]"
+    } else {
+        "[ database check ]"
+    };
+    let status_line = if attempted_repair {
+        if report.repair_backup_error.is_some() {
+            r#"<p class="error">Repair was not run because the pre-repair backup failed.</p>"#
+        } else {
+            match report.after.as_ref().map(crate::db::DbHealthSnapshot::ok) {
+                Some(true) => {
+                    r#"<p class="admin-result-status admin-status-ok">Maintenance completed. Database health checks passed afterward.</p>"#
+                }
+                Some(false) => {
+                    r#"<p class="error">Repair finished, but the database still reports a problem. Restoring a known-good full backup is recommended.</p>"#
+                }
+                None => {
+                    r#"<p class="error">Repair finished, but no final health result was produced.</p>"#
+                }
+            }
+        }
+    } else if report.before.ok() {
+        r#"<p class="admin-result-status admin-status-ok">Database health checks passed.</p>"#
+    } else {
+        r#"<p class="error">Database health checks found a problem.</p>"#
+    };
+    let repair_action = if attempted_repair {
+        String::new()
+    } else {
+        let (label, confirm) = if report.before.ok() {
+            (
+                "&#x1F6E0; run maintenance rebuild",
+                "Run maintenance rebuild? This will create a Backup v4 DB + config pre-maintenance backup, then run REINDEX, rebuild the search index, recreate its triggers, and optimize SQLite statistics. Continue?",
+            )
+        } else {
+            (
+                "&#x1F6E0; attempt repair",
+                "Attempt database repair? This will create a Backup v4 DB + config pre-maintenance backup, then run integrity checks, REINDEX, and rebuild the search index. It may not fix true file corruption. Continue?",
+            )
+        };
+        format!(
+            r#"<form method="POST" action="/admin/db/repair" class="admin-result-action-form">
+  <input type="hidden" name="_csrf" value="{csrf}">
+  <button type="submit"
+          data-confirm="{confirm}">{label}</button>
+</form>"#,
+            csrf = escape_html(csrf_token),
+            confirm = escape_html(confirm),
+            label = label,
+        )
+    };
+
+    let mut repair_summary_html = String::new();
+    if report.repair_summary.is_empty() {
+        repair_summary_html
+            .push_str(r#"<li class="admin-muted-list-item">No repairs were run.</li>"#);
+    } else {
+        for line in &report.repair_summary {
+            crate::templates::append_html(
+                &mut repair_summary_html,
+                format_args!(r"<li>{line}</li>", line = escape_html(line)),
+            );
+        }
+    }
+
+    let mut repair_steps_html = String::new();
+    if report.repair_steps.is_empty() {
+        repair_steps_html
+            .push_str(r#"<li class="admin-muted-list-item">No maintenance steps were run.</li>"#);
+    } else {
+        for step in &report.repair_steps {
+            crate::templates::append_html(
+                &mut repair_steps_html,
+                format_args!(r"<li>{step}</li>", step = escape_html(step)),
+            );
+        }
+    }
+
+    let backup_html = report.repair_backup.as_ref().map_or_else(
+        || {
+            report.repair_backup_error.as_ref().map_or_else(
+                || r"<p><strong>Pre-repair backup:</strong> Not run</p>".to_owned(),
+                |error| {
+                    format!(
+                        r#"<p><strong>Pre-repair backup:</strong> <span class="admin-status-error">Failed</span> <code>{}</code></p>"#,
+                        escape_html(error)
+                    )
+                },
+            )
+        },
+        |backup| {
+            format!(
+                r"<p><strong>Pre-repair backup:</strong> <code>{}</code></p>
+<p><strong>Pre-repair backup type:</strong> {}</p>
+<p><strong>Verification status:</strong> {}</p>
+<p><strong>Backup path:</strong> <code>{}</code></p>",
+                escape_html(&backup.backup_id),
+                escape_html(&backup.backup_type),
+                if backup.verified { "Verified" } else { "Unverified" },
+                escape_html(&backup.backup_path)
+            )
+        },
+    );
+    let before_checks_html = render_db_health_snapshot(&report.before);
+    let after_checks_html = report.after.as_ref().map_or_else(
+        || r"<p><strong>After:</strong> Not run</p>".to_owned(),
+        render_db_health_snapshot,
+    );
+
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>{title}</h1>
+<section class="admin-section">
+<h2>// summary</h2>
+{status_line}
+<div class="admin-result-card">
+<p><strong>Before:</strong> {before_status}</p>
+{before_checks}
+<p><strong>Repair run:</strong> {repair_attempted}</p>
+{repair_job_id_html}
+{backup}
+<p><strong>After:</strong> {after_status}</p>
+{after_checks}
+</div>
+<h2 class="admin-result-heading">// repair outcome</h2>
+<ul class="admin-result-list">
+{repair_summary}
+</ul>
+<h2 class="admin-result-heading">// maintenance actions run</h2>
+<ul class="admin-result-list">
+{repair_steps}
+</ul>
+{repair_action}
+<p class="admin-result-note">
+  Run checks after restores or large deletes. Take a backup before repair; this repair flow now creates a Backup v4 DB + config pre-maintenance snapshot before making changes.
+  This tool can repair index and search-index issues, but true SQLite file corruption may still require restoring a known-good backup.
+</p>
+<p class="admin-result-actions">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        title = title,
+        status_line = status_line,
+        before_status = if report.before.ok() {
+            r#"<span class="admin-status-ok">Passed</span>"#
+        } else {
+            r#"<span class="admin-status-error">Problem found</span>"#
+        },
+        before_checks = before_checks_html,
+        repair_attempted = if report.repair_attempted { "Yes" } else { "No" },
+        repair_job_id_html = repair_job_id.map_or_else(String::new, |job_id| {
+            format!(r"<p><strong>Run id:</strong> <code>{job_id}</code></p>")
+        }),
+        backup = backup_html,
+        after_status = match report.after.as_ref().map(crate::db::DbHealthSnapshot::ok) {
+            Some(true) => r#"<span class="admin-status-ok">Passed</span>"#,
+            Some(false) => r#"<span class="admin-status-error">Problem found</span>"#,
+            None => "Not run",
+        },
+        after_checks = after_checks_html,
+        repair_summary = repair_summary_html,
+        repair_steps = repair_steps_html,
+        repair_action = repair_action,
+    );
+
+    base_layout(
+        "Database health",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        current_theme,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+/// Renders the database-repair status page when no job is active.
+pub fn admin_db_repair_idle_page(csrf_token: &str, current_theme: Option<&str>) -> String {
+    let body = r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild</h2>
+<div class="admin-result-card">
+<p>No maintenance rebuild is running.</p>
+<p class="admin-meta-note">Start a new maintenance rebuild from the admin panel when you need to create a backup and rebuild indexes.</p>
+</div>
+<p class="admin-result-actions">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#.to_owned();
+
+    base_layout(
+        "Database repair",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        current_theme,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+/// Renders live progress for an active database-repair job.
+pub fn admin_db_repair_running_page(
+    csrf_token: &str,
+    job_id: u64,
+    started_at: i64,
+    current_theme: Option<&str>,
+) -> String {
+    let progress_url = format!("/admin/db/repair/progress?job_id={job_id}");
+    let status_url = format!("/admin/db/repair/status?job_id={job_id}");
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild running</h2>
+<div class="admin-result-card">
+<p>Maintenance rebuild started at <code>{started_at}</code>.</p>
+<div class="compress-progress admin-progress-spaced" data-db-repair-progress data-db-repair-job-id="{job_id}" data-db-repair-progress-url="{progress_url}">
+  <div class="compress-progress-track"><div class="compress-progress-bar admin-progress-bar-start" data-db-repair-progress-bar></div></div>
+  <div class="compress-progress-text" data-db-repair-progress-text>Starting maintenance rebuild...</div>
+</div>
+<p class="admin-meta-note">This page updates live while the backup and database rebuild finish.</p>
+</div>
+<p class="admin-result-actions">
+  <a href="{status_url}">refresh status</a> · <a href="/admin/panel">back to admin panel</a>
+</p>
+</section>
+</div>"#
+    );
+
+    base_layout(
+        "Database repair running",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        current_theme,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+/// Renders a stale database-repair job status request.
+pub fn admin_db_repair_stale_page(
+    csrf_token: &str,
+    requested_job_id: u64,
+    current_job_id: Option<u64>,
+    current_theme: Option<&str>,
+) -> String {
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild status</h2>
+<div class="admin-result-card">
+<p class="error">This page is for maintenance rebuild <code>{requested_job_id}</code>, but that run is no longer the current status.</p>
+{current_job_html}
+</div>
+<p class="admin-result-actions">
+  <a href="/admin/db/repair/status">current status</a> · <a href="/admin/panel">back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        current_job_html = current_job_id.map_or_else(
+            || "<p>No maintenance rebuild is currently active.</p>".to_owned(),
+            |job_id| {
+                format!(
+                    r#"<p>The current maintenance rebuild is <code>{job_id}</code>. <a href="/admin/db/repair/status?job_id={job_id}">Open that status page.</a></p>"#
+                )
+            }
+        ),
+    );
+
+    base_layout(
+        "Database repair status",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        current_theme,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+#[must_use]
+/// Renders the terminal failure state of a database-repair job.
+pub fn admin_db_repair_failed_page(
+    csrf_token: &str,
+    message: &str,
+    finished_at: i64,
+    job_id: u64,
+    current_theme: Option<&str>,
+) -> String {
+    let body = format!(
+        r#"<div class="admin-panel">
+<h1>[ database repair ]</h1>
+<section class="admin-section">
+<h2>// maintenance rebuild failed</h2>
+<div class="admin-result-card">
+<p class="error">The background maintenance rebuild failed.</p>
+<p><strong>Run id:</strong> <code>{job_id}</code></p>
+<p><strong>Finished:</strong> <code>{finished_at}</code></p>
+<p><strong>Error:</strong> <code>{message}</code></p>
+</div>
+<p class="admin-result-actions">
+  <a href="/admin/panel">&#8592; back to admin panel</a>
+</p>
+</section>
+</div>"#,
+        job_id = job_id,
+        message = escape_html(message),
+    );
+
+    base_layout(
+        "Database repair failed",
+        None,
+        &body,
+        csrf_token,
+        &[],
+        current_theme,
+        None,
+        false,
+        "/admin",
+    )
+}
+
+/// Renders schema, integrity, and foreign-key results for one health snapshot.
+fn render_db_health_snapshot(snapshot: &crate::db::DbHealthSnapshot) -> String {
+    format!(
+        "{schema}{integrity}{foreign_keys}",
+        schema = render_db_check_result("schema baseline", &snapshot.schema),
+        integrity = render_db_check_result("integrity check", &snapshot.integrity),
+        foreign_keys = render_db_check_result("foreign key check", &snapshot.foreign_keys),
+    )
+}
+
+/// Renders one database check and its detailed output when needed.
+fn render_db_check_result(label: &str, result: &crate::db::DbCheckResult) -> String {
+    let status = if result.ok {
+        r#"<span class="admin-status-ok">Passed</span>"#
+    } else {
+        r#"<span class="admin-status-error">Problem found</span>"#
+    };
+    let output = result.output();
+    if result.ok || result.messages.len() <= 1 {
+        return format!(
+            r"<p><strong>{label}:</strong> {status} <code>{output}</code></p>",
+            label = label,
+            status = status,
+            output = escape_html(&output),
+        );
+    }
+
+    format!(
+        r#"<p><strong>{label}:</strong> {status}. Found {count} issues.</p>
+<details class="admin-result-details">
+  <summary>show full {label} output</summary>
+  <pre>{output}</pre>
+</details>"#,
+        label = label,
+        status = status,
+        count = result.messages.len(),
+        output = escape_html(&result.messages.join("\n")),
     )
 }

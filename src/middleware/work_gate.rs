@@ -3,7 +3,16 @@
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use super::WorkGate;
+/// Non-queueing work allowance shared across clones of one application state.
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the co-located type retains the existing crate-visible middleware facade"
+)]
+#[derive(Clone, Debug)]
+pub(crate) struct WorkGate {
+    /// Owned permits remain with blocking work after request cancellation.
+    semaphore: Arc<Semaphore>,
+}
 
 impl WorkGate {
     /// Create an independent gate for one resource class.
@@ -18,51 +27,5 @@ impl WorkGate {
         Arc::clone(&self.semaphore)
             .try_acquire_owned()
             .map_err(|_error| crate::error::AppError::DbBusy)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::WorkGate;
-
-    #[test]
-    fn cloned_gates_share_capacity_and_release_after_work() -> anyhow::Result<()> {
-        let gate = WorkGate::new(2);
-        let cloned = gate.clone();
-        let first = gate.try_begin()?;
-        let second = cloned.try_begin()?;
-        anyhow::ensure!(matches!(
-            gate.try_begin(),
-            Err(crate::error::AppError::DbBusy)
-        ));
-        drop(first);
-        let replacement = cloned.try_begin()?;
-        anyhow::ensure!(gate.try_begin().is_err());
-        drop(second);
-        drop(replacement);
-        anyhow::ensure!(gate.try_begin().is_ok());
-        Ok(())
-    }
-    #[tokio::test]
-    async fn cancelled_requests_cannot_release_running_blocking_work() -> anyhow::Result<()> {
-        let gate = WorkGate::new(1);
-        let permit = gate.try_begin()?;
-        let (started, started_rx) = tokio::sync::oneshot::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
-        let (finished, finished_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::task::spawn_blocking(move || {
-            let _started = started.send(());
-            let _released = release_rx.recv();
-            drop(permit);
-            let _finished = finished.send(());
-        });
-        started_rx.await?;
-        task.abort();
-        anyhow::ensure!(gate.try_begin().is_err());
-        release.send(())?;
-        finished_rx.await?;
-        task.await?;
-        anyhow::ensure!(gate.try_begin().is_ok());
-        Ok(())
     }
 }

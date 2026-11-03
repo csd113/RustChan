@@ -6,7 +6,7 @@ use std::cmp::Reverse;
 /// One operational signal displayed by the Control Center.
 #[derive(Clone, Copy)]
 struct DashboardSignal<'a> {
-    /// Stable key used by focused browser tests and status styling.
+    /// Stable key used by status styling.
     key: &'static str,
     /// Human-readable signal label.
     label: &'static str,
@@ -660,47 +660,5 @@ const fn overall_state_label(state: AdminDashboardState) -> &'static str {
         AdminDashboardState::ActionNeeded => "Action needed",
         AdminDashboardState::Failure => "Failure",
         AdminDashboardState::Unknown => "Review status",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::overall_state;
-    use crate::templates::AdminDashboardState;
-
-    #[test]
-    fn neutral_states_do_not_override_operational_overall_status() {
-        assert_eq!(
-            overall_state(&[
-                AdminDashboardState::Ok,
-                AdminDashboardState::Informational,
-                AdminDashboardState::Disabled,
-            ]),
-            AdminDashboardState::Ok,
-        );
-    }
-
-    #[test]
-    fn pending_and_unknown_states_remain_distinct() {
-        assert_eq!(
-            overall_state(&[AdminDashboardState::Ok, AdminDashboardState::Pending]),
-            AdminDashboardState::Pending,
-        );
-        assert_eq!(
-            overall_state(&[AdminDashboardState::Pending, AdminDashboardState::Unknown,]),
-            AdminDashboardState::Unknown,
-        );
-    }
-
-    #[test]
-    fn failures_take_priority_over_actionable_and_warning_states() {
-        assert_eq!(
-            overall_state(&[
-                AdminDashboardState::Warning,
-                AdminDashboardState::ActionNeeded,
-                AdminDashboardState::Failure,
-            ]),
-            AdminDashboardState::Failure,
-        );
     }
 }

@@ -6,13 +6,15 @@ on:
   push:
     branches: [main, master]
   merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Keep the old-version build evidence from manual release checks.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,7 +38,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           components: clippy, rustfmt
 
       - name: Cache Rust artifacts
@@ -59,6 +61,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      - name: Run focused regressions
+        run: cargo test --locked --workspace --all-features --no-fail-fast
+
       - name: Build documentation
         run: cargo doc --locked --workspace --all-features --no-deps
         env:
@@ -66,28 +71,6 @@ jobs:
 
       - name: Enforce locked dependency policy
         run: cargo deny --locked check
-
-  test:
-    name: Tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-        with:
-          toolchain: 1.99.0
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: test
-
-      - name: Run tests
-        run: cargo test --locked --workspace --all-features
 
   platform-smoke:
     name: Platform smoke (${{ matrix.name }})
@@ -98,9 +81,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
           - name: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - name: macos-intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
           - name: macos-apple-silicon
             os: macos-15
             target: aarch64-apple-darwin
@@ -115,7 +104,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
           targets: ${{ matrix.target }}
 
       - name: Cache Rust artifacts
@@ -127,3 +116,23 @@ jobs:
 
       - name: Build
         run: cargo build --locked --all-features --target ${{ matrix.target }} --verbose
+
+      - name: Run focused regressions natively
+        run: cargo test --locked --workspace --all-features --no-fail-fast --target ${{ matrix.target }}
+
+  tests:
+    name: Tests
+    if: ${{ always() }}
+    needs: platform-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every native regression job to pass
+        env:
+          PLATFORM_RESULT: ${{ needs.platform-smoke.result }}
+        run: test "$PLATFORM_RESULT" = success
+
+  binary-upgrade:
+    name: Binary upgrade
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/upgrade.yml

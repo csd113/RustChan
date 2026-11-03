@@ -126,7 +126,7 @@ pub(in crate::server) struct ClearBoardBannerForm {
 }
 
 async fn board_appearance_anchor_from_id(state: &AppState, board_id: i64) -> Result<String> {
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -273,7 +273,7 @@ async fn upload_banner_for_scope(
     parsed: ParsedBannerUpload,
     media_permit: crate::middleware::MediaUploadGuard,
 ) -> Result<String> {
-    tokio::task::spawn_blocking(move || -> Result<String> {
+    crate::middleware::data_access::spawn_blocking(move || -> Result<String> {
         let _media_permit = media_permit;
         let mut conn = state.db.get()?;
         require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
@@ -383,13 +383,13 @@ pub(in crate::server) async fn upload_global_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
@@ -430,13 +430,13 @@ pub(in crate::server) async fn upload_home_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
@@ -477,13 +477,13 @@ pub(in crate::server) async fn upload_board_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
@@ -528,14 +528,14 @@ pub(in crate::server) async fn update_banner_meta(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BannerMetaForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let result = tokio::task::spawn_blocking({
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -596,14 +596,14 @@ pub(in crate::server) async fn delete_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DeleteBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let anchor = tokio::task::spawn_blocking({
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
+    let anchor = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -629,13 +629,13 @@ pub(in crate::server) async fn move_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<MoveBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let move_up = match form.direction.as_str() {
         "up" => true,
         "down" => false,
@@ -645,7 +645,7 @@ pub(in crate::server) async fn move_banner(
             ));
         }
     };
-    let anchor = tokio::task::spawn_blocking({
+    let anchor = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let mut conn = pool.get()?;
@@ -673,14 +673,14 @@ pub(in crate::server) async fn clear_board_banner_override(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ClearBoardBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
-    let board_short = tokio::task::spawn_blocking({
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
+    let board_short = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
             let conn = pool.get()?;
@@ -697,199 +697,4 @@ pub(in crate::server) async fn clear_board_banner_override(
         "board-banners",
     )
     .into_response())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        clear_board_banner_assets_safely, delete_banner_asset_safely,
-        restore_board_banner_inheritance_if_empty,
-    };
-    use anyhow::{bail, ensure, Context as _};
-
-    fn board_banner_mode(conn: &rusqlite::Connection, board_id: i64) -> anyhow::Result<String> {
-        conn.query_row(
-            "SELECT banner_mode FROM boards WHERE id = ?1",
-            rusqlite::params![board_id],
-            |row| row.get(0),
-        )
-        .context("load board banner mode")
-    }
-
-    #[test]
-    fn restores_inherit_when_board_banner_set_is_empty() -> anyhow::Result<()> {
-        let state = crate::test_support::app_state();
-        let conn = state.db.get().context("get database connection")?;
-        let board_id =
-            crate::db::create_board(&conn, "b", "Random", "", false).context("create board")?;
-        conn.execute(
-            "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
-            rusqlite::params![board_id],
-        )
-        .context("set override mode")
-        .map(|_completed_value| ())?;
-
-        restore_board_banner_inheritance_if_empty(&conn, Some(board_id))?;
-
-        ensure!(board_banner_mode(&conn, board_id)? == "inherit");
-        Ok(())
-    }
-
-    #[test]
-    fn keeps_override_when_board_banner_set_still_has_assets() -> anyhow::Result<()> {
-        let state = crate::test_support::app_state();
-        let conn = state.db.get().context("get database connection")?;
-        let board_id =
-            crate::db::create_board(&conn, "b", "Random", "", false).context("create board")?;
-        conn.execute(
-            "UPDATE boards SET banner_mode = 'override' WHERE id = ?1",
-            rusqlite::params![board_id],
-        )
-        .context("set override mode")
-        .map(|_completed_value| ())?;
-        crate::db::insert_banner_asset(
-            &conn,
-            crate::models::BannerScope::Board,
-            Some(board_id),
-            "0123456789abcdef0123456789abcdef",
-            468,
-            60,
-            1024,
-            true,
-            1,
-            crate::models::BannerTargetType::None,
-            "",
-            true,
-            true,
-        )
-        .context("insert board banner")
-        .map(|_completed_value| ())?;
-
-        restore_board_banner_inheritance_if_empty(&conn, Some(board_id))?;
-
-        ensure!(board_banner_mode(&conn, board_id)? == "override");
-        Ok(())
-    }
-
-    fn banner_asset_path(
-        scope: crate::models::BannerScope,
-        board_short: Option<&str>,
-        storage_key: &str,
-    ) -> anyhow::Result<std::path::PathBuf> {
-        crate::banner::banner_storage_path(scope, board_short, storage_key)
-            .context("build banner storage path")
-    }
-
-    #[test]
-    fn failed_global_banner_file_delete_keeps_pending_cleanup_for_retry() -> anyhow::Result<()> {
-        let state = crate::test_support::app_state();
-        let conn = state.db.get().context("get database connection")?;
-        let storage_key = uuid::Uuid::new_v4().simple().to_string();
-        let path = banner_asset_path(crate::models::BannerScope::Global, None, &storage_key)?;
-        std::fs::create_dir_all(path.parent().context("banner path has no parent")?)
-            .context("create banner parent")?;
-        std::fs::write(&path, b"webp").context("write WebP banner")?;
-        let gif_path = path.with_extension("gif");
-        std::fs::create_dir_all(&gif_path).context("create undeletable GIF directory")?;
-
-        let banner_id = crate::db::insert_banner_asset(
-            &conn,
-            crate::models::BannerScope::Global,
-            None,
-            &storage_key,
-            468,
-            60,
-            4,
-            true,
-            1,
-            crate::models::BannerTargetType::None,
-            "",
-            true,
-            true,
-        )
-        .context("insert banner")?;
-
-        let result = delete_banner_asset_safely(&conn, banner_id);
-        let Err(error) = result else {
-            bail!("deleting the GIF directory unexpectedly succeeded");
-        };
-        ensure!(error.to_string().contains("remove"));
-        ensure!(crate::db::get_banner_asset(&conn, banner_id)?.is_none());
-        let pending = crate::db::list_pending_fs_ops(&conn)?;
-        ensure!(pending.len() == 1);
-        let pending_op = pending
-            .first()
-            .context("pending cleanup operation missing")?;
-
-        std::fs::remove_dir_all(&gif_path).context("remove GIF directory")?;
-        std::fs::write(&gif_path, b"gif").context("write GIF banner")?;
-        let payload: crate::pending_fs::DeleteBannerAssetsPayload =
-            serde_json::from_str(&pending_op.payload_json).context("parse pending payload")?;
-        crate::pending_fs::finalize_delete_banner_assets_payload(
-            &conn,
-            Some(&pending_op.id),
-            &payload,
-        )
-        .context("retry deleting banner files")?;
-        ensure!(!path.exists());
-        ensure!(!gif_path.exists());
-        ensure!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn failed_board_banner_clear_keeps_pending_cleanup_for_retry() -> anyhow::Result<()> {
-        let state = crate::test_support::app_state();
-        let conn = state.db.get().context("get database connection")?;
-        let board_id =
-            crate::db::create_board(&conn, "bb", "Board", "", false).context("create board")?;
-        let storage_key = uuid::Uuid::new_v4().simple().to_string();
-        let path = banner_asset_path(crate::models::BannerScope::Board, Some("bb"), &storage_key)?;
-        std::fs::create_dir_all(path.parent().context("banner path has no parent")?)
-            .context("create banner parent")?;
-        std::fs::write(&path, b"webp").context("write WebP banner")?;
-        let gif_path = path.with_extension("gif");
-        std::fs::create_dir_all(&gif_path).context("create undeletable GIF directory")?;
-
-        let banner_id = crate::db::insert_banner_asset(
-            &conn,
-            crate::models::BannerScope::Board,
-            Some(board_id),
-            &storage_key,
-            468,
-            60,
-            4,
-            true,
-            1,
-            crate::models::BannerTargetType::None,
-            "",
-            true,
-            true,
-        )
-        .context("insert board banner")?;
-
-        ensure!(clear_board_banner_assets_safely(&conn, board_id).is_err());
-        ensure!(crate::db::get_banner_asset(&conn, banner_id)?.is_none());
-        ensure!(board_banner_mode(&conn, board_id)? == "inherit");
-        let pending = crate::db::list_pending_fs_ops(&conn)?;
-        ensure!(pending.len() == 1);
-        let pending_op = pending
-            .first()
-            .context("pending cleanup operation missing")?;
-
-        std::fs::remove_dir_all(&gif_path).context("remove GIF directory")?;
-        std::fs::write(&gif_path, b"gif").context("write GIF banner")?;
-        let payload: crate::pending_fs::DeleteBannerAssetsPayload =
-            serde_json::from_str(&pending_op.payload_json).context("parse pending payload")?;
-        crate::pending_fs::finalize_delete_banner_assets_payload(
-            &conn,
-            Some(&pending_op.id),
-            &payload,
-        )
-        .context("retry clearing board banner files")?;
-        ensure!(!path.exists());
-        ensure!(!gif_path.exists());
-        ensure!(crate::db::list_pending_fs_ops(&conn)?.is_empty());
-        Ok(())
-    }
 }

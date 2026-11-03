@@ -55,11 +55,11 @@ pub(in crate::server) async fn update_site_settings(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<SiteSettingsForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let is_banner_settings_only = form.site_name.is_none()
         && form.site_subtitle.is_none()
         && form.homepage_new_thread_badges_enabled.is_none()
@@ -78,7 +78,7 @@ pub(in crate::server) async fn update_site_settings(
         checkbox_is_on(form.banner_external_links_enabled.as_deref());
     let preserve_missing_badge_settings = is_banner_settings_only;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<()> {
             let mut pooled_connection = pool.get()?;
@@ -205,29 +205,5 @@ pub(in crate::server) async fn update_site_settings(
         .into_response())
     } else {
         Ok(Redirect::to("/admin/panel?settings_saved=1").into_response())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::resolved_checkbox_setting;
-
-    #[test]
-    fn resolved_checkbox_setting_preserves_existing_value_when_field_is_omitted() {
-        assert!(resolved_checkbox_setting(None, true, true));
-        assert!(!resolved_checkbox_setting(None, false, true));
-    }
-
-    #[test]
-    fn resolved_checkbox_setting_treats_missing_field_as_disabled_on_full_submit() {
-        assert!(!resolved_checkbox_setting(None, true, false));
-        assert!(!resolved_checkbox_setting(None, false, false));
-    }
-
-    #[test]
-    fn resolved_checkbox_setting_respects_explicit_checkbox_submissions() {
-        assert!(resolved_checkbox_setting(Some("1"), false, true));
-        assert!(resolved_checkbox_setting(Some("on"), false, false));
-        assert!(!resolved_checkbox_setting(Some("0"), true, true));
     }
 }

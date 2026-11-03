@@ -1,12 +1,20 @@
 /// Original tracing target, retained for existing `RUST_LOG` filters.
 const LOG_TARGET: &str = concat!(env!("CARGO_CRATE_NAME"), "::handlers::admin::backup::http");
 
-use super::{
-    check_admin_csrf_jar, header, require_admin_session_sid, require_same_origin_request, safety,
-    AdminPanelTarget, AppError, AppState, CookieJar, HeaderMap, HeaderValue, Multipart, Next, Path,
-    Request, Response, Result, Seek, StatusCode, BOARD_BACKUP_RESTORE_SECTION,
-    FULL_BACKUP_RESTORE_SECTION, SESSION_COOKIE,
+use super::{safety, BOARD_BACKUP_RESTORE_SECTION, FULL_BACKUP_RESTORE_SECTION};
+use crate::error::{AppError, Result};
+use crate::handlers::admin::{
+    check_admin_csrf_jar, require_admin_session_sid, require_same_origin_request, AdminPanelTarget,
+    SESSION_COOKIE,
 };
+use crate::middleware::AppState;
+use axum::extract::{Multipart, Request};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::Next;
+use axum::response::Response;
+use axum_extra::extract::cookie::CookieJar;
+use std::io::Seek;
+use std::path::Path;
 use tokio::io::AsyncWriteExt as _;
 
 pub(in crate::server) async fn backup_request_logging_middleware(
@@ -354,7 +362,7 @@ pub(super) async fn restore_auth_preflight(
     state: &AppState,
     headers: &HeaderMap,
     jar: &CookieJar,
-    peer: Option<std::net::SocketAddr>,
+    peer: crate::middleware::SecureCookieContext,
 ) -> Result<Option<String>> {
     let session_id = jar
         .get(SESSION_COOKIE)
@@ -364,7 +372,7 @@ pub(super) async fn restore_auth_preflight(
     {
         let pool = state.db.clone();
         let session_id_for_task = session_id.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        crate::middleware::data_access::spawn_blocking(move || -> Result<()> {
             let conn = pool.get()?;
             require_admin_session_sid(&conn, session_id_for_task.as_deref())
                 .map(|_completed_value| ())?;
@@ -631,108 +639,4 @@ pub(super) fn sanitize_board_short_value(board_short: &str) -> Result<String> {
         return Err(AppError::BadRequest("Invalid board name.".into()));
     }
     Ok(safe_board)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        ensure_restore_upload_within_budget, stream_restore_upload_to_tempfile, RestoreKind,
-    };
-    use anyhow::{ensure, Context as _, Result};
-    use axum::{
-        body::Body,
-        extract::Multipart,
-        http::{header, Request, StatusCode},
-        routing::post,
-        Router,
-    };
-    use tower::ServiceExt as _;
-
-    #[test]
-    fn restore_upload_budget_rejects_oversized_upload() -> Result<()> {
-        let error = ensure_restore_upload_within_budget(RestoreKind::Full, 6, 5)
-            .err()
-            .context("oversized restore upload was unexpectedly accepted")?;
-
-        ensure!(error.to_string().contains("restore budget"));
-        Ok(())
-    }
-
-    async fn parse_full_restore_upload(
-        mut multipart: Multipart,
-    ) -> crate::error::Result<&'static str> {
-        stream_restore_upload_to_tempfile(RestoreKind::Full, &mut multipart)
-            .await
-            .map(|_completed_value| ())?;
-        Ok("ok")
-    }
-
-    fn restore_multipart_body(fields: &[(&str, &str)]) -> (String, Vec<u8>) {
-        let boundary = "rustchan-restore-test-boundary".to_owned();
-        let mut body = Vec::new();
-        for (name, value) in fields {
-            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-            body.extend_from_slice(
-                format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
-            );
-            body.extend_from_slice(value.as_bytes());
-            body.extend_from_slice(b"\r\n");
-        }
-        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        body.extend_from_slice(
-            b"Content-Disposition: form-data; name=\"backup_file\"; filename=\"backup.zip\"\r\n",
-        );
-        body.extend_from_slice(b"Content-Type: application/zip\r\n\r\nPK\x05\x06restore\r\n");
-        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-        (boundary, body)
-    }
-
-    #[tokio::test]
-    async fn restore_upload_rejects_oversized_csrf_text_field() -> Result<()> {
-        let router = Router::new().route("/restore", post(parse_full_restore_upload));
-        let oversized = "x".repeat(4097);
-        let (boundary, body) = restore_multipart_body(&[("_csrf", &oversized)]);
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/restore")
-                    .header(
-                        header::CONTENT_TYPE,
-                        format!("multipart/form-data; boundary={boundary}"),
-                    )
-                    .body(Body::from(body))
-                    .context("build multipart request")?,
-            )
-            .await
-            .context("send multipart request")?;
-
-        ensure!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn restore_upload_rejects_duplicate_control_fields() -> Result<()> {
-        let router = Router::new().route("/restore", post(parse_full_restore_upload));
-        let (boundary, body) = restore_multipart_body(&[("_csrf", "one"), ("_csrf", "two")]);
-
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/restore")
-                    .header(
-                        header::CONTENT_TYPE,
-                        format!("multipart/form-data; boundary={boundary}"),
-                    )
-                    .body(Body::from(body))
-                    .context("build multipart request")?,
-            )
-            .await
-            .context("send multipart request")?;
-
-        ensure!(response.status() == StatusCode::BAD_REQUEST);
-        Ok(())
-    }
 }

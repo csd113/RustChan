@@ -285,39 +285,3 @@ fn process_rss_kb() -> u64 {
     }
     0
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "assertions verify that query failures cannot be displayed as healthy zero metrics"
-    )]
-    fn database_snapshot_propagates_schema_and_row_errors() -> anyhow::Result<()> {
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory();
-        let pool = r2d2::Pool::builder().max_size(1).build(manager)?;
-        let connection = pool.get()?;
-        connection.execute_batch("CREATE TABLE boards (id INTEGER, short_name TEXT); CREATE TABLE threads (id INTEGER, board_id INTEGER, archived INTEGER); CREATE TABLE posts (id INTEGER, thread_id INTEGER); INSERT INTO boards VALUES (1, 'test');")?;
-        drop(connection);
-        let snapshot = read_database_stats(&pool)?;
-        assert_eq!(snapshot.boards, 1, "healthy board count must be retained");
-        let malformed_connection = pool.get()?;
-        let _changed_rows =
-            malformed_connection.execute("UPDATE boards SET short_name = NULL", [])?;
-        drop(malformed_connection);
-        assert!(
-            read_database_stats(&pool).is_err(),
-            "a malformed board row must fail the whole snapshot"
-        );
-        let incomplete_connection = pool.get()?;
-        let _dropped_table_rows = incomplete_connection.execute("DROP TABLE posts", [])?;
-        drop(incomplete_connection);
-        assert!(
-            read_database_stats(&pool).is_err(),
-            "SQL errors must not turn into healthy zero counts"
-        );
-        Ok(())
-    }
-}

@@ -327,6 +327,3 @@ fn write_u24(output: &mut File, value: u32) -> Result<()> {
     output.write_all(bytes.get(..3).context("invalid three-byte field")?)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests;

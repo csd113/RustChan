@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.99.0-trixie AS builder
+FROM rust:1.99.1-trixie AS builder
 WORKDIR /build
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
@@ -36,8 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /out/rustchan-cli /usr/local/bin/rustchan-cli
 
-ENV RUSTCHAN_CONTAINER=1 \
-    CHAN_HOST=0.0.0.0 \
+ENV CHAN_HOST=0.0.0.0 \
     CHAN_PORT=8080 \
     CHAN_TOR_SUPPORT=false
 

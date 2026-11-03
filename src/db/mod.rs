@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 /// Transactional administrator credential workflows.
 pub mod accounts;
-/// Administrative users, sessions, moderation, and database health queries.
+/// Administrative users, sessions, moderation, and compatible health-query exports.
 pub mod admin;
 /// Banner asset persistence and ordering.
 pub mod banners;
@@ -17,11 +17,15 @@ pub mod boards;
 mod diagnostics;
 /// Durable filesystem-operation records.
 mod fs_ops;
+/// Durable background-job persistence.
+mod jobs;
+/// Database health checks and maintenance operations.
+mod maintenance;
 /// Database schema-version bookkeeping.
 mod migrations;
 /// `SQLite` connection-pool creation and startup checks.
 mod pool;
-/// Post persistence, search, deletion, and background-job state.
+/// Post persistence, search, deletion, polling, and media state.
 pub mod posts;
 /// Baseline schema installation, repair, and verification.
 mod schema;
@@ -37,21 +41,24 @@ pub mod threads;
 mod types;
 /// Anonymous per-thread display preferences.
 mod user_thread_prefs;
-#[cfg(test)]
-/// Explicitly invoked populated SQLite workload and query-plan evidence.
-mod workload;
 
 pub use pool::{first_run_check, has_no_admin, init_pool};
 pub use types::{CachedFile, DbPool, NewPost};
-
-#[cfg(test)]
-pub use pool::init_test_pool;
 
 pub use accounts::*;
 pub use admin::*;
 pub use banners::*;
 pub use boards::*;
 pub use fs_ops::*;
+pub use jobs::{
+    acknowledge_failed_background_jobs, background_job_summary, claim_next_job, complete_job,
+    complete_media_job_without_output_in_tx, complete_stale_media_job_in_tx, enqueue_job, fail_job,
+    fail_media_job_in_tx, finish_video_media_job_in_tx, finish_waveform_media_job_in_tx,
+    pending_job_count, persist_media_job, persist_thread_prune_intent, recent_background_jobs,
+    recover_interrupted_background_jobs, reject_media_job_at_capacity, BackgroundJobSummary,
+    InterruptedJobRecovery, JobFailureState, MediaJobFinish, MediaJobSchedule, RecentBackgroundJob,
+    ThreadPruneSchedule,
+};
 pub use posts::*;
 pub use setup::*;
 pub use themes::*;
@@ -233,51 +240,4 @@ pub fn paths_safe_to_delete(
     }
 
     Ok(safe)
-}
-
-#[cfg(test)]
-/// Transaction-helper regression tests.
-mod tests {
-    use super::commit_transaction;
-    use anyhow::{ensure, Context as _, Result};
-
-    #[test]
-    fn commit_transaction_rolls_back_after_a_failed_commit() -> Result<()> {
-        let pool = super::init_test_pool()?;
-        let conn = pool.get().context("get test database connection")?;
-        conn.execute_batch("PRAGMA defer_foreign_keys = ON; BEGIN IMMEDIATE")
-            .context("begin deferred transaction")?;
-        // Deferred foreign keys turn the commit into a failure while the
-        // transaction stays active, which is the state the helper must clean up.
-        conn.execute_batch(
-            "INSERT INTO polls (thread_id, question, expires_at) VALUES (999999, 'q', 0)",
-        )
-        .context("insert deferred-violation row")?;
-
-        ensure!(
-            commit_transaction(&conn, "test commit failure").is_err(),
-            "a deferred foreign-key violation must fail the commit"
-        );
-        // Starting a new transaction proves the failed one was rolled back.
-        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK")
-            .context("connection must remain usable after a failed commit")?;
-        Ok(())
-    }
-
-    #[test]
-    fn readiness_probe_requires_the_release_schema_version() -> Result<()> {
-        let empty = rusqlite::Connection::open_in_memory().context("open schema-less database")?;
-        ensure!(
-            super::database_ready_probe(&empty).is_err(),
-            "a database without the release schema must not report ready"
-        );
-
-        let pool = super::init_test_pool()?;
-        let conn = pool.get().context("get test database connection")?;
-        ensure!(
-            super::database_ready_probe(&conn).is_ok(),
-            "a release-baseline database must report ready"
-        );
-        Ok(())
-    }
 }

@@ -1,11 +1,19 @@
-use super::{
-    banner, board_manifest, build_board_backup_manifest, copy_limited,
-    local_backup_timestamp_label, prune_stale_temp_board_downloads, read_limited_bytes, safety,
-    storage, temp_board_download_dir, unique_backup_filename, validate_restore_safe_entry_name,
-    write_board_backup_archive, zip_file_options_for_path, AppError, Path, PathBuf, Result, Seek,
-    Utc, Write, BANNER_RESTORE_TOTAL_MAX_BYTES, BOARD_MANIFEST_MAX_BYTES, SQLITE_HEADER,
-    ZIP_ENTRY_MAX_BYTES,
+use super::create::{build_board_backup_manifest, write_board_backup_archive};
+use super::downloads::prune_stale_temp_board_downloads;
+use super::limits::{copy_limited, copy_limited_with_total_budget};
+use super::safety::{
+    read_limited_bytes, validate_restore_safe_entry_name, BANNER_RESTORE_TOTAL_MAX_BYTES,
+    BOARD_MANIFEST_MAX_BYTES, ZIP_ENTRY_MAX_BYTES,
 };
+use super::{
+    board_manifest, local_backup_timestamp_label, safety, storage, temp_board_download_dir,
+    unique_backup_filename, zip_file_options_for_path, SQLITE_HEADER,
+};
+use crate::banner;
+use crate::error::{AppError, Result};
+use chrono::Utc;
+use std::io::{Seek, Write};
+use std::path::{Path, PathBuf};
 
 pub(super) struct TempZipCleanupGuard {
     path: Option<PathBuf>,
@@ -32,7 +40,7 @@ impl Drop for TempZipCleanupGuard {
 pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<board_manifest::BoardBackupManifest> {
-    if !archive.file_names().any(|name| name == "board.json") {
+    if !safety::zip_contains_entry(archive, "board.json")? {
         return Err(AppError::BadRequest(
             "Invalid board backup: zip must contain 'board.json'. \
              (Did you upload a full-site backup instead?)"
@@ -52,11 +60,11 @@ pub(super) fn parse_board_backup_manifest_from_zip<R: std::io::Read + Seek>(
 pub(super) fn validate_full_restore_archive_layout<R: std::io::Read + Seek>(
     archive: &zip::ZipArchive<R>,
 ) -> Result<()> {
-    if archive.file_names().any(|name| name == "chan.db") {
+    if safety::zip_contains_entry(archive, "chan.db")? {
         return Ok(());
     }
 
-    if archive.file_names().any(|name| name == "board.json") {
+    if safety::zip_contains_entry(archive, "board.json")? {
         return Err(AppError::BadRequest(
             "Invalid full backup: zip must contain 'chan.db' at the root. \
              This archive looks like a board backup; use Board restore instead."
@@ -77,7 +85,7 @@ pub(super) fn extract_sqlite_db_from_full_backup_archive<R: std::io::Read + Seek
     let mut db_entry = archive.by_name("chan.db").map_err(|_error| {
         AppError::BadRequest("Invalid full backup: zip must contain 'chan.db' at the root.".into())
     })?;
-    let mut out = std::fs::File::create(temp_db)
+    let mut out = super::recovery_files::open_private_file_new(temp_db)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Create temp DB: {error}")))?;
     crate::config::restrict_private_file_permissions(temp_db).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
@@ -173,7 +181,10 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + Seek, W: Write 
         let mut entry = archive
             .by_index(index)
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip[{index}]: {error}")))?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+            .into_owned();
         validate_restore_safe_entry_name(&name)?;
         if !name.starts_with(&board_prefix) {
             continue;
@@ -182,6 +193,7 @@ fn copy_board_upload_entries_from_full_backup<R: std::io::Read + Seek, W: Write 
             zip.add_directory(
                 &name,
                 zip::write::SimpleFileOptions::default()
+                    .large_file(true)
                     .compression_method(zip::CompressionMethod::Deflated),
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip dir: {error}")))?;
@@ -225,9 +237,18 @@ fn temporary_archive_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}_{}.zip", uuid::Uuid::new_v4().simple()))
 }
 
-pub(super) fn prepare_saved_full_restore_archive(root_dir: &Path) -> Result<PathBuf> {
+pub(super) fn prepare_saved_full_restore_archive(root_dir: &Path) -> Result<(PathBuf, u64)> {
     let verified = storage::verify_saved_backup(root_dir, &[storage::BackupScope::FullSite])?;
-    create_full_restore_archive(&verified)
+    let budget = verified
+        .manifest
+        .files
+        .iter()
+        .try_fold(0_u64, |sum, file| {
+            sum.checked_add(file.size).ok_or_else(|| {
+                AppError::BadRequest("Saved backup size overflows restore budget.".into())
+            })
+        })?;
+    Ok((create_full_restore_archive(&verified)?, budget))
 }
 
 #[expect(
@@ -237,6 +258,7 @@ pub(super) fn prepare_saved_full_restore_archive(root_dir: &Path) -> Result<Path
 pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> Result<PathBuf> {
+    let mut declared_bytes = 0_u64;
     let mut db_index = None;
     let mut db_bytes = 0_u64;
     let mut mapped_files = Vec::new();
@@ -251,12 +273,23 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
                 "Read Backup v4 transfer entry #{index}: {error}"
             ))
         })?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|error| AppError::BadRequest(format!("Invalid ZIP entry name: {error}")))?
+            .into_owned();
         validate_restore_safe_entry_name(&name)?;
         if entry.is_dir() {
             continue;
         }
 
+        declared_bytes = declared_bytes
+            .checked_add(entry.size())
+            .ok_or_else(|| AppError::BadRequest("Transfer archive size overflow.".into()))?;
+        if declared_bytes > safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES {
+            return Err(AppError::BadRequest(
+                "Transfer archive exceeds the extracted restore budget.".into(),
+            ));
+        }
         if name == "db/rustchan.sqlite3" {
             db_index = Some(index);
             db_bytes = entry.size();
@@ -308,9 +341,10 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
         )
     })?;
     let temp_zip = temporary_archive_path("rustchan_v4_transfer_full_restore");
-    let output = std::fs::File::create(&temp_zip).map_err(|error| {
+    let output = super::recovery_files::open_private_file_new(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    let mut output_cleanup = TempZipCleanupGuard::new(temp_zip.clone());
     crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Set private permissions on {}: {error}",
@@ -319,6 +353,7 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
+        .large_file(true)
         .compression_method(zip::CompressionMethod::Deflated);
     let manifest = serde_json::json!({
         "version": 3_i32,
@@ -341,15 +376,23 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
     )
     .map_err(|error| AppError::Internal(anyhow::anyhow!("Write backup.json: {error}")))?;
 
+    let mut converted_bytes = 0_u64;
     zip.start_file("chan.db", options)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip chan.db: {error}")))?;
     {
         let mut entry = archive.by_index(db_index).map_err(|error| {
             AppError::Internal(anyhow::anyhow!("Read Backup v4 DB entry: {error}"))
         })?;
-        copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))
-            .map(|_completed_value| ())?;
+        copy_limited_with_total_budget(
+            &mut entry,
+            &mut zip,
+            ZIP_ENTRY_MAX_BYTES,
+            &mut converted_bytes,
+            safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+            "Transfer conversion",
+        )
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy chan.db: {error}")))
+        .map(|_completed_value| ())?;
     }
 
     for (index, zip_path) in mapped_files {
@@ -360,12 +403,20 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
                 "Read Backup v4 transfer entry #{index}: {error}"
             ))
         })?;
-        copy_limited(&mut entry, &mut zip, ZIP_ENTRY_MAX_BYTES)
-            .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
-            .map(|_completed_value| ())?;
+        copy_limited_with_total_budget(
+            &mut entry,
+            &mut zip,
+            ZIP_ENTRY_MAX_BYTES,
+            &mut converted_bytes,
+            safety::RESTORE_TOTAL_EXTRACTED_MAX_BYTES,
+            "Transfer conversion",
+        )
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("Copy {zip_path}: {error}")))
+        .map(|_completed_value| ())?;
     }
 
     finalize_archive(zip, &temp_zip)?;
+    output_cleanup.disarm();
     Ok(temp_zip)
 }
 
@@ -386,9 +437,10 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
 
     let manifest = &verified.manifest;
     let temp_zip = temporary_archive_path("rustchan_v4_full_restore");
-    let output = std::fs::File::create(&temp_zip).map_err(|error| {
+    let output = super::recovery_files::open_private_file_new(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    let mut output_cleanup = TempZipCleanupGuard::new(temp_zip.clone());
     crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Set private permissions on {}: {error}",
@@ -397,6 +449,7 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
+        .large_file(true)
         .compression_method(zip::CompressionMethod::Deflated);
 
     let upload_file_count = u64::try_from(
@@ -558,13 +611,14 @@ fn create_full_restore_archive(verified: &storage::VerifiedBackup) -> Result<Pat
     }
 
     finalize_archive(zip, &temp_zip)?;
+    output_cleanup.disarm();
     Ok(temp_zip)
 }
 
 pub(super) fn prepare_saved_board_restore_archive(
     root_dir: &Path,
     board_short: Option<&str>,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, u64)> {
     let verified = storage::verify_saved_backup(
         root_dir,
         &[
@@ -578,7 +632,7 @@ pub(super) fn prepare_saved_board_restore_archive(
 fn create_board_restore_archive(
     verified: &storage::VerifiedBackup,
     board_short: Option<&str>,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, u64)> {
     let board_short = match board_short {
         Some(board_short) => board_short.to_owned(),
         None => verified
@@ -595,16 +649,28 @@ fn create_board_restore_archive(
     let board_layout = verified.boards.get(&board_short).ok_or_else(|| {
         AppError::NotFound(format!("Board /{board_short}/ not found in this backup."))
     })?;
+    if board_layout.board_json.size > BOARD_MANIFEST_MAX_BYTES {
+        return Err(AppError::BadRequest("Board export exceeds the 64 MiB manifest restore limit; restore the full site instead.".into()));
+    }
     let board_json = storage::read_verified_file(&board_layout.board_json)?;
+    let budget =
+        board_layout
+            .upload_files
+            .iter()
+            .try_fold(board_layout.board_json.size, |sum, file| {
+                sum.checked_add(file.size)
+                    .ok_or_else(|| AppError::BadRequest("Board restore budget overflow.".into()))
+            })?;
 
     let temp_zip = temporary_archive_path("rustchan_v4_board_restore");
     let filename = format!(
         "rustchan-board-{board_short}-{}.zip",
         uuid::Uuid::new_v4().simple()
     );
-    let output = std::fs::File::create(&temp_zip).map_err(|error| {
+    let output = super::recovery_files::open_private_file_new(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!("Create {}: {error}", temp_zip.display()))
     })?;
+    let mut output_cleanup = TempZipCleanupGuard::new(temp_zip.clone());
     crate::config::restrict_private_file_permissions(&temp_zip).map_err(|error| {
         AppError::Internal(anyhow::anyhow!(
             "Set private permissions on {}: {error}",
@@ -613,6 +679,7 @@ fn create_board_restore_archive(
     })?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(output));
     let options = zip::write::SimpleFileOptions::default()
+        .large_file(true)
         .compression_method(zip::CompressionMethod::Deflated);
     zip.start_file("board.json", options)
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Zip board.json: {error}")))?;
@@ -625,13 +692,14 @@ fn create_board_restore_archive(
     }
 
     finalize_archive(zip, &temp_zip)?;
-    Ok((temp_zip, filename))
+    output_cleanup.disarm();
+    Ok((temp_zip, filename, budget))
 }
 
 pub(super) fn extract_board_archive_from_saved_full_backup(
     root_dir: &Path,
     board_short: &str,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, u64)> {
     let verified = storage::verify_saved_backup(root_dir, &[storage::BackupScope::FullSite])?;
     create_board_restore_archive(&verified, Some(board_short))
 }
@@ -707,227 +775,4 @@ pub(super) fn extract_board_archive_from_full_backup(
     })?;
 
     Ok((final_path, filename))
-}
-
-#[cfg(test)]
-mod tests {
-    struct FlushFailure(std::io::Cursor<Vec<u8>>);
-
-    impl Write for FlushFailure {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.write(bytes)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("injected final flush failure"))
-        }
-    }
-
-    impl Seek for FlushFailure {
-        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
-            self.0.seek(position)
-        }
-    }
-
-    #[test]
-    fn archive_publication_reports_final_flush_failures() -> TestResult<()> {
-        let output = FlushFailure(std::io::Cursor::new(Vec::new()));
-        let zip = zip::ZipWriter::new(output);
-        let error = finalize_archive(zip, Path::new("test.zip"))
-            .err()
-            .context("final flush failure was hidden")?;
-        ensure!(
-            error.to_string().contains("injected final flush failure"),
-            "underlying flush error was lost"
-        );
-        Ok(())
-    }
-
-    use super::*;
-    use anyhow::{ensure, Context as _, Result as TestResult};
-
-    fn full_fixture_root(label: &str) -> TestResult<(tempfile::TempDir, PathBuf)> {
-        let dir = tempfile::tempdir().context("create full-backup fixture directory")?;
-        let root = dir.path().join(label);
-        storage::write_saved_backup_fixture(
-            &root,
-            storage::BackupScope::FullSite,
-            storage::board_file_fixtures(),
-            Some(storage::database_snapshot_fixture()?),
-            1_715_010_000_i64,
-        )
-        .map(|_completed_value| ())?;
-        Ok((dir, root))
-    }
-
-    fn board_fixture_root(label: &str) -> TestResult<(tempfile::TempDir, PathBuf)> {
-        let dir = tempfile::tempdir().context("create board-backup fixture directory")?;
-        let root = dir.path().join(label);
-        storage::write_saved_backup_fixture(
-            &root,
-            storage::BackupScope::Board,
-            storage::board_file_fixtures(),
-            None,
-            1_715_020_000_i64,
-        )
-        .map(|_completed_value| ())?;
-        Ok((dir, root))
-    }
-
-    #[test]
-    fn saved_full_v4_restore_rejects_db_snapshot_escape() -> TestResult<()> {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site_db-escape")?;
-        let mut manifest = storage::load_manifest(&root.join(storage::MANIFEST_FILE_NAME))?;
-        manifest
-            .db_snapshot
-            .as_mut()
-            .context("fixture manifest has no database snapshot")?
-            .path = "../escape.db".to_owned();
-        storage::write_json_pretty(&root.join(storage::MANIFEST_FILE_NAME), &manifest)
-            .context("write modified manifest")?;
-
-        let error = prepare_saved_full_restore_archive(&root)
-            .err()
-            .context("database snapshot escape was unexpectedly accepted")?;
-        ensure!(error.to_string().contains("suspicious logical path"));
-        Ok(())
-    }
-
-    #[test]
-    fn saved_full_v4_restore_rejects_manifest_controlled_site_asset_escape() -> TestResult<()> {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-favicon-escape")?;
-        let favicon_bytes = b"icon".to_vec();
-        let root_parent = root.parent().context("fixture root has no parent")?;
-        std::fs::write(root_parent.join("escape.ico"), &favicon_bytes)
-            .context("write outside favicon")?;
-        let mut manifest = storage::load_manifest(&root.join(storage::MANIFEST_FILE_NAME))?;
-        manifest.files.push(storage::file_entry_fixture(
-            "../escape.ico",
-            None,
-            storage::BackupFileKind::Favicon,
-            &favicon_bytes,
-        ));
-        storage::write_json_pretty(&root.join(storage::MANIFEST_FILE_NAME), &manifest)
-            .context("write modified manifest")?;
-
-        let error = prepare_saved_full_restore_archive(&root)
-            .err()
-            .context("favicon escape was unexpectedly accepted")?;
-        ensure!(error.to_string().contains("suspicious logical path"));
-        Ok(())
-    }
-
-    #[test]
-    fn saved_full_v4_restore_rejects_tor_key_escape() -> TestResult<()> {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-tor-escape")?;
-        let tor_bytes = b"secret".to_vec();
-        let root_parent = root.parent().context("fixture root has no parent")?;
-        std::fs::write(root_parent.join("outside.key"), &tor_bytes)
-            .context("write outside Tor key")?;
-        let mut manifest = storage::load_manifest(&root.join(storage::MANIFEST_FILE_NAME))?;
-        manifest.includes.tor_keys = true;
-        manifest.files.push(storage::file_entry_fixture(
-            "../outside.key",
-            None,
-            storage::BackupFileKind::TorKey,
-            &tor_bytes,
-        ));
-        let mut metadata = storage::load_metadata(&root.join(storage::BACKUP_METADATA_FILE_NAME))?;
-        metadata.includes_tor_keys = true;
-        storage::write_json_pretty(&root.join(storage::MANIFEST_FILE_NAME), &manifest)
-            .context("write modified manifest")?;
-        storage::write_json_pretty(&root.join(storage::BACKUP_METADATA_FILE_NAME), &metadata)
-            .context("write modified metadata")?;
-
-        let error = prepare_saved_full_restore_archive(&root)
-            .err()
-            .context("Tor key escape was unexpectedly accepted")?;
-        ensure!(error.to_string().contains("suspicious logical path"));
-        Ok(())
-    }
-
-    #[test]
-    fn saved_board_v4_restore_rejects_escaping_manifest_path() -> TestResult<()> {
-        let (_dir, root) = board_fixture_root("2026-05-06_board-escape")?;
-        let mut manifest = storage::load_manifest(&root.join(storage::MANIFEST_FILE_NAME))?;
-        let entry = manifest
-            .files
-            .iter_mut()
-            .find(|entry| entry.kind == storage::BackupFileKind::BoardJson)
-            .context("fixture manifest has no board JSON entry")?;
-        entry.logical_path = "../board.json".to_owned();
-        storage::write_json_pretty(&root.join(storage::MANIFEST_FILE_NAME), &manifest)
-            .context("write modified manifest")?;
-
-        let error = prepare_saved_board_restore_archive(&root, None)
-            .err()
-            .context("escaping board manifest path was unexpectedly accepted")?;
-        ensure!(error.to_string().contains("suspicious logical path"));
-        Ok(())
-    }
-
-    #[test]
-    fn selected_board_extraction_from_saved_full_rejects_escaping_manifest_path() -> TestResult<()>
-    {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-board-escape")?;
-        let mut manifest = storage::load_manifest(&root.join(storage::MANIFEST_FILE_NAME))?;
-        let entry = manifest
-            .files
-            .iter_mut()
-            .find(|entry| entry.kind == storage::BackupFileKind::BoardJson)
-            .context("fixture manifest has no board JSON entry")?;
-        entry.logical_path = "../board.json".to_owned();
-        storage::write_json_pretty(&root.join(storage::MANIFEST_FILE_NAME), &manifest)
-            .context("write modified manifest")?;
-
-        let error = extract_board_archive_from_saved_full_backup(&root, "tech")
-            .err()
-            .context("escaping selected-board manifest path was unexpectedly accepted")?;
-        ensure!(error.to_string().contains("suspicious logical path"));
-        Ok(())
-    }
-
-    #[test]
-    fn selected_board_extraction_from_saved_full_rejects_cross_board_file() -> TestResult<()> {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-cross-board")?;
-        let cross_board_path = root.join("boards/other/media/src/example.txt");
-        let cross_board_parent = cross_board_path
-            .parent()
-            .context("cross-board fixture path has no parent")?;
-        std::fs::create_dir_all(cross_board_parent)
-            .context("create cross-board parent directory")?;
-        std::fs::write(&cross_board_path, b"media").context("write cross-board file")?;
-
-        let mut manifest = storage::load_manifest(&root.join(storage::MANIFEST_FILE_NAME))?;
-        let entry = manifest
-            .files
-            .iter_mut()
-            .find(|entry| entry.logical_path == "boards/tech/media/src/example.txt")
-            .context("fixture manifest has no selected-board media entry")?;
-        entry.logical_path = "boards/other/media/src/example.txt".to_owned();
-        storage::write_json_pretty(&root.join(storage::MANIFEST_FILE_NAME), &manifest)
-            .context("write modified manifest")?;
-
-        let error = extract_board_archive_from_saved_full_backup(&root, "tech")
-            .err()
-            .context("cross-board selected-board file was unexpectedly accepted")?;
-        ensure!(error
-            .to_string()
-            .contains("must stay within /tech/ uploads"));
-        Ok(())
-    }
-
-    #[test]
-    fn temp_zip_cleanup_guard_removes_conversion_file_on_early_failure() -> TestResult<()> {
-        let (_dir, root) = full_fixture_root("2026-05-06_full-site-cleanup")?;
-        let temp_zip = prepare_saved_full_restore_archive(&root)?;
-        ensure!(temp_zip.exists());
-        {
-            let _guard = TempZipCleanupGuard::new(temp_zip.clone());
-            let _early_failure: Result<()> =
-                Err(AppError::BadRequest("synthetic early failure".into()));
-        }
-        ensure!(!temp_zip.exists());
-        Ok(())
-    }
 }

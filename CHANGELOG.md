@@ -1,806 +1,223 @@
 # Changelog
 
-All notable changes to RustChan will be documented in this file.
+Release highlights and upgrade cautions. For current operating instructions, use
+[setup](SETUP.md), [backups](docs/backups.md), and
+[software updates](docs/software-updates.md). Earlier implementation details
+remain in Git history.
+
+## RustChan 1.7.5 — 2026-11-03
+
+- Fixed banner and favicon uploads rejected by conflicting document and HTTP
+  referrer policies. Thanks to @jfkn1ght for reporting the banner problem in #123.
+- Tightened CSRF checks for forms, login redirects, backups, and browser origins.
+- Replaced the automatic updater with a version check and a GitHub download link.
+  Upgrades and settings restarts now use your normal launcher or deployment tools.
+- Added an Intel Mac download alongside Apple Silicon and the existing Linux and
+  Windows builds. Issue reports now ask only for version, platform, and the issue.
+
+- Corrected upload rejection status mapping, including secondary audio type and
+  size errors, while keeping filesystem and decoder diagnostics private.
+
+- Corrected Tor descriptor-timeout warning counts across dependency-only and
+  shared outputs, including concurrent events and suppression-window summaries.
+
+- Updated the supported toolchain to Rust 1.99.1 and refreshed Rust dependencies,
+  including Hayro 0.8 and ZIP 9; Arti remains on 0.47.0.
+- Added manual CI validation and native Linux x86_64 builds alongside ARM64,
+  Apple Silicon, and Windows.
+
+Upgrading from 1.7.1: stop RustChan, back up the complete data directory and old
+binary, then replace the binary in place. Keep the same data path; startup handles
+the database upgrade. Older external updater services need a manual switch;
+see the [upgrade guide](https://github.com/csd113/RustChan/blob/main/docs/software-updates.md#manual-upgrade-of-a-source-install).
 
 ## RustChan 1.7.1 — 2026-10-09
 
-### Fixed
-
-- Fixed startup migration from earlier release databases, including 1.6.6, by recognizing the additive `idx_reports_reporter_created` index. The missing allowlist entry previously prevented all recognized 1.7.0 schema repairs and caused startup to fail.
-- Expanded the upgrade regression fixture to cover the earlier report index, thread ordering index and submission-receipt schema together, while verifying preserved live receipts, deletion history and repeated startup.
-
-### Upgrade notes
-
-- Back up the complete data directory before upgrading. Database schema versions continue to match the RustChan package release: successful 1.7.1 startup verifies the full schema before recording `1.7.1`. Existing content and administrator records are retained; unknown schema drift remains rejected.
-- This release replaces 1.7.0 as the stable release. The earlier 1.7.0 release is retained as a prerelease because of its upgrade migration failure.
+- Fixed startup migration from earlier releases, including 1.6.6 databases with
+  the additive report index. Unknown schema drift still fails closed.
+- Back up the complete data directory before upgrading. Successful startup
+  verifies the schema before recording 1.7.1 and retains content and admin records.
+- Replaces 1.7.0 as stable; 1.7.0 remains a prerelease because of its migration
+  failure.
 
 ## RustChan 1.7.0 — 2026-10-08
 
-### Upgrade notes
-
-- Back up the complete data directory before upgrading. Native Linux updates retain the signed-package verification, pre-upgrade snapshots and full data-and-binary rollback introduced in 1.6.6; the minimum updater remains 1.6.6. Containers, macOS, Windows and custom installations continue to use their deployment tools.
-- Rust 1.99 remains the minimum supported compiler.
-
-### Improved
-
-- Improved thumbnail delivery and caching while preserving board permissions, private-media access checks and existing preview formats.
-- Refined thread controls, post actions and archive navigation, including consistent handling of locked, archived, sticky and pruned threads.
-- Refreshed Frutiger Aero and refined the other themes, with focused readability improvements for Forest and Terminal.
-- Updated Rust dependencies within the existing dependency set.
-
-### Fixed
-
-- Release settings locks explicitly when configuration operations finish, preventing duplicate process descriptors from delaying subsequent saves or restarts.
-- Hardened posting and thread lifecycle transactions, retry receipts, reply counters, retention and recoverable media publication/deletion. Posting checks current thread state and board policy before committing.
-- Hardened hostile input handling across uploads, paths, redirects, administrator authentication/settings, backups and restores.
-- Bounded expensive search, CAPTCHA and request work, strengthened rate limiting and connection handling, and expanded security and lifecycle regression coverage.
+- Improved thumbnail caching, thread controls, archive navigation, and themes.
+- Hardened posting, retry handling, retention, recoverable media operations,
+  authentication, uploads, backups, request limits, and settings locks.
+- Retained signed Linux updates and full data-and-binary rollback; the minimum
+  updater is 1.6.6. Back up before upgrading. This release had an upgrade failure
+  corrected in 1.7.1.
 
 ## RustChan 1.6.6 — 2026-10-03
 
-- Fixed migration of supported earlier package baselines, including 1.6.0 databases missing the two newer post-query indexes. Unknown schema drift remains rejected; upgrades preserve existing content and retain full data-and-binary rollback.
-- Documented the tested offline preparation required for 1.6.0 → the already published 1.6.5 release and stopped manual adoption of earlier source installations.
-- Integrated the Linux controller and process monitor into the application executable, with embedded official release verification, full data rollback and public admission after durable commit. Exceptional loss of writer-exit proof can require a host reboot. New update packages require the 1.6.6 controller generation.
-- Gave the first database connection a bounded 30-second initialization deadline while retaining one-second request checkout waits, asynchronous spare initialization and full SQLite durability.
-- Completed executable verification before starting the Linux guardian handshake, preventing large source/debug builds from timing out during administrator startup.
-- Fixed native readiness checks for direct HTTPS installations so public admission opens after the configured secure listener is ready.
-- Updated all direct Rust dependencies to the latest compatible stable releases, including Arti 0.47, SQLite and Argon2 0.6. Existing Argon2 password hashes remain supported with unchanged cost limits.
-- Updated pinned GitHub Actions and audit tools, and moved container images to Debian 13. Retained Rust 1.99 and the Rust-only TLS provider policy.
-- Removed local agent instructions and the complete Playwright harness from Git tracking, restored their ignore rules and added a CI guard against accidental reintroduction. Local copies remain available for development.
-- Native Linux reboot and power-loss recovery testing is being performed separately. Same-boot loss of writer-exit proof refuses startup and can require a host reboot; process-loss, installation, controller handoff and full rollback fixtures passed.
+- Fixed migration of supported earlier databases, including 1.6.0 installations
+  missing post-query indexes. Unknown schema drift remains rejected.
+- Integrated the Linux update controller and process monitor into the application
+  executable, with signed release verification and full rollback. New native
+  update packages require the 1.6.6 controller generation.
+- Improved initial database connection timing, executable verification, and HTTPS
+  readiness. Updated Arti to 0.47 and container images to Debian 13.
+- Same-boot loss of writer-exit proof blocks startup and can require a host reboot;
+  recovery never assumes that a writer has stopped.
 
 ## RustChan 1.6.5 — 2026-10-03
 
-- Moved image processing, supported audio decoding, media probing and PDF previews into Rust, with optional FFmpeg fallback for video and uncovered audio codecs.
-- Added verified administrator settings restarts, configuration rollback and recovery handling.
-- Improved SQLite connection ownership and measured query performance; CLI startup proceeds once one usable database connection is ready.
-- Fixed media timing, multistream audio, bounded previews, Speex waveform layouts, AV1 WebM conversion and Windows restart builds.
-- Hardened the Rust 1.99 lint policy and consolidated console, request and test utilities.
+- Moved image processing, supported audio decoding, media probing, and PDF
+  previews into Rust; FFmpeg remains available for video and uncovered audio.
+- Added verified settings restarts and configuration recovery; improved media
+  timing, bounded previews, and SQLite connection handling.
 
 ## RustChan 1.6.0 — 2026-10-01
 
-This release includes every integrated change since the published v1.5.0 release:
-the container deployment workflow, correctness fixes, terminal and web administration
-upgrades, public posting and reading improvements, and verified native software updates.
-
-### Upgrade notes
-
-- Back up the complete data directory before upgrading. Existing database structures are verified and stamped for the running 1.6.0 package; Rust 1.99 is the minimum supported compiler.
-- Native self-updates require one-time operator setup on Linux GNU x86_64 or ARM64: separate service identities, the supplied systemd/polkit configuration, a protected updater executable and independently provisioned trusted public key. The updater is operator-managed and is not replaced by application updates. See [Software Updates](docs/software-updates.md).
-- Containers, macOS, Windows and custom installations use their deployment tools to install releases. Their admin panel can check releases but does not offer native installation. Keep container data volumes when recreating an instance.
-- `/readyz` additionally reports the running package version. It does not expose release availability, updater transactions or retained backup metadata.
-
-### Added
-
-- Added the administrator-only Software Updates task, stable-release availability notice and persisted progress/results, integrated into the existing admin workspace and all nine themes. Installation requires the current administrator password, CSRF/same-origin validation, an expiring one-use approval and explicit restart confirmation.
-- Added a separate native updater with bounded, fixed-operation local IPC and official-repository release discovery. Ed25519-signed manifests bind release identity, target, compatibility, sizes and hashes; strict archive and ELF checks reject unsafe or mismatched payloads before activation.
-- Added mandatory verified pre-upgrade snapshots of the database, configuration, media and private runtime state. Failed activation, migration or readiness restores the previous executable and persistent state together; durable recovery gates startup after interruptions and retains evidence when operator intervention is required. Snapshot metadata appears in the existing Backups task.
-- Added deterministic Linux update packaging, signed manifests/public-key assets and signing tests to the release workflow while retaining the four existing platform ZIPs and checksums. Stable publication requires the repository signing secret and verifies both native targets before publishing.
-- Added a production container image, persistent-volume Compose setup and GHCR publishing for Linux amd64/arm64. Main and stable tags publish `latest`, version tags and immutable commit tags; Compose supports pinning a chosen image.
-
-### Improved
-
-- Expanded the terminal administration console with task-oriented browsing, contextual forms and dialogs, logs, history, telemetry, help and responsive operator views.
-- Reorganized web administration into 22 task sections with searchable configuration controls and account management. Settings distinguish active, saved, environment-overridden and next-restart values; validated persistence retains operator comments and applies live settings only after successful saves.
-- Standardized admin spacing, typography, controls, tables, state treatments and expandable details across all nine themes. Responsive forms work down to 320px; dense tables scroll within named keyboard-focusable regions, with reachable actions and visible focus.
-- Improved current-section navigation, contrast, status announcements and backup progress semantics, while preserving native forms, no-JavaScript fallbacks and reduced-motion support.
-- Refreshed the README, setup and container guides, demonstration screenshots, and operator documentation for the terminal/admin workflows and native update boundary.
-
-### Fixed
-
-- Let CLI startup proceed once one fully initialized database connection is ready while spare connections fill in the background; retain the pool capacity, one-second checkout bound, and database validation.
-
-- Completed native updates clear the availability notice; stale discovery records cannot offer installation of the running or an older version. Rollbacks retain notice of a newer release.
-
-- Banned identities can no longer submit reports or poll votes; those mutations share the existing posting ban gate and enforce CSRF before authorization results are disclosed. Long ban reasons wrap on narrow screens.
-- NSFW consent and mobile preferences dialogs move and contain keyboard focus, support dismissal/reopening and restore focus to their triggers. Mobile preferences also restore visible trigger focus after returning to desktop.
-- Rejected public posts retain submitted drafts and poll settings, explain attachment reselection and provide copyable recovery after parsed errors and bounded oversized uploads. Enhanced CAPTCHA refresh preserves the composer and files.
-- Interrupted uploads and unconfirmed responses retain input and explain check-before-retry recovery. Pending uploads cannot fall through into duplicate native submissions, and server-rendered recovery text takes precedence over stale autosave.
-- Local quotes and backlinks preserve browser history; dense previews keep their triggers reachable. Search links open complete thread context and retain modified-click behavior; poll result anchors resolve correctly.
-- Filename sanitization preserves bounded extensions and Unicode stems. Failed audio/video playback provides readable recovery advice and an original-file download action; explicit scrolling honors reduced motion.
-- Catalog “last reply” sorting includes sage replies independently of bump order, preserving normal bump sorting and saved preferences.
-- Rejected network and runtime configuration forms retain the administrator's selected theme and submitted values without partially changing saved settings.
-- Admin health polling aborts on navigation, ignores late responses, schedules after completion and resumes after back/forward-cache restoration, preventing unloading-page WebKit diagnostics.
-
-### Testing and maintenance
-
-- Restored version-controlled Playwright infrastructure for local normal regression and deep audit runs. Removed browser checks and scheduled browser audits from GitHub Actions. Runtime data, browser profiles, screenshots, reports, traces and disposable audit evidence remain ignored.
-- Added administrator authorization, updater signing/archive/snapshot/rollback/recovery, readiness privacy, all-theme/narrow-screen, keyboard focus and no-JavaScript regressions. Release candidates receive strict Rust lint, locked dependency policy, packaging and browser validation.
-- Stabilized fixture teardown, backup completion and completed-redirect submission assertions and session-revocation fixtures that retain and verify the old session without unrelated polling, preserving test budgets and all-theme coverage. Native quote-navigation checks open foreground tabs and independently verify Control/Command passthrough. Firefox uses an isolated application identity for the macOS 27 upstream Playwright launch defect, with launch regressions and a version guard.
-- Coordinated CLI test subprocess spawning to prevent Linux fork/exec descriptor inheritance from causing `ETXTBSY`, while preserving parallel test execution. Guarded native updater helpers with Unix configuration so check-only Windows builds remain warning-free. Kept configuration documentation compatible with Rust 1.91 strict lint and refreshed the yanked `yoke-derive` lockfile entry.
+- Added signed native Linux updates, verified pre-upgrade snapshots, full
+  persistent-state rollback, and administrator update controls.
+- Added Linux amd64/arm64 container publishing and persistent-volume Compose
+  deployment. Containers, macOS, Windows, and custom installations use their
+  deployment tools for upgrades.
+- Expanded terminal and web administration, accessible forms, posting recovery,
+  quote navigation, and catalog sorting. Requires Rust 1.99.
+- The original separate updater setup was superseded by the integrated 1.6.6
+  controller; follow the current software update guide.
 
 ## RustChan 1.5.0 — 2026-09-28
 
-This release removes ChanNet and improves reliability, resource use, and administration.
-
-### Upgrade notes
-
-- ChanNet and the `--chan-net` CLI option have been removed. Remove the option from service commands before upgrading; obsolete ChanNet configuration keys are ignored.
-- Existing `1.4.1` database structures are retained, verified, and stamped as `1.5.0`. Historical `chan_net_*` tables remain for database and backup compatibility. Back up your data before upgrading.
-- `/readyz` now checks database connectivity and the release schema version. Deep integrity checks remain available at startup, in detailed readiness, and in admin health.
-- Rust 1.91 remains the minimum supported compiler.
-
-### Included since the last published release (1.4.0)
-
-- Includes the 1.4.1 terminal administration console refresh, schema normalization and domain validation, and thread reply-counter reconciliation described below.
-- Includes configurable backup storage directories, rejection of unsupported saved-backup storage modes, and the Arti 0.46 dependency refresh.
-
-### Removed
-
-- Removed the obsolete ChanNet integration and all associated runtime, configuration, UI, and documentation paths. Existing databases keep their historical `chan_net_*` tables as inert schema for upgrade and backup-restore compatibility; no current code reads or writes them.
-
-### Reliability and correctness
-
-- Fixed transaction handling so a failed `COMMIT` rolls back and returns the pooled SQLite connection cleanly instead of leaving an open transaction or stale write lock behind.
-- Locked and archived threads now reject replies through a typed error instead of matching English error text, so those responses keep their exact status.
-- Media scheduling logs JSON decoding failures and skips those records instead of resolving them as stale duplicates.
-- Spam-check jobs that cannot be enqueued are logged instead of silently dropped.
-- Fixed a duplicate-claim race so two workers cannot transcode or analyze the same source file at the same time.
-- Board deletion now aborts when the board lookup fails instead of skipping the pre-delete database health check.
-- Maintenance backups record PRAGMA inspection failures as diagnostic evidence instead of writing empty output that looked clean.
-- Trailing-slash redirect normalization no longer emits an empty `Location` for an all-slash path (which browsers resolved into a redirect loop).
-- Password minimum length is now counted in characters rather than UTF-8 bytes.
-
-### Performance and resource use
-
-- Board and thread pages reuse the board and admin session resolved during access checks instead of repeating those database and session lookups.
-- Page HTML assembly runs on the blocking pool so long thread and board pages do not occupy async workers.
-- Log-tail handling is consolidated into one implementation that reads only the requested tail of large logs, removing a redundant full-file read from the admin live log.
-- `/readyz` performs a lightweight readiness check instead of deep database integrity scans on every probe; startup, the detailed readiness response, and the admin health view still verify the schema.
-- Active-media pruning validates the upload root once per pass instead of once per candidate file.
-- Thread preview posts are moved out of their lookup map rather than cloned, and page `ETag` signatures no longer allocate a temporary string for every integer field.
-
-### Cleanup and maintainability
-
-- Removed duplicate log-tail implementations, duplicate checkbox parsing, an obsolete peer-helper indirection, and an unreachable site-health branch.
-- Removed the unreachable theme-picker panel UI while preserving the supported programmatic theme-switch hook.
-- Consolidated board settings form identifiers and clarified the two board-short sanitizers.
-- Board favicon upload failures now return the administrator to the board appearance section instead of global site settings.
-
-### Testing and validation
-
-- Added regression coverage for failed-commit rollback, lightweight readiness behavior, trailing-slash normalization, large-file log-tail handling, character-count password validation, and typed locked/archived-thread rejection; the existing thread-state tests were strengthened to assert that rejection.
+- Removed ChanNet and `--chan-net`; remove that flag from launch commands.
+  Historical `chan_net_*` tables remain for database and backup compatibility.
+- Added configurable backup storage and improved transaction rollback, durable
+  jobs, busy responses, readiness checks, and board access handling.
+- Preserved and verified earlier database structures. Back up before upgrading.
 
 ## RustChan 1.4.1
 
-### Improved
-
-- Audited implementation comments across the repository, removing generated and stale narration while retaining security, concurrency, compatibility, and operational rationale.
-- Rebuilt the terminal administration console with responsive layouts, persistent navigation, selectable and scrollable data views, masked in-console and first-run credentials, contextual shortcuts, structured feedback and confirmation states, Unicode-safe clipping, and diff-based rendering.
-- Hardened schema normalization with transactional legacy repairs, semantic schema-drift detection, canonical version metadata, preserved AUTOINCREMENT state, and fresh-versus-migrated equivalence checks.
-
-### Fixed
-
-- Reconciled persisted thread reply counters from posts during startup normalization and board restore so derived state cannot drift from its authoritative rows.
-
-### Security
-
-- Moved closed persisted domains and cross-row relationships into audited SQLite triggers, including boolean and enum values, bounded counters, pending-operation kinds, and post, poll, report, banner, theme, and submission relationships; malformed historical data now fails migration without stamping success.
+- Rebuilt terminal administration and hardened transactional schema verification,
+  relationship constraints, legacy repairs, and reply-counter reconciliation.
 
 ## RustChan 1.4.0
 
-### Added
-
-- Added an explicit `--data-dir` option with fail-closed validation for absolute paths, root directories, parent traversal, and symlink-resolved locations.
-- Added durable ChanNet reply idempotency through optional stable message IDs and a transactional replay ledger.
-
-### Improved
-
-- Streamlined user preferences so changes save immediately without a redundant submit control, added clear save status, and provided equivalent immediate-action controls when JavaScript is disabled.
-- Moved the public admin-login entry point from the site header to a discreet accessible footer link while preserving the existing `/admin` route and authentication flow.
-- Refreshed the setup wizard with responsive step cards, clearer field guidance and validation summaries, a more structured review page, and polished authenticated setup-reopen messaging.
-- Enlarged board banners and admin previews from `468x60` to `585x75` display size while preserving the supported aspect ratio, responsive scaling, and existing upload pipeline.
-- Improved background-job reliability under database pressure by retrying completion persistence for the same claimed job, applying media and terminal-state updates atomically, and reconciling completed, stale, failed, and retryable work correctly during startup recovery.
-- Reduced overload stalls with a bounded database-pool acquisition timeout and consistent short-retry behavior for transient SQLite and pool exhaustion.
-- Improved server lifecycle handling by supervising the main HTTP, HTTPS, ACME, redirect, ChanNet, and Tor-backend listeners together and shutting peer listeners down when one exits unexpectedly.
-- Improved ChanNet validation and interoperability with a legal default body envelope, Unicode scalar-value character limits, consistent JSON errors for oversized imports, and explicit exact-boundary handling.
-- Refreshed all safely compatible direct and transitive Rust dependencies for Rust 1.91, including Tokio `1.53.1`, Hyper `1.11.0`, Tower HTTP `0.7.0`, Rustls `0.23.43`, Serde `1.0.229`, Clap `4.6.4`, UUID `1.24.0`, and `time` `0.3.54`; retained `rusqlite` `0.39` and `r2d2_sqlite` `0.34` as the newest pair compatible with Arti's SQLite constraint.
-- Standardized Rustls, Tokio Rustls, and Rustls ACME on the Ring cryptography provider while preserving TLS 1.2, logging, ACME support, and ACME root certificates, eliminating the unused AWS-LC build toolchain from the dependency graph.
-- Updated self-signed certificate validity handling for `x509-cert` `0.3.0` and adopted Tower HTTP `0.7.0` compression negotiation, including a `406 Not Acceptable` response when a client rejects every supported content coding.
-
-### Fixed
-
-- Fixed concurrent public thread and reply submissions reusing the same submission token so the token lookup, post creation, reply-counter update, pending filesystem operation, and canonical token mapping are committed atomically; concurrent and sequential replays now resolve to the same post without duplicate content, consumed tokens after rollback, or orphaned media.
-- Fixed admin job status semantics so a healthy idle queue reports `OK` and `idle — ready`, while warnings are reserved for failed or blocked work.
-- Fixed public preference cookies on plain-HTTP onion requests so their `Secure` attribute follows the actual request transport and preferences remain usable over Tor.
-- Fixed upgrades with native TLS enabled so they no longer force HTTPS unexpectedly; HTTPS-only access is now an explicit opt-in through `[tls].require_https`.
-- Fixed direct HTTPS session and CSRF cookies so they remain `Secure` independently of trusted-proxy compatibility settings.
-- Fixed destructive saved-backup operations so delete, full restore, board restore, and board extraction all honor the shared maintenance gate and cannot race active maintenance work.
-- Fixed ChanNet reply replays inserting duplicate posts and prevented view-password-protected boards from being exposed through selective exports.
-- Fixed database-busy `503 Service Unavailable` responses so they include a bounded `Retry-After` header.
-- Fixed `--help` and `--version` so informational CLI invocations do not initialize configuration or mutate the filesystem.
-- Fixed Linux service setup instructions and runtime data placement so an unprivileged systemd service uses its configured writable data directory.
-- Fixed Windows GNU target warnings caused by imports that were not guarded by the same target configuration as their call sites.
-
-### Security
-
-- Rejects requests containing `Transfer-Encoding`, including ambiguous `Transfer-Encoding` plus `Content-Length` framing, at the outer HTTP boundary before they can reach application handlers.
-- Added conservative HTTP header limits of 32 KiB per value and 64 KiB for the parser/aggregate boundary across public and internal listeners.
-- Corrected dependency auditing so CI scans `Cargo.lock` and verifies that the resolved dependency graph is non-empty instead of treating the audit policy file as a lockfile.
-- Upgraded all 38 Arti/Tor crates to `0.44.0`, explicitly enabled its now-default stable congestion control, and incorporated the medium-severity TROVE-2026-24 and TROVE-2026-27 denial-of-service fixes; this raises the project MSRV to Rust 1.91.
-- Upgraded the Arti/Tor stack to `0.45.0`, retaining the Rustls-only TLS configuration and explicit stable congestion-control feature.
-- Updated `anyhow` to `1.0.104` and `memmap2` to `0.9.11` to resolve denied unsoundness advisories, and updated `getset` to remove the unmaintained, future-incompatible `proc-macro-error2` dependency.
-- Removed the yanked `spin` `0.9.8` release while refreshing the transitive graph; the resulting lockfile contains no yanked, pre-release, or non-registry dependencies.
-
-### Documentation
-
-- Added RustChan-specific community standards, contribution and support guidance,
-  a security disclosure policy, pull request guidance, and structured GitHub
-  issue forms with privacy-conscious reporting requirements.
-- Corrected HTTPS documentation to state that TLS is disabled by default and clarified the distinction between self-signed certificate support and automatic HTTPS enablement.
-- Updated deployment documentation for the explicit writable data-directory workflow.
-
-### Internal
-
-- Added deterministic submission-token race regressions covering shared and distinct tokens, sequential reuse, rollback and corrected retry behavior, staged-media cleanup, canonical redirects, and SQLite integrity checks across fresh disposable databases; documented the canonical replay helper for strict Quality lint compliance.
-- Restored warning-clean strict Clippy coverage on the current Rust toolchain, the Rust 1.91 MSRV, and supported cross-compilation targets.
-- Reduced the resolved dependency graph from 666 to 653 packages, removed stale duplicate exceptions from the dependency-audit policy, and corrected the documented rationale for Arti's RSA advisory exception.
-- Added deterministic offline regressions for Arti state, cache, and native-keystore initialization, plus focused coverage for certificate validity accessors and compression negotiation.
-- Replaced equivalent minute and hour duration calculations with Rust 1.91's dedicated constructors to remain warning-clean under current strict Clippy without changing timing behavior.
-- Kept local browser-testing and Node/Playwright artifacts excluded from version control so they do not add repository or release-package bloat.
+- Added validated `--data-dir`; improved setup, preferences, banners, request
+  limits, durable media work, and submission retry handling.
+- Fixed secure cookies, trusted-proxy handling, backup maintenance coordination,
+  and filesystem-free informational CLI commands.
+- TLS remains disabled by default; HTTPS-only access requires explicit opt-in.
+  Updated Arti and security-sensitive dependencies, retaining Rustls with Ring.
 
 ## RustChan 1.3.0
 
-### Added
-
-- Added a guided first-run setup wizard at `/setup` with public/private/local presets, CSRF protection, review-before-write confirmation, initial admin and board creation, Tor/proxy/Secure-cookie options, CAPTCHA and activity-badge toggles, media limits, and backup defaults.
-- Added admin maintenance controls to reopen or close the setup wizard later without replacing existing admin credentials.
-- Added per-board PDF upload limits, setup/admin controls for enabling PDF uploads, and upload-form hints that show PDF caps separately from image, video, audio, and generic file limits.
-- Added a clean `1.3.0` database baseline. Fresh databases now install the baseline directly, matching in-development databases are stamped as `1.3.0`, and partial or unknown schemas fail closed with diagnostics.
-- Added schema health checks to database/admin status paths, including structural verification, SQLite quick checks, foreign-key checks, and `rustchan-cli admin db-status`.
-- Added admin dashboard summaries for setup state, schema/database health, backups, storage, Tor, dependencies, background jobs, reports, and live/total thread counts.
-- Added a footer copy control for the active Tor onion address.
-
-### Improved
-
-- Hardened upload auto-compression so processed images and videos are re-statted and revalidated before a post is finalized, with better cleanup for failed compression, poll validation failures, stale staged files, thumbnails, and partial database rows.
-- Improved browser-side auto-compression reliability for extension-only or blank-MIME uploads, Chromium/WebKit video capture timeouts, submit-time guards, retry behavior, and inline compression status messages.
-- Improved media validation for PDFs, ADTS AAC, WebM audio, MKV/Matroska video, small FLAC/audio files, invalid thumbnail payloads, empty upload controls, zero-byte named uploads, and cross-board media deduplication.
-- Returned semantic post-upload error statuses for JS, no-JS, and XHR submissions, including `413`, `415`, and `422` where appropriate.
-- Improved admin and public UI accessibility with stronger labels, IDs, ARIA attributes, inert/hidden modal states, focus behavior, report and confirmation dialogs, catalog menus, NSFW dialog behavior, theme picker behavior, media controls, and mobile form hints.
-- Improved Tor/onion operation with Arti `0.43.0`, safer onion admin origin handling, clearer bootstrap/service logs, more accurate hidden-service key path reporting, and stabilized Tor restore tests.
-- Improved observability defaults and documentation so `/healthz` stays public and minimal, `/readyz` hides operational details unless `public_readiness_details = true`, and `/metrics` returns `404` unless `public_metrics_enabled = true`.
-- Improved upload, thread, admin, and setup tests around size limits, schema state, CSRF handling, setup reopen/close behavior, pending media refresh, and upload error classification.
-
-### Fixed
-
-- Fixed non-image media regressions that affected small supported audio files, valid `.mkv` uploads, `audio/webm` persistence, and audio/video MIME preservation.
-- Fixed malformed ADTS AAC acceptance so invalid AAC is rejected before storage or background media jobs are created.
-- Fixed PDF limit edge cases so files exactly at the configured cap are accepted while cap-plus-one uploads are rejected.
-- Fixed no-JS and pending-media regressions: Firefox no-JS theme changes persist through safe local redirects, and thread update controls expose a stable `data-action="fetch-updates"` hook for pending-media refreshes.
-- Fixed YouTube embed thumbnail sizing.
-- Fixed legacy `1.3.0` schema drift handling on startup for in-development databases.
-- Fixed unintended manual textarea resize handles on RustChan forms.
-- Updated admin login button copy.
-
-### Security
-
-- Required CSRF validation for theme changes and board backup actions.
-- Made detailed readiness data and unauthenticated Prometheus metrics opt-in to avoid exposing operational internals on internet or onion deployments by default.
-- Kept setup password handling from echoing raw admin passwords during review by using a short-lived pending hash token.
-- Pinned `rustls-webpki` to a patched release for RUSTSEC-2026-0049 and refreshed the dependency lockfile.
-
-### Documentation
-
-- Updated `README.md` and `SETUP.md` for RustChan `1.3.0`, the new schema baseline, `db-status`, PDF upload limits, setup behavior, and observability endpoint defaults.
-- Added a static ChanNet security audit record for future follow-up.
-- Refreshed release documentation and current-version references.
-
-### Internal
-
-- Updated Rust dependencies, including Arti/Tor crates, `sha3`, `zip`, `toml`, `tokio`, `axum`, `rustls`, and related lockfile entries.
-- Renamed the saved-backup implementation module for clearer ownership.
-- Cleaned focused Clippy warnings and kept strict lint coverage passing during the release cycle.
+- Added the first-run setup wizard, schema verification, database status, PDF
+  limits, and administrator health summaries.
+- Improved media validation, upload failure handling, accessibility, and Tor.
+- Made detailed readiness and public metrics opt-in and required CSRF for theme
+  changes and board backup actions.
 
 ## RustChan 1.2.2
 
-- Replaced browser proof-of-work posting CAPTCHA with server-generated image CAPTCHA challenges.
-- Improved secure-cookie handling across HTTP, HTTPS, trusted-proxy HTTPS, admin sessions, board access cookies, CSRF cookies, and owned-post cookies.
-- Added no-JS fallbacks and accessibility polish for posting, reporting, catalog actions, board preferences, moderation controls, and own-post edit/delete flows.
-- Hardened upload handling for empty file controls, zero-byte named uploads, empty thumbnail payloads, invalid media, and cross-board media deduplication.
-- Improved activity badge cache behavior, especially on mobile WebKit and browser back/forward navigation.
-- Hardened settings validation so invalid config values fail closed instead of silently falling back.
-- Polished responsive layout, long-content wrapping, modal focus behavior, ESC handling, touch targets, and light-theme error contrast.
-- Updated backup UI metadata handling and dynamic split-part options.
-- Refreshed README screenshots and release documentation.
+- Replaced browser proof-of-work with server-generated image CAPTCHA.
+- Improved cookie security, no-JavaScript actions, upload validation, settings
+  validation, responsive layouts, and backup controls.
 
 ## [1.2.1]
 
-### Improved
-
-- Full-site restore now accepts Backup v4 transfer ZIPs by converting the transfer layout into the legacy restore archive shape before running the normal restore flow.
-- VP9/WebM transcoding now forces yuv420p output with explicit BT.709 color metadata, avoiding inherited source color tags that can make browser playback look wrong.
-- Admin site-health job post ID parsing and logging test helpers were tightened up for stricter lint compliance.
-- Local JavaScript test artifacts and runtime folders are now ignored by git.
-
-### Fixed
-
-- New board creation now validates short names instead of silently stripping invalid characters, and duplicate board shorts return a conflict instead of proceeding into creation.
-- No-JavaScript post form rendering now keeps the post form visible when scripts are unavailable.
-- Random token generation keeps its fail-closed behavior while documenting the intentional process exit for Clippy.
-- Rust dependency lockfile entries were refreshed for the `1.2.1` cycle.
+- Added full-site restore support for Backup v4 transfer ZIPs; fixed board-name
+  validation, no-JavaScript posting forms, and VP9 color metadata.
 
 ## [1.2.0]
 
-### Added
-
-- The bundled banner builder in `docs/rustchan-banner-maker.html` has been rebuilt into a layered editor with stacked image uploads, per-layer controls, drag-and-resize handles, live preview, and export tools for both supported banner sizes.
-- The admin panel now ships with its own dedicated `admin.css` and `admin.js` assets instead of leaning on the shared site bundle.
-- HEIC and HEIF image uploads are now accepted by the media pipeline, including MIME detection, thumbnail generation, backup metadata, form copy, and documentation updates.
-- Boards can now enforce their own upload size limits for images, video, and audio, with caps that stay within the site-wide maxima.
-- Two new built-in themes, Blue Sky and Deep Orbit, are available across normal pages, admin views, theme seeding, defaults, and setup documentation.
-- Users can now self-delete their own posts within a 60-second grace window after posting, with server-side expiry checks and UI countdown hints.
-- Site-health background job details now include post IDs and direct post links when a queued, completed, or failed job can be traced back to a post.
-
-### Improved
-
-- The admin panel has been split into clearer sections and subsections, making board setup, moderation, settings, backups, and banner management easier to scan and work through on both desktop and mobile.
-- Recent site-health job detail panels can now be closed directly after reviewing failed or completed background jobs.
-- Banner editing in the admin UI is smoother: target pickers behave more predictably, external-link warnings show up inline before save, and the banner forms are laid out more cleanly.
-- The board appearance editor now shows each board's NSFW tag state directly in the appearance card.
-- Admin login and banner-serving internals were tightened up, with cleaner helper paths for session handling, banner access checks, and post-query lookups.
-- Site settings now preserve the badge toggles more reliably when saving banner-only changes, avoiding accidental resets on partial submits.
-- Backup and restore actions now use a more consistent redirect path, which keeps the progress modal and post-restore navigation on the rails after full-site and board restore requests.
-- Thread rendering and post state handling are more resilient around post lookups, moderation actions, pending filesystem cleanup, media storage, worker updates, and console board setup.
-- The post edit form and self-delete flow now surface the shared 60-second self-action window more clearly.
-- Post rendering now sanitizes formatting more consistently and poll submission validation is stricter on both server-rendered and live-updated pages.
-- Media rendering now prefers recorded MIME type information over filename guessing, improving how attached media is displayed in thread views.
-- Banner exports from the standalone editor no longer include editing guide overlays, and the export flow better matches the screenshots and README examples.
-- Tor bootstrap and runtime logs are humanized into clearer status messages so operators can understand connection progress without reading raw Arti output, and repeat onion-service retry spam is suppressed.
-- Site stats now account for archived thread media more accurately, so admin totals reflect active content instead of counting archived bytes.
-- Built-in self-signed TLS is now gated behind an explicit feature flag, keeping production builds slimmer unless the development certificate path is needed.
-- Rust dependencies, GitHub Actions release tooling, and lockfile contents were refreshed for the `1.2.0` cycle.
-- Release artifacts now focus on current Apple Silicon macOS builds instead of publishing a separate macOS x86 archive.
-- Blue Sky and Deep Orbit theme palettes were refined for better contrast and fuller coverage across normal and admin surfaces.
-
-### Fixed
-
-- Restore uploads and backup actions in the admin panel now resolve their redirect targets more reliably, including cases where the browser only exposes the final response URL or HTML fallback.
-- Protected board banner assets and external-banner warning routes now fail with the right `404` and `403` responses instead of falling through to less helpful error paths.
-- Banner rotation now advances correctly on refresh, GIF banners keep a reliable fallback path, and animated WebP banners preserve animation instead of being flattened during processing.
-- Banner upload, restore, and route handling have stronger validation and regression coverage for protected assets, board inheritance, catalog/thread placement, and warning redirects.
-- Post form fields now line up more cleanly with the surrounding form layout.
-- Quote references and delete-reference cleanup now stay more consistent when posts or threads are updated.
-- Board access redirects now harden `return_to` handling so unlock flows cannot bounce users to unsafe destinations.
-- Thumbnail fallback controls are visible when generated thumbnails are unavailable, and catalog embeds can now use absolute thumbnail URLs.
-
-### Documentation
-
-- `README.md`, `SETUP.md`, and the release notes were cleaned up for the `1.2.0` cycle, with plainer wording and less filler.
-- The README was rewritten for clearer structure and refreshed with banner-maker screenshots and current feature wording.
-
-### Internal
-
-- Removed dead code, unused API paths, and stale helper branches that were no longer part of the live request flow.
-- Admin backup, settings, board, posting, and thread handlers were split into smaller modules, with focused regression coverage for posting flows, restore redirects, banner behavior, board redirects, and live thread updates.
-- The ffprobe probe test now uses a symlinked binary path to verify explicit tool resolution more faithfully on Unix-like systems.
-- Clippy warnings were cleaned up across the refactored modules, theme code, logging, storage, templates, and banner handling to keep strict lint compliance.
-- Comments and documentation were trimmed to remove leftover AI-generated phrasing and stale implementation notes.
+- Added the layered offline banner editor, HEIC/HEIF uploads, per-board media
+  limits, Blue Sky and Deep Orbit themes, and short-window self-deletion.
+- Improved admin workflows, media rendering, board-access redirects, backup
+  navigation, and animated banner handling.
+- Made self-signed TLS support an explicit build feature and focused macOS release
+  artifacts on Apple Silicon.
 
 ## [1.1.4]
 
-### Added
-
-- Full banner management in the admin panel: operators can upload, preview, reorder, edit, and delete global board banners, per-board banner overrides, and a separate home-page MOTD/news banner.
-- Global board-banner rotation with two modes: rotate on each refresh by default, or enforce a site-wide time-based rotation interval in minutes.
-- Per-board banner behavior modes that mirror the favicon-style override model: each board can inherit the global banner pool, disable banners entirely, or use one fixed board-specific override.
-- Clickable banner destinations for internal boards and internal paths, plus optional external banner links guarded by an on-site warning/interstitial page before redirecting users away from RustChan.
-- The admin quick-create board form now includes an audio-upload toggle, so new boards can be created with audio enabled directly from the UI instead of only through later edits or the CLI.
-
-### Improved
-
-- Board-page presentation is more intentional: centered banners now render under the board title/description, above the board nav on index pages, and above catalog controls on catalog pages.
-- Home page announcement tooling is stronger through a dedicated banner box that is separate from board-header banners and suitable for MOTD, maintenance, or news updates.
-- Banner uploads now follow RustChan's media pipeline expectations by validating the exact `468x60` aspect ratio, documenting a minimum `468x60` / recommended `936x120` workflow, and normalizing uploads to WebP.
-- Full-site and board-level restore compatibility now covers the new banner metadata and asset layout so banner configuration survives backup workflows.
-
-### Documentation
-
-- `README.md` and `SETUP.md` now document the new banner system, placement rules, link behavior, and the exact artwork requirements for banner uploads.
+- Added global/per-board banner management, timed rotation, home announcements,
+  guarded external links, and backup support for banner metadata and assets.
 
 ## [1.1.3]
 
-### Added
-
-- Automated saved full-site backups with admin-configurable cadence and retention: the full backup panel and `settings.toml` now expose how many hours to wait between runs and how many saved full backups to keep, with automated runs pruning the oldest saved full backups after each new server-side full backup completes.
-- Per-board password protection with two modes: boards can now require a password to view the board at all or stay publicly readable while requiring the board password for posting, with admin controls for saving/clearing board passwords, unlock flows for users, and server-side enforcement across board pages, thread views, replies, edits, votes, media, and post-preview endpoints.
-
-### Improved
-
-- Homepage board cards and board catalog thread cards now keep a more consistent square visual rhythm: the main content rail is wider on desktop, homepage NSFW badges sit beside board IDs for faster scanning, and catalog size toggles once again distinguish compact and large thread cards while preserving more uniform tile heights.
-- HTTP timeout handling is now more robust across the full request pipeline: `GET` and `HEAD` requests keep the fast 30-second cutoff, while slower write paths such as uploads, restores, and admin `POST`s are now covered by a longer request timeout instead of bypassing timeout protection entirely.
-- Proxy-aware HTTPS detection is now stricter and operator-configurable: `X-Forwarded-*` headers are trusted only from explicitly allowed proxy CIDRs, with loopback remaining the safe default.
-- Admin session cookie issuance is now wired through real connection metadata on login and restore flows, eliminating header-only protocol trust and keeping direct-access and proxied deployments aligned.
-- HTTP to HTTPS redirects are now more robust on manual-certificate deployments bound to wildcard addresses, with explicit public-host configuration for production domains that are not discoverable from the local bind address.
-- The shared site footer now stays pinned to the bottom of the viewport through a dedicated fixed-footer layout, while preserving the original homepage card grid and overall 1.1.2-style page flow.
-- Theme CSS internals are cleaner and safer to maintain: the fixed footer now uses one shared height variable with safe-area-aware body padding, Frutiger Aero and NeonCubicle now share one glass-pill navigation implementation, and the Forest theme now centralizes repeated surface, link, button, and input colors behind theme-scoped variables.
-- Mobile header polish is tighter on board pages: the search bar now stretches to the same visual rails as the Home and Boards controls instead of ending short on narrow screens.
-- The theme picker now lives in a footer-docked control bar on both desktop and mobile, giving theme switching one consistent home and keeping it from floating over page content.
-- Backup and media-processing observability are stronger: posts now expose pending and failed async media state, opt-in detailed `/readyz` and `/metrics` report media backlog, backup freshness, and maintenance activity, and the admin panel surfaces backup verification health instead of assuming saved ZIPs are restorable.
-- Public observability is safer by default for internet and onion deployments: `/healthz` remains public, `/readyz` exposes only readiness status unless `public_readiness_details = true`, and `/metrics` is disabled unless `public_metrics_enabled = true`.
-- Heavy admin maintenance now coordinates through a shared maintenance gate and less aggressive background scheduling, so backups, restores, integrity checks, repair, and scheduled `VACUUM`/WAL work are less likely to pile onto live request traffic or each other.
-- Full backup recovery is now more flexible without adding scheduler clutter: new full backups record the boards they contain, and the admin panel can derive a single-board restore or downloadable board backup directly from a saved full-site archive.
-- Long media filenames now keep post layouts tidier without hiding the real upload name: thread and reply views truncate only the displayed stem, preserve the extension in the visible link text, and still expose the full original filename through the link tooltip.
-- Upload-backed posting and admin restore flows now use explicit XHR redirect/error responses instead of scraping returned HTML, so media uploads fail in-place with clearer feedback and restore uploads stay inside the existing progress modal without fragile document replacement.
-- Thread pages now separate board-level navigation from thread-specific actions more cleanly: board links live in the shared board-nav strip, reply/update controls stay in the thread nav, and the admin toolbar sits under the board context instead of leading the page.
-- Admin board management is now organized around distinct tasks instead of one dense block: each board card separates basic setup, access controls, post features, appearance, backups, and destructive actions, while the full-site and board-backup areas now split scheduling, immediate restore/create actions, and saved archives into clearer sections.
-- Handled XHR validation and restore failures are now transported without browser-level network noise: inline upload and restore errors return structured JSON that preserves the original semantic status in `X-Rustchan-Error-Status`, letting RustChan keep the same in-place error UX without Chromium surfacing expected invalid-request checks as console `Failed to load resource` errors.
-- The admin panel now better preserves operator context during repeated maintenance work: backup/archive dropdowns remember their open state, board/settings forms restore more of their previous inputs after validation failures, and moderation copy/actions are more compact and easier to scan.
-- The terminal dashboard now surfaces active FFmpeg video jobs directly in the TUI, making it easier to spot live transcode backlog without leaving the server console.
-- VP9 transcode settings are now auto-tuned per host architecture and CPU capability: RustChan picks more appropriate `libvpx-vp9` threading, tiling, and `cpu-used` settings on AVX512, AVX2, AVX, SSE4.1, ARM, and generic targets instead of using one static profile everywhere.
-- Release engineering is more automated and portable: tagged builds now publish GitHub Releases through Actions, attach per-platform ZIP archives with bundled `README`/`LICENSE`, and generate verified `SHA256SUMS` manifests for release downloads.
-- CI and release automation now track newer dependency and action versions, including the move to `reqwest 0.13`, newer `rustls-acme`, refreshed Windows support crates, and updated GitHub Actions checkout/artifact/release steps.
-
-### Fixed
-
-- Per-board password protection now fails closed more reliably: invalid or partial access-mode data from backups is rejected or forced into a locked state instead of silently becoming public, password-gated pages now return consistent `403`/`429` responses with no-cache headers, and repeated board-unlock failures are temporarily throttled to make online guessing harder.
-- Requests coming directly from untrusted public peers can no longer spoof `X-Forwarded-Proto` to make the app believe they arrived over HTTPS.
-- Built-in self-signed TLS recovery is now resilient to partially missing or corrupted dev-cert files: if the stored cert/key pair cannot be reused, RustChan regenerates a fresh pair instead of failing startup outright.
-- Timeout coverage no longer leaves upload-heavy and admin mutation endpoints outside the request-timeout middleware.
-- Mobile layout resilience is stronger across the updated style system: the header board menu now follows the real wrapped header height instead of a fixed offset, admin board-settings forms collapse cleanly to one column on narrow screens, and wide admin tables stay usable on phones through horizontal scrolling.
-- The admin panel is now substantially more mobile-friendly: dropdown headings wrap instead of running offscreen, board action controls stack cleanly on narrow screens, create-board and moderation forms fit the viewport, and the heaviest admin tables no longer force excessive horizontal overflow.
-- Admin login is now more robust on plain `http://` deployments and local-network mobile access: insecure login redirects can recover through a short-lived bootstrap handoff instead of failing when the browser drops the freshly issued admin session cookie before `/admin/panel` loads.
-- Admin login no longer fails with a `403` after the CSS refactor on plain `http://` deployments: the login page now reissues its CSRF cookie using the real request scheme so browsers do not drop the cookie before `/admin/login` is processed.
-- Mobile media expansion behaves more predictably: tapping a video thumbnail now keeps playback inline on the page instead of collapsing back or jumping toward fullscreen, the filename remains the explicit open-in-new-tab path for fullscreen viewing, and image/video close buttons now use a smaller control footprint.
-- Mobile image and video viewing now matches desktop more closely: the old floating media viewer has been removed, images and videos expand inline on the page with the same close-button flow as desktop, and the blue double-arrow/expand overlay is no longer shown over media on touch layouts.
-- Desktop and mobile audio MiniPlayers now use the attached post image as album art for image+audio combo posts, while audio-only posts continue falling back to the current favicon artwork.
-- Duplicate threads and replies are now prevented on unstable connections: post forms carry a per-render submission token, successful submissions are recorded server-side, and a retried POST now redirects back to the already-created post instead of inserting a second copy when the first response was lost in transit.
-- Board search no longer fails when the FTS join exposes duplicate column names, and search queries are now normalized consistently so lowercase searches such as `ai` also match uppercase post text like `AI`.
-- Background media processing now degrades more honestly under pressure: queue-capacity drops and permanent worker failures are persisted onto the post, failed previews fall back to the original file link, and operators can see pending and failed media work instead of silently missing thumbnails or waveforms.
-- Saved backups are now verified before they are exposed as healthy: full backups include a manifest and SQLite-header checks, board backups are validated before save and in the admin listing, and backup freshness/verification status is now visible in both the admin UI and readiness metrics.
-- Admin backup progress polling no longer conflicts with the maintenance lock during an active backup or restore, and failed backup builds now clean up temporary artifacts instead of leaving behind stale `.tmp` ZIPs or database snapshots.
-- Saved full backups are now easier to work with on desktop and mobile: backup table actions stack more cleanly, per-row board extraction stays collapsed until needed, and older full backups without the new board index can still be extracted by entering a board short name manually.
-- Startup schema housekeeping no longer runs indexes ahead of pending migrations, and the legacy `posts.ip_hash` table rebuild now preserves `media_processing_state` and `media_processing_error` so upgraded installs keep async media-status data intact instead of silently dropping those columns.
-- Mobile thread and archive views now stay readable on narrow screens: reply cards use the full available width again, thread action rows wrap and center cleanly, archive rows break metadata onto separate lines, and two-column board/catalog tiles can shrink without forcing horizontal squeeze.
-- Board restore now preserves original post IDs when they are still available, and when collisions force new IDs RustChan remaps same-board quotelinks in restored post bodies and rendered HTML so restored conversations keep their internal reply links intact.
-- Auto-saved quote-only reply drafts no longer come back as stale `>>123` stubs when you reopen the reply form; only real in-progress text drafts keep persisting between visits.
-- Upload-backed post failures no longer fall back to blocking browser alerts, and media-backed ban hits now redirect to a dedicated ban page so the appeal flow still works without relying on brittle in-place HTML swaps.
-- The recent admin and thread polish pass no longer strands shared JavaScript helpers inside the media auto-compress scope: `createAsyncSubmitHelper`, `requestConfirmation`, and the shared confirmation-submit helpers are once again available to reply uploads, full backup creation, restore uploads, and `data-confirm` actions, restoring inline `.post-error-banner` feedback, confirmation-modal focus/escape/backdrop behavior, the full backup/restore progress flows on live pages, and the compact `[ Return ] [ Catalog ] [ Top/Bottom ] [ Update ] [ Auto ]` thread navigation bars.
-- HSTS emission is now correct for trusted proxy hosts as well as direct connections, avoiding missing strict-transport headers on deployments that terminate TLS upstream.
-- Media post refreshes and moderation report actions now stay in sync on live pages: freshly processed media state is re-rendered more reliably, duplicate report submissions are blocked, and same-thread upload redirects reset reply form state before repopulating it.
-
-### Documentation
-
-- The `README` was refreshed for the `1.1.3` release with clearer wording and updated screenshots/layout so new installs and release downloads better match the current UI.
-
-### Internal
-
-- Upload-flow tests now use temporary directories for better isolation, the FFmpeg VP9 test coverage stays Clippy-clean, and several unused helpers/duplicate form structs were removed to keep the `1.1.3` codebase leaner.
+- Added scheduled saved backups with retention and per-board password protection.
+- Hardened proxy trust, cookies, uploads, duplicate-submission handling, verified
+  backups, schema migration, restore quoting, and media failure reporting.
+- Improved mobile media, admin maintenance, observability, and release packaging.
 
 ## [1.1.2]
 
-### Added
-
-- Shared board ordering controls, backed by a persistent `display_order` field, so admins can reorder boards once and see the same order reflected across the homepage, top header board list, and admin panel.
-- Live upload progress bars for post media uploads and admin restore uploads, covering image/video/audio post forms plus full-site and per-board backup restore uploads from local files.
-- Modular theme infrastructure backed by a runtime theme registry, database-managed theme records, dynamic `/theme-css/{theme}` delivery, and board-level default theme support so built-in and custom themes can be managed through one system.
-- Admin theme management for enabling and disabling built-in themes, creating custom themes, editing custom theme metadata and CSS, deleting custom themes, and choosing both site-wide and per-board default themes.
-
-### Improved
-
-- Runtime data layout is now tidier under `rustchan-data/`, with backups grouped into `backups/full` and `backups/boards`, and generated operational state grouped under `runtime/` for Tor, TLS, favicon assets, and temporary admin files.
-- Homepage admin board reordering is now available through a subtler per-card toggle instead of always-visible controls, keeping the feature accessible without cluttering the board list.
-- Board navigation and admin ordering now split SFW and NSFW boards into separate groups, with independent per-group move controls and safer reordering when a board is retagged between normal and NSFW.
-- Post headers now render subjects inline ahead of poster names, with theme-appropriate subject colors and separators so titles remain distinct from usernames across Terminal, DORFic, ChanClassic, Frutiger Aero, FluoroGrid, and NeonCubicle.
-- Theme presentation is more polished through reordered theme-picker menus, softer ChanClassic header link contrast, and rounder shared controls in Frutiger Aero and NeonCubicle so top-level navigation matches those themes' bubbly styling better.
-- Theme resolution, rendering, and picker behavior are now centralized around the live theme registry, so normal pages, admin pages, ban pages, JS bootstrap, no-JS fallbacks, startup seeding, and runtime cache refreshes all follow the same precedence rules.
-- Theme picker and admin theme controls are now fully data-driven, so adding, renaming, disabling, or reordering themes no longer requires parallel hardcoded edits across Rust templates, handlers, and client JavaScript.
-- Theme-related admin and test internals are leaner through one shared admin dashboard snapshot loader, one shared live-theme synchronization path, a unified CSS response path for built-in and custom themes, shared CSRF jar-check handling, and a reusable `Board` test fixture.
-- Admin theme management is cleaner and easier to use through a redesigned themes panel layout, separate built-in and custom theme sections, clearer built-in/custom editing affordances, and a documented custom-theme starter scaffold that explains RustChan's scoped theme variables and common override selectors.
-- Catalog page presentation is cleaner through centered sort/display selectors and larger board-description text on both board headers and homepage board cards.
-- The admin site-settings layout is tidier, with the save button aligned into the form action row instead of floating awkwardly above the global favicon controls.
-- Database maintenance is more user-friendly through a clearer integrity/repair results page and deeper admin repair tooling that now rebuilds SQLite indexes plus the `posts_fts` search table and triggers instead of only reporting a bare integrity status.
-
-### Fixed
-
-- Existing installs now migrate old runtime folders automatically at startup, so prior `full-backups`, `board-backups`, `arti_state`, `arti_cache`, `tls`, `favicon`, and temp backup-download directories continue working under the new layout without manual moves.
-- Backup, Tor, TLS, favicon, admin UI, and documentation paths now consistently point at the reorganized filesystem structure instead of the older scattered folder names.
-- Admin-panel live access addresses now wrap correctly on mobile instead of overflowing offscreen, and the console live-log renderer now avoids panic-prone slicing flagged by strict Clippy.
-- The long-greentext collapse toggle now works as a true per-board setting instead of a global site-wide flag, with migration/backfill support for existing installs and backup/restore compatibility for the new board field.
-- Client-side auto-compress is safer for oversized media: animated images are no longer silently flattened, transparent images avoid destructive JPEG fallback when the browser cannot preserve alpha, and video re-encoding now has stronger cleanup and timeout handling so the modal is less likely to get stuck.
-- Board search no longer crashes on punctuation-heavy input such as `'`, `"`, or `>>1`; the search layer now normalizes free-form input into FTS-safe terms and returns ordinary empty results when nothing usable remains.
-- Spoilers on legacy posts now keep working under the stricter CSP by upgrading older inline-click spoiler markup to the shared delegated `data-action` handler at runtime.
-- Board backup restore now preserves archived-thread state, so threads that were already in a board archive stay archived after restore instead of being pulled back onto the live board index.
-- Admin board delete and board restore now surface SQLite corruption failures more clearly, and the new integrity/repair tools are wired into the admin maintenance flow to help diagnose FTS/index corruption before destructive operations.
-- Theme validation drift is eliminated: duplicated hardcoded theme lists, mismatched validators, and stale per-layer defaults were replaced with registry-backed validation and one canonical fallback path.
-- Renaming or deleting custom themes now updates dependent site and board defaults safely instead of leaving stale references behind, and saved cookie or localStorage themes now fall back cleanly when a theme is disabled or removed.
+- Added board ordering, upload progress, and database-managed custom themes.
+- Consolidated runtime data under `rustchan-data/` with startup migration of older
+  directories. Improved archive restoration, search, and database repair.
 
 ## [1.1.1]
 
-### Added
-
-- Mobile-only board picker in the header, homepage NSFW consent overlay flow, and a no-JS theme fallback for slower or restricted browsers.
-- Server-backed theme switching with explicit `return_to` routing and better backup/restore diagnostics across admin upload paths.
-- Restore route request logging, board backup manifest inspection logs, and larger multipart restore coverage in the route test harness.
-- Per-board archived-thread retention limit in the admin panel, with a default cap of `150` archived threads per board.
-- Automatic favicon generation from a single `512x512` upload, with global site icons plus optional per-board favicon overrides.
-
-### Improved
-
-- Mobile interaction quality for reply, media expansion, archive rows, catalog controls, board descriptions, and header layout without changing the desktop interface.
-- Poster ID chips on boards with IDs enabled now use stronger per-ID color separation so different posters are easier to tell apart without breaking theme compatibility.
-- NSFW disclaimer copy and action-button styling now read more clearly across themes, including light-theme contrast improvements for the consent button.
-- Audio posting UX now leads with an audio-first upload flow, clearer field labels, and an explicit optional cover-image slot instead of the previous mixed primary/secondary upload wording.
-- Tor and mobile resilience through safer identity bucketing, less brittle theme persistence, JS-degraded fallbacks, and better cache revalidation for board, catalog, and thread pages.
-- Generated `settings.toml` readability by regrouping settings into clearer related sections, and log organization by moving runtime logs into `rustchan-data/logs/`.
-- Backup and restore internals by deduplicating board restore into one shared core and full-site restore into one shared execution path with rollback-aware filesystem swaps.
-- Automatic archive trimming now deletes media only after the last remaining post reference is gone, so deduplicated uploads shared across multiple threads are preserved safely until truly unused.
-- Admin favicon controls now use a compact inline layout with live previews and clearer replace/clear actions for both global and board-specific icons.
-
-### Fixed
-
-- Mobile photo uploads now preserve correct orientation for both stored images and generated thumbnails.
-- Admin archive, pin, thread deletion, board restore, and full restore flows now refresh more reliably without requiring manual cookie or cache clearing.
-- Firefox and localhost admin restore uploads no longer fail on `Origin: null` or loopback host alias mismatches when valid session and CSRF state are present.
-- Linked image+audio posts now render as one combined media block, use the uploaded image as the audio thumbnail, autoplay the attached song when the image is expanded, keep playing when the image is collapsed, and size the audio seek bar to the same width as the linked image.
-- Secondary combo-audio uploads now preserve FLAC bytes as-is without FFmpeg re-encoding, while still reusing the linked image thumbnail for the post presentation.
-- Theme picker, board menu, catalog sort controls, and top-bar alignment no longer overflow or misplace themselves on mobile and Tor Browser.
-- Thumbnail hover and click hitboxes no longer stretch left of the visible image after closing expanded media.
-- OP quotelinks now render the `(OP)` marker with tighter spacing so they display as `>>123 (OP)` instead of looking over-separated.
-- Backup/restore logging now respects the app’s actual tracing targets instead of being silently filtered out.
-- Board index, catalog, and thread tab titles now use clearer board-aware formatting, and full-site restore no longer wipes the current global favicon when restoring an older backup that did not include favicon data.
+- Added mobile navigation, per-board archive retention, favicon generation, and
+  no-JavaScript theme switching.
+- Improved restore coordination, shared-media retention, image orientation, and
+  linked image/audio playback.
 
 ## [1.1.0]
 
-### Added
-
-- ChanNet API for federation and RustWave gateway commands on port `7070`.
-- Full-screen operator dashboard with live stats, logs, boards, shortcuts, and setup flows.
-- Native HTTPS support with self-signed and Let's Encrypt options, plus optional HTTP to HTTPS redirects and HSTS.
-- Stronger Tor support with per-stream isolation, Tor-only mode, better startup and shutdown handling, and `Onion-Location`.
-- Optional arbitrary file uploads with safe download-only handling for non-media files.
-
-### Improved
-
-- Faster board search, batched thread previews, cached thread updates, and lower job-queue overhead.
-- Safer posting, polling, replies, restores, uploads, and ChanNet imports through better transactions and rollback handling.
-- Cleaner internals across server, admin, backup, middleware, media, and schema code, with a new in-memory route test harness.
-- Better operator tooling with `/healthz`, `/readyz`, `/metrics`, `X-Request-ID`, cleaner logs, and more reliable FFmpeg and bind-address handling.
-
-### Fixed
-
-- Proxy-aware IP handling now blocks spoofed `X-Real-IP` and `X-Forwarded-For` values from untrusted clients.
-- Rate limiting now covers more write and preview paths, closing easy abuse and DoS gaps.
-- HTTPS deployments now enforce secure cookies, safer redirects, and more consistent HSTS behavior.
-- Restore, upload, temp-file, and background-job edge cases were cleaned up to avoid partial state, stuck jobs, and unsafe paths.
-- Admin feedback, upload-disabled UI, error messages, and login logging are now more consistent and safer.
-
-### Security
-
-- Restore validation, upload serving, backup handling, and appeal flows were tightened to reduce traversal, duplication, and data-leak risks.
-- `Onion-Location`, CAPTCHA wording, and HTTPS documentation now match real runtime behavior.
-
-### Breaking Changes
-
-- HTTP to HTTPS redirects now use configured and trusted hosts instead of echoing arbitrary `Host` headers.
+- Added terminal administration, native HTTPS, stronger Tor support, arbitrary
+  download-only file uploads, and operational health endpoints.
+- Hardened proxy identity, rate limits, restore validation, and background work.
+- HTTPS redirects began requiring configured/trusted hosts. The ChanNet service
+  introduced here was removed in 1.5.0.
 
 ## [1.0.13] — 2026-03-08
 
-### Improved
-
-- Tuned SQLite connection settings by increasing `cache_size` from `-4096` to `-32000` while keeping WAL mode and `synchronous=NORMAL`.
-- Added missing indexes for `posts(thread_id)` and `posts(ip_hash)`, then switched hot repeated queries to cached prepared statements.
-- Returned inserted thread and post IDs with `INSERT ... RETURNING`, and kept prune/archive work batched inside transactions.
-- Added maintenance and throughput safeguards: scheduled VACUUM, expired-poll cleanup, database-size warnings, job-queue back-pressure, duplicate media-job coalescing, configurable FFmpeg timeouts, archive-before-prune behavior, waveform cache eviction, streaming multipart handling, conditional GETs, compression, blocking-pool sizing, and JPEG EXIF orientation correction.
-
-### ✨ Added
-- **Backup system rewritten to stream instead of buffering in RAM** — all backup operations previously loaded entire zip files into memory, risking OOM on large instances. Downloads now stream from disk in 64 KiB chunks (browsers also get a proper progress bar). Backup creation now writes directly to disk via temp files with atomic rename on success, so partial backups never appear in the saved list. Individual file archiving now streams through an 8 KiB buffer instead of reading each file fully into memory. Peak RAM usage dropped from "entire backup size" to roughly 64 KiB regardless of instance size.
-- **ChanClassic theme** — a new theme that mimics the classic 4chan aesthetic: light tan/beige background, maroon/red accents, blue post-number links, and the iconic post block styling. Available in the theme picker alongside existing themes.
-- **Default theme in settings.toml** — the generated `settings.toml` now includes a `default_theme` field so the server-side default theme can be set before first startup, without requiring admin panel access.
-- **Home page subtitle in settings.toml** — `site_subtitle` is now present in the generated `settings.toml` directly below `forum_name`, allowing the home page subtitle to be configured at install time.
-- **Default theme selector in admin panel** — the Site Settings section now includes a dropdown to set the site-wide default theme served to new visitors.
-
-### 🔄 Changed
-- **Admin panel reorganized** — sections are now ordered: Site Settings → Boards → Moderation Log → Report Inbox → Moderation (ban appeals, active bans, word filters consolidated) → Full Site Backup & Restore → Board Backup & Restore → Database Maintenance → Active Onion Address. Code order matches page order for easier future editing.
-- **"Backup & Restore" renamed** to **"Full Site Backup & Restore"** to clearly distinguish it from the board-level backup section.
-- **Ban appeals, active bans, and word filters** condensed into a single **Moderation** panel with clearly labelled subsections.
-
----
+- Added streaming backup operations, ChanClassic, configurable site defaults,
+  maintenance scheduling, media back-pressure, and SQLite query improvements.
 
 ## [1.0.12] — 2026-03-07
 
-### 🔄 Changed
-- **Database module fixes** — `threads.rs`: added explicit `ROLLBACK` on failed `COMMIT` to prevent dirty transaction state. `mod.rs`: added `sort_unstable` + `dedup` to `paths_safe_to_delete` to eliminate duplicate path entries. `mod.rs`: added `media_type` and `edited_at` columns to the base `CREATE TABLE posts` schema to match the final migrated state. `admin.rs`: replaced inlined Post row mapper with shared `super::posts::map_post` to eliminate duplication. `admin.rs`: clarified `run_wal_checkpoint` doc comment on return tuple order.
-- **Template module fixes** — `board.rs`: fixed archive thumbnail path prefix from `/static/` to `/boards/`. `board.rs`: moved `fmt_ts` to the top-level import, removed redundant local `use` inside `archive_page`. `thread.rs`: corrected misleading comment about embed and draft script loading. `thread.rs`: added doc comment documenting the `body_html` trust precondition on `render_post`. `forms.rs`: removed dead `captcha_js` variable and no-op string concatenation.
-- **CSS cleanup** — removed 11 dead rules for classes never emitted by templates or JS (`.greentext`, `.quote-link`, `.admin-thread-del-btn`, duplicate `.media-expanded`, `.media-rotate-btn`, `.thread-id-badge`, `.quote-block`, `.quote-toggle`, `.archive-heading`, `.autoupdate-bar`, `.video-player`). Fixed two undefined CSS variable references (`--font-mono` → `--font`, `--bg-body` → `--bg`). Merged duplicate `.file-container` block into a single declaration.
-- **Database module split** — the 2,264-line monolithic `db.rs` has been reorganized into five focused modules with zero call-site changes (all existing `db::` references compile unchanged):
-  - `mod.rs` (466 lines) — connection pool, shared types (`NewPost`, `CachedFile`), schema initialization, shared helpers
-  - `boards.rs` (293 lines) — site settings, board CRUD, stats
-  - `threads.rs` (333 lines) — thread listing, creation, mutation, archiving, pruning
-  - `posts.rs` (642 lines) — post CRUD, file deduplication, polls, job queue, worker helpers
-  - `admin.rs` (558 lines) — admin sessions, bans, word filters, reports, mod log, ban appeals, IP history, maintenance
-- **Template module split** — the 2,736-line monolithic template file has been reorganized into five focused modules with no changes to the public API (all existing handler code works without modification):
-  - `mod.rs` (392 lines) — shared infrastructure: site name/subtitle statics, base layout, pagination, timestamp formatting, utility helpers
-  - `board.rs` (697 lines) — home page, board index, catalog, search, and archive rendering
-  - `thread.rs` (738 lines) — thread view, post rendering, polls, and post edit form
-  - `admin.rs` (760 lines) — login page, admin panel, mod log, VACUUM results, IP history
-  - `forms.rs` (198 lines) — new thread and reply forms, shared across board and thread pages
-
-### 🔒 Security Fixes
-
-**Critical**
-- **PoW bypass on replies** — proof-of-work verification was only enforced on new threads but not on replies. Replies now require a valid PoW nonce when the board has CAPTCHA enabled.
-- **PoW nonce replay** — the same proof-of-work solution could be submitted repeatedly. Used nonces are now tracked in memory and rejected within their 5-minute validity window. Stale entries are automatically pruned.
-
-**High**
-- **Removed inline JavaScript** — all inline `<script>` blocks and `onclick`/`onchange`/`onsubmit` attributes have been extracted into external `.js` files. The Content Security Policy now uses `script-src 'self'` with no `unsafe-inline`, closing a major XSS surface.
-- **Backup upload size cap** — the restore endpoints previously accepted uploads of unlimited size, risking out-of-memory crashes. Both full and board restore routes are now capped at 512 MiB.
-
-### 🐛 Fixes
-- **Post rate limiting simplified** — removed the global `check_post_rate_limit` function that was silently overriding per-board cooldown settings. A board with `post_cooldown_secs = 0` now correctly means zero cooldown. The per-board setting is the sole post rate control.
-- **API endpoints excluded from GET rate limit** — hover-preview requests (`/api/post/*`) were being counted against the navigational rate limit, causing false throttling on threads with many quote links. All `/api/` routes are now excluded alongside `/static/`, `/boards/`, and `/admin/`. The GET limiter now only covers page loads that a scraper would target (board index, catalog, archive, threads, search, home).
-- **Trailing slash 404s** — several routes returned 404 when accessed with or without a trailing slash (board index, catalog, archive, thread pages, post editing). Added middleware to normalize trailing slashes so all URL variations resolve correctly. Bookmarks and manually typed URLs now work as expected.
-
----
+- Hardened CAPTCHA replay, CSP, restore size limits, transaction rollback, and
+  redirects. Fixed archive thumbnails, rate limiting, and trailing-slash routes.
 
 ## [1.0.11] — 2026-03-06
 
-### 🔒 Security Fixes
-
-**Critical**
-- Added security headers (CSP, HSTS, Permissions-Policy) to block XSS and enforce HTTPS
-- Fixed IP detection behind reverse proxies — bans and rate limits now actually work with nginx
-- Added rate limiting to all read-only pages (60 req/min) to prevent denial-of-service
-- Added zip-bomb protection on backup restore (max 1 GB per entry, max 50,000 entries)
-- IP addresses are now hashed everywhere — raw IPs never appear in logs or memory
-- Admin login now locks out after 5 failed attempts with increasing delays
-- CSRF token comparison is now timing-safe to prevent token guessing
-- Poll inputs now have size limits (10 options max, 128 chars each, 256-char question)
-
-**High**
-- Admin session cookies now expire properly instead of lasting forever
-- Database connections now time out after 5 seconds instead of hanging forever under load
-- Small endpoints (login, vote, report) now reject oversized requests at 64 KB instead of buffering 50 MB
-- Fixed a redirect trick on logout that could send users to malicious sites via backslash URLs
-- Report and appeal handlers now correctly detect IPs behind proxies
-- Background workers now retry with smarter backoff instead of all hammering the database at once
-- Fixed a race condition where two identical file uploads at the same time could cause a server error
-
-### ✨ New Features
-- **Ban + Delete button** on every post in admin view — one click to ban the user and remove the post
-- **Ban appeal system** — banned users can submit an appeal; admins can accept or dismiss from the panel
-- **Proof-of-Work CAPTCHA** — optional per-board anti-spam for new threads, solved automatically in the browser (~100ms)
-- **Video embeds** — YouTube, Invidious, and Streamable links show a thumbnail with a play button; click to load the video
-- **Cross-board quote previews** — hovering `>>>/board/123` links now shows a floating preview popup
-- **Floating "new replies" pill** — shows how many new posts arrived while you're reading; click to scroll down
-- **Live thread metadata** — reply count, lock status, and sticky badges update in real time without refreshing
-- **"(You)" badges** — your own posts are marked so you can easily spot replies to them
-- **Spoiler text** — wrap text in `[spoiler]...[/spoiler]` to hide it until hover/click
-
-### 🔄 Changed
-- Board model now includes video embed settings; older backups still work fine
-
----
+- Added security headers, session expiry, restore bounds, login throttling, ban
+  appeals, video embeds, quote previews, and live thread metadata.
 
 ## [1.0.9] — 2026-03-06
 
-### ✨ New Features
-- **Per-board editing toggle** — enable or disable post editing on each board independently
-- **Per-board edit window** — set how long users have to edit posts (default: 5 minutes)
-- **Per-board archive toggle** — choose whether old threads are archived or permanently deleted
-
-### 🐛 Fixes
-- WebM files with AV1 video are now automatically re-encoded to VP9 for browser compatibility
-- Fixed a video transcoding crash caused by conflicting encoding settings
-- Fixed a compile error in the thread pruning code
-
----
+- Added per-board editing windows and archive controls; fixed AV1 transcoding.
 
 ## [1.0.8] — 2026-03-05
 
-### ✨ New Features
-- **Thread archiving** — old threads are now archived instead of deleted; browse them at `/{board}/archive`
-- **Mobile reply drawer** — on phones, a floating reply button opens a slide-up panel instead of the clunky desktop form
-- **Dice rolling** — type `[dice 2d6]` in a post to roll dice server-side; results are permanent and visible to everyone
-- **Sage** — check "sage" when replying to post without bumping the thread
-- **Post editing** — edit your own posts within 5 minutes using your delete token; edited posts show a timestamp
-- **Draft autosave** — reply text is saved to your browser automatically; survives refreshes and crashes
-- **WAL checkpointing** — automatic database maintenance to prevent log files from growing forever
-- **Database vacuum button** — compact the database from the admin panel after bulk deletions
-- **IP history** — admins can click any post to see all posts from that IP across all boards
-
----
+- Added thread archives, mobile replies, dice, sage, editing, draft autosave,
+  database maintenance, and administrator post history.
 
 ## [1.0.7] — 2026-03-05
 
-### ✨ New Features
-- **EXIF stripping** — all uploaded JPEGs are scrubbed of metadata (GPS, device info, etc.) automatically
-- **Image + audio combo uploads** — attach both an image and an audio file to the same post
-- **Audio waveform thumbnails** — audio-only posts now show a generated waveform image instead of a generic icon
-
----
+- Added image metadata processing, image/audio combination posts, and waveforms.
 
 ## [1.0.6] — 2026-03-04
 
-### ✨ New Features
-- **Backup management UI** — backups are now saved on disk and manageable from the admin panel (download, restore, or delete)
-- **Board-level backup & restore** — back up or restore individual boards without affecting anything else
-- **GitHub Actions CI** — automated builds and tests on macOS, Linux, and Windows
-
-### 🐛 Fixes
-- Fixed several compile errors related to random number generation, route syntax, and code formatting
-- All routes updated to Axum 0.8 syntax
-
----
+- Added saved backup management, per-board backup/restore, and platform CI.
 
 ## [1.0.5] — 2026-03-04
 
-### ✨ New Features
-- **Auto WebM transcoding** — MP4 uploads are automatically converted to WebM when ffmpeg is available
-- **Homepage stats** — total posts, uploads, and content size displayed on the front page
-
-### 🐛 Fixes
-- Tor detection now works on macOS (Homebrew paths)
-- Audio file picker no longer hides audio files in the browser
-- Audio size limit raised to 150 MB for lossless formats
-
----
+- Added automatic WebM transcoding and homepage stats; improved audio uploads.
 
 ## [1.0.4] — 2026-03-03
 
-### ✨ New Features
-- **Thread IDs** — every thread gets a permanent number displayed as a badge
-- **Cross-board links** — link to other boards/threads with `>>>/board/123`
-- **Emoji shortcodes** — 25 codes like `:fire:` → 🔥 and `:kek:` → 🤣
-- **Spoiler tags** — hide text behind a black box, revealed on hover
-- **Thread polls** — create polls with 2–10 options; one vote per IP, results shown as bar charts
-- **Resizable images** — drag the corner of expanded images to resize them
-- **Organized uploads** — files are now stored in per-board folders
-
-### 🐛 Fixes
-- Greentext styling now works correctly
-- Spoiler CSS no longer broken by post styling
-- Poll inputs no longer overflow on narrow screens
-
----
+- Added thread IDs, cross-board links, emoji, spoilers, polls, and image resizing.
 
 ## [1.0.3] — 2026-03-03
 
-### 🔄 Changed
-- Binary renamed from `rustchan` to `rustchan-cli` to fix macOS case-sensitivity issues
-
-### ✨ New Features
-- Live upload progress bar in terminal
-- Requests-per-second counter in stats
-- Per-board thread/post counts
-- Highlighted new activity with yellow `(+N)` indicators
-- Active users count (unique IPs in last 5 minutes)
-- Interactive admin console with keyboard shortcuts
-
----
+- Renamed the binary to `rustchan-cli`; added terminal upload progress, statistics,
+  activity indicators, and interactive administration.
 
 ## [1.0.2] — 2026-03-03
 
-### ✨ New Features
-- **Report system** — report posts with a reason; admins see an inbox with resolve/ban buttons
-- **Moderation log** — all admin actions are permanently logged and viewable
-- **Thread auto-updater** — toggle auto-refresh to see new replies without reloading
-- **Background worker system** — video transcoding, waveform generation, and thread cleanup now happen in the background without slowing down requests
-- **Client-side auto-compression** — if your file is too big, the browser offers to compress it for you before uploading
-
-### 🎨 Theme Tweaks
-- Frutiger Aero: toned down from electric blue to softer pearl-slate
-- NeonCubicle: replaced eye-burning cyan with muted steel-teal
-
----
+- Added reports, moderation logs, thread updates, background workers, and
+  client-side compression.
 
 ## [1.0.1] — 2026-03-03
 
-### ✨ New Features
-- **Theme picker** with 5 themes: Terminal (default), Frutiger Aero, DORFic Aero, FluoroGrid, NeonCubicle
-- Choice saved in browser and applied instantly
-
-### 🎨 Theme Tweaks
-- FluoroGrid and DORFic redesigned for better readability
-
----
+- Added the theme picker and persistent theme preferences.
 
 ## [1.0.0] — 2026-03-03
 
-### 🎉 Initial Release
-- Imageboard with boards, threads, images, and video uploads
-- Tripcodes and anonymous deletion tokens
-- Admin panel with moderation and bans
-- Rate limiting and CSRF protection
-- Configurable via `settings.toml` or environment variables
-- SQLite database with connection pooling
-- Nginx and systemd deployment configs included
+- Initial imageboard release with media, moderation, tripcodes, deletion tokens,
+  rate limiting, CSRF, SQLite, and configurable deployment.

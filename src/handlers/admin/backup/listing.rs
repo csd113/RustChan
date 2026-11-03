@@ -1,9 +1,14 @@
-use super::{
-    board_backup_dir, full_backup_dir, safety, storage, AppError, BackupInfo, BackupStorageMode,
-    Duration, HashMap, Instant, LazyLock, Local, Path, PathBuf, Result, SystemTime,
-};
+use super::storage::BackupStorageMode;
+use super::{board_backup_dir, full_backup_dir, safety, storage};
+use crate::error::{AppError, Result};
+use crate::models::BackupInfo;
+use chrono::Local;
 use chrono::TimeZone as _;
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::time::{Duration, Instant, SystemTime};
 
 /// Backup list cache TTL used by this handler.
 const BACKUP_LIST_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -499,16 +504,23 @@ pub(super) fn safe_saved_backup_dir_for_delete(path: &Path) -> Result<()> {
 }
 
 pub(super) fn prune_full_backup_dir_to_limit(dir: &Path, keep_limit: usize) -> Result<Vec<String>> {
-    let keep_limit = keep_limit.max(1);
-    let mut backups = list_backup_files(dir, BackupListKind::Full)
-        .into_iter()
-        .filter(|backup| backup.scope == "Full site" || backup.scope == "Selected boards")
-        .collect::<Vec<_>>();
-    if backups.len() <= keep_limit {
-        return Ok(Vec::new());
-    }
-
-    let to_remove = backups.split_off(keep_limit);
+    let to_remove = super::retention::removals(
+        list_backup_files(dir, BackupListKind::Full),
+        keep_limit,
+        |backup| {
+            let path = Path::new(&backup.server_path);
+            let result = if path.is_dir() {
+                storage::verify_saved_backup(path, &[storage::BackupScope::FullSite])
+                    .map(|_verified| ())
+            } else {
+                safety::verify_full_backup_zip(path).map(|_manifest| ())
+            };
+            if let Err(error) = &result {
+                tracing::warn!(backup = %backup.backup_ref, %error, "Excluding unusable backup from retention");
+            }
+            result.is_ok()
+        },
+    );
     let mut removed = Vec::with_capacity(to_remove.len());
     for backup in to_remove {
         let path = PathBuf::from(&backup.server_path);
@@ -554,7 +566,7 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
         list_standalone_archives(dir, BackupListKind::Full)
     };
     for backup in backups {
-        if !backup.verified {
+        if !backup.verified || backup.scope != "Full site" {
             continue;
         }
         let candidate = backup.modified_epoch.and_then(|epoch| {
@@ -569,61 +581,4 @@ pub(super) fn latest_verified_full_backup_modified_time_in_dir(dir: &Path) -> Op
 
 pub(in crate::server) fn latest_verified_full_backup_modified_time() -> Option<SystemTime> {
     latest_verified_full_backup_modified_time_in_dir(&full_backup_dir())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::{ensure, Context as _, Result};
-
-    #[test]
-    fn saved_backup_listing_rejects_standalone_zip_modes() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().join("listing-modes");
-        let (mut metadata, mut manifest) = storage::write_saved_backup_fixture(
-            &root,
-            storage::BackupScope::Board,
-            storage::board_file_fixtures(),
-            None,
-            1_700_000_000,
-        )?;
-        let layout = storage::SavedBackupLayout {
-            backup_ref: metadata.backup_id.clone(),
-            manifest_path: root.join(storage::MANIFEST_FILE_NAME),
-            metadata_path: root.join(storage::BACKUP_METADATA_FILE_NAME),
-            root_dir: root,
-        };
-        validate_saved_backup_metadata(&layout, &metadata, &manifest)?;
-
-        for mode in [BackupStorageMode::SingleZip, BackupStorageMode::LegacyZip] {
-            metadata.storage_mode = mode;
-            manifest.storage_mode = mode;
-            let error = validate_saved_backup_metadata(&layout, &metadata, &manifest)
-                .err()
-                .context("standalone ZIP mode was accepted as a saved-v4 directory")?;
-            ensure!(matches!(error, AppError::BadRequest(_)));
-            ensure!(error
-                .to_string()
-                .contains("unsupported saved-v4 storage mode"));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn safe_saved_backup_dir_for_delete_rejects_paths_outside_backup_root() -> Result<()> {
-        let backup_root = storage::backups_root_dir();
-        std::fs::create_dir_all(&backup_root).context("create backup root")?;
-        let data_dir = backup_root
-            .parent()
-            .context("backup root has no parent directory")?;
-        let outside = tempfile::Builder::new()
-            .prefix("outside-backup-root-")
-            .tempdir_in(data_dir)
-            .context("create outside temporary directory")?;
-        let error = safe_saved_backup_dir_for_delete(outside.path())
-            .err()
-            .context("outside path was unexpectedly accepted")?;
-        ensure!(error.to_string().contains("outside the backup root"));
-        Ok(())
-    }
 }

@@ -54,7 +54,7 @@ pub(in crate::server) async fn file_report(
         .get("csrf_token")
         .map(|cookie| cookie.value().to_owned())
         .unwrap_or_default();
-    let outcome = tokio::task::spawn_blocking({
+    let outcome = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<Option<(i64, db::ReportSubmission)>> {
             let conn = pool.get()?;
@@ -72,7 +72,7 @@ pub(in crate::server) async fn file_report(
             }
             // Banned identities must not file reports. CSRF has already been
             // validated above, so the ban notice can render its appeal form.
-            super::ensure_actor_not_banned(&tx, &ip_hash, csrf_cookie)?;
+            super::ensure_actor_not_banned(&tx, &ip_hash, &csrf_cookie)?;
             let board = access_context.board;
             // Verify post exists and belongs to this board to prevent spoofed reports.
             let post = db::get_post(&tx, post_id)?
@@ -170,7 +170,7 @@ pub(in crate::server) async fn submit_appeal(
         return AppError::BadRequest("Appeal message cannot be empty.".into()).into_response();
     }
 
-    let result = tokio::task::spawn_blocking({
+    let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<db::BanAppealSubmission> {
             let conn = pool.get()?;

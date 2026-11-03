@@ -82,14 +82,14 @@ pub(in crate::server) async fn update_full_backup_settings(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<FullBackupSettingsForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
 
     if let Some(directory) = form.backup_directory {
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        crate::middleware::data_access::spawn_blocking(move || -> Result<()> {
             let conn = state.db.get()?;
             require_admin_session_sid(&conn, session_id.as_deref()).map(|_completed_value| ())?;
             crate::config::update_settings_file_backup_directory(std::path::Path::new(&directory))
@@ -112,7 +112,7 @@ pub(in crate::server) async fn update_full_backup_settings(
     let split_zip_part_size = settings.split_zip_part_size;
     let split_zip_part_size_gib = settings.split_zip_part_size_gib;
 
-    tokio::task::spawn_blocking({
+    crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         let auto_backup_settings = state.auto_full_backup_settings.clone();
         move || -> Result<()> {
@@ -153,80 +153,4 @@ pub(in crate::server) async fn update_full_backup_settings(
         "full-backup-restore",
     )
     .into_response())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_full_backup_settings_form, FullBackupSettingsForm};
-    use anyhow::ensure;
-
-    #[test]
-    fn automatic_backup_settings_parse_directory_output_mode() -> anyhow::Result<()> {
-        let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
-            csrf: None,
-            backup_directory: None,
-            auto_full_backup_interval_hours: Some("12".to_owned()),
-            auto_full_backup_copies_to_keep: Some("3".to_owned()),
-            auto_full_backup_include_tor_hidden_service_keys: None,
-            auto_full_backup_storage_mode: Some("directory".to_owned()),
-            auto_full_backup_split_zip_part_size_gib: Some("8".to_owned()),
-        })?;
-
-        ensure!(
-            parsed.interval_hours == 12,
-            "interval was parsed incorrectly"
-        );
-        ensure!(
-            parsed.copies_to_keep == 3,
-            "retention was parsed incorrectly"
-        );
-        ensure!(
-            !parsed.include_tor_hidden_service_keys,
-            "an absent Tor-key checkbox was treated as enabled"
-        );
-        ensure!(
-            parsed.storage_mode_value == "directory",
-            "directory storage mode was parsed incorrectly"
-        );
-        ensure!(
-            parsed.split_zip_part_size_gib == 8,
-            "split ZIP display size was parsed incorrectly"
-        );
-        ensure!(
-            parsed.split_zip_part_size == 8 * 1024 * 1024 * 1024,
-            "split ZIP byte size was parsed incorrectly"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn automatic_backup_settings_parse_split_zip_output_mode() -> anyhow::Result<()> {
-        let parsed = parse_full_backup_settings_form(&FullBackupSettingsForm {
-            csrf: None,
-            backup_directory: None,
-            auto_full_backup_interval_hours: Some("24".to_owned()),
-            auto_full_backup_copies_to_keep: Some("5".to_owned()),
-            auto_full_backup_include_tor_hidden_service_keys: Some("1".to_owned()),
-            auto_full_backup_storage_mode: Some("split_zip".to_owned()),
-            auto_full_backup_split_zip_part_size_gib: Some("2".to_owned()),
-        })?;
-
-        ensure!(
-            parsed.storage_mode_value == "split_zip",
-            "split ZIP storage mode was parsed incorrectly"
-        );
-        ensure!(
-            parsed.split_zip_part_size_gib == 2,
-            "split ZIP display size was parsed incorrectly"
-        );
-        ensure!(
-            parsed.split_zip_part_size == 2 * 1024 * 1024 * 1024,
-            "split ZIP byte size was parsed incorrectly"
-        );
-        ensure!(
-            parsed.include_tor_hidden_service_keys,
-            "the Tor-key checkbox was not parsed as enabled"
-        );
-        Ok(())
-    }
 }

@@ -2,10 +2,14 @@
 mod backup_progress;
 /// Cross-site request forgery token validation.
 mod csrf;
+/// Access coordination for backups, requests, and background writers.
+pub(crate) mod data_access;
 /// Trusted-proxy and client-address extraction.
 mod ip;
 /// Request-path normalization.
 mod normalize;
+/// Origin, referrer, and fetch-metadata checks for state-changing requests.
+mod origin;
 /// Concurrency admission for memory-hard authentication work.
 mod work_gate;
 
@@ -25,6 +29,8 @@ pub use ip::{extract_ip, ClientIp};
 pub use normalize::normalize_trailing_slash;
 pub use rate_limit::rate_limit_middleware;
 
+pub(crate) use origin::check_same_origin;
+pub(crate) use state::MaintenanceGuard;
 pub use state::{
     AppState, AutoFullBackupSettings, AutoFullBackupSettingsSnapshot, DbMaintenanceJobPhase,
     DbMaintenanceJobStatus, DbMaintenanceJobs, MaintenanceGate,
@@ -41,16 +47,5 @@ pub(crate) fn forwarded_proto_is_https(
     ip::forwarded_proto_is_https(headers, peer, behind_proxy)
 }
 
-/// Non-queueing work allowance shared across clones of one application state.
-#[derive(Clone, Debug)]
-pub(crate) struct WorkGate {
-    /// Owned permits remain with blocking work after request cancellation.
-    semaphore: std::sync::Arc<tokio::sync::Semaphore>,
-}
-
-/// Bounded fixed-window storage for hashed visitor identities.
-#[derive(Debug, Default)]
-pub(crate) struct RateTable {
-    /// Serializes only admission and amortized expiration, never application work.
-    state: parking_lot::Mutex<rate_table::TableState>,
-}
+pub(crate) use rate_table::RateTable;
+pub(crate) use work_gate::WorkGate;

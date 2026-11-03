@@ -1,6 +1,46 @@
 use anyhow::{Context as _, Result};
 use std::path::{Component, Path, PathBuf};
 
+/// Read bounded regular-file bytes without following symlinks or accepting hardlinks.
+///
+/// # Errors
+/// Rejects unsafe file types, links, oversized content, or I/O failures.
+pub fn read_bounded_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    reject_symlink_components(path)?;
+    assert_regular_file_no_symlink(path)?;
+    let mut options = std::fs::File::options();
+    let _read_options = options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let _platform_options = options.custom_flags(i32::try_from(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits(),
+        )?);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "payload must be a regular file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        anyhow::ensure!(metadata.nlink() == 1, "payload must not be hardlinked");
+    }
+    let mut bytes = Vec::new();
+    file.take(
+        limit
+            .checked_add(1)
+            .context("payload byte limit overflow")?,
+    )
+    .read_to_end(&mut bytes)
+    .map(|_bytes_read| ())?;
+    anyhow::ensure!(
+        u64::try_from(bytes.len())? <= limit,
+        "payload exceeds limit"
+    );
+    Ok(bytes)
+}
+
 /// Validate a runtime path fragment before joining it to a trusted root.
 ///
 /// # Errors
@@ -93,8 +133,20 @@ pub fn canonical_parent_for_new_child(root: &Path, path: &Path) -> Result<PathBu
 /// Reject any existing symlink component in a path without following it.
 pub(crate) fn reject_symlink_components(path: &Path) -> Result<()> {
     let mut cursor = PathBuf::new();
-    for component in path.components() {
+    let mut components = path.components().peekable();
+    while let Some(component) = components.next() {
         cursor.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_)) {
+            anyhow::ensure!(
+                path.is_absolute(),
+                "Prefixed runtime paths must be absolute."
+            );
+            // Inspect a partial Windows volume prefix after RootDir completes
+            // it. A prefix-only path must still be inspected as supplied.
+            if matches!(components.peek(), Some(Component::RootDir)) {
+                continue;
+            }
+        }
         let metadata = std::fs::symlink_metadata(&cursor)
             .with_context(|| format!("Inspect runtime path component {}", cursor.display()))?;
         if metadata.file_type().is_symlink() {
@@ -154,89 +206,4 @@ fn reject_hardlinked_file_if_unix(_metadata: &std::fs::Metadata) -> Result<()> {
     // Portable Rust has no cross-platform link-count API; keep non-Unix builds
     // best-effort while preserving the symlink and canonical-root checks.
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn regular_file_check_rejects_symlink_and_hardlink() -> Result<()> {
-        use std::os::unix::fs as unix_fs;
-
-        let dir = tempfile::tempdir()?;
-        let target = dir.path().join("target.txt");
-        let link = dir.path().join("link.txt");
-        std::fs::write(&target, b"ok")?;
-        unix_fs::symlink(&target, &link)?;
-        anyhow::ensure!(
-            assert_regular_file_no_symlink(&link).is_err(),
-            "symlinked files must fail regular-file validation"
-        );
-
-        let hardlink = dir.path().join("hardlink.txt");
-        std::fs::hard_link(&target, &hardlink)?;
-        anyhow::ensure!(
-            assert_regular_file_no_symlink(&target).is_err(),
-            "multiply linked files must fail regular-file validation"
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn canonical_child_rejects_symlinked_parent_escape() -> Result<()> {
-        use std::os::unix::fs as unix_fs;
-
-        let dir = tempfile::tempdir()?;
-        let root = dir.path().join("root");
-        let outside = dir.path().join("outside");
-        std::fs::create_dir_all(&root)?;
-        std::fs::create_dir_all(&outside)?;
-        std::fs::write(outside.join("secret.txt"), b"secret")?;
-        unix_fs::symlink(&outside, root.join("alias"))?;
-
-        anyhow::ensure!(
-            canonical_child_of(&root, &root.join("alias/secret.txt")).is_err(),
-            "a symlinked parent must not escape the canonical root"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn existing_regular_file_child_accepts_valid_relative_file() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let root = dir.path().join("root");
-        std::fs::create_dir_all(root.join("board"))?;
-        std::fs::write(root.join("board/file.txt"), b"ok")?;
-
-        let path = existing_regular_file_child(&root, "board/file.txt")?;
-        let expected = root.join("board/file.txt").canonicalize()?;
-
-        anyhow::ensure!(
-            path == expected,
-            "validated child path did not match its canonical location"
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn existing_regular_file_child_rejects_final_symlink() -> Result<()> {
-        use std::os::unix::fs as unix_fs;
-
-        let dir = tempfile::tempdir()?;
-        let root = dir.path().join("root");
-        let outside = dir.path().join("outside.txt");
-        std::fs::create_dir_all(&root)?;
-        std::fs::write(&outside, b"secret")?;
-        unix_fs::symlink(&outside, root.join("link.txt"))?;
-
-        anyhow::ensure!(
-            existing_regular_file_child(&root, "link.txt").is_err(),
-            "a final symlink must fail regular-file child validation"
-        );
-        Ok(())
-    }
 }

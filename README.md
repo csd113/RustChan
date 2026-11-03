@@ -18,7 +18,7 @@ Conversations are organized into **boards** (topics such as photography or techn
 
 RustChan runs as a single app, with a built-in database. You do not need to set up a separate database server.
 
-**Source version:** v1.7.1. **Downloads:** [latest published release](https://github.com/csd113/RustChan/releases/latest). **Docker image:** `ghcr.io/csd113/rustchan:latest`.
+**Source version:** v1.7.5. **Downloads:** [latest published release](https://github.com/csd113/RustChan/releases/latest). **Docker image:** `ghcr.io/csd113/rustchan:latest`.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ Choose the option that suits you:
 |---|---|---|
 | [Docker](#start-with-docker) | Running the ready-made app with its media tools included | Docker running on your computer or server |
 | [Download the app](#download-the-app) | Running RustChan directly, without Docker or compiling code | A supported Linux, macOS, or Windows computer |
-| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.99 or newer |
+| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.99.1 or newer |
 
 ### Start with Docker
 
@@ -70,14 +70,15 @@ For **Docker Compose, updates, backups, or a public website**, follow the [conta
 
 Open the [latest release](https://github.com/csd113/RustChan/releases/latest), download the ZIP for your operating system, and extract it into a folder where the app can save files.
 
-ZIP names include the release version; the v1.7.1 names are shown below. Choose the matching files from the published release you download.
+ZIP names include the release version; the v1.7.5 names are shown below. Choose the matching files from the published release you download.
 
 | Your computer | Download |
 |---|---|
-| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.7.1-linux-x86_64.zip` |
-| Linux, ARM64 | `rustchan-cli-v1.7.1-linux-arm64.zip` |
-| macOS, Apple silicon | `rustchan-cli-v1.7.1-macos-apple-silicon.zip` |
-| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.7.1-windows-x86_64.zip` |
+| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-linux-x86_64.zip` |
+| Linux, ARM64 | `rustchan-cli-v1.7.5-linux-arm64.zip` |
+| macOS, Intel 64-bit | `rustchan-cli-v1.7.5-macos-intel.zip` |
+| macOS, Apple silicon | `rustchan-cli-v1.7.5-macos-apple-silicon.zip` |
+| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-windows-x86_64.zip` |
 
 From a terminal in the extracted folder, run:
 
@@ -93,7 +94,7 @@ RustChan creates a `rustchan-data` folder next to the app. Keep that folder when
 
 ### Build from source
 
-With Git and Rust **1.99 or newer** installed:
+With Git and Rust **1.99.1 or newer** installed:
 
 ```bash
 git clone https://github.com/csd113/RustChan.git
@@ -154,7 +155,7 @@ Captured from the published v1.5.0 Docker image, these views show a demonstratio
 | Core browsing and posting without JavaScript | Create and restore site or board backups; schedule automatic backups |
 | Optional access through a Tor onion address | Built-in Tor hosting, optional HTTPS, and site-health tools |
 
-Supported media includes JPEG, PNG, GIF, WebP, HEIC/HEIF, BMP, TIFF, SVG, MP4, WebM, MP3, OGG, FLAC, WAV, M4A, and AAC. Available uploads depend on the site's and board's settings.
+Supported media includes JPEG, PNG, GIF, WebP, HEIC/HEIF, BMP, TIFF, MP4, WebM, MP3, OGG, FLAC, WAV, M4A, and AAC. Available uploads depend on the site's and board's settings. SVG uploads are rejected because they can contain executable content.
 
 ## Configuration
 
@@ -191,7 +192,7 @@ Sign in at `/admin` on your site to manage boards, posts, reports, bans, appeara
 
 **Backups:** the admin panel can save or download full-site and per-board backups and restore them later. Keep independent copies and test that you can restore them. To copy the whole data directory yourself, stop the app first so the database and uploaded files remain consistent.
 
-**Backup storage:** change **Admin → Backups → backup storage directory**, or set `backup_directory` in `settings.toml`, then restart. Existing backups stay in their original location, and only the active location appears in the admin panel. Use a dedicated, writable directory; mount external storage before starting the app. For Docker, a directory outside `/data` needs its own persistent mount. See the [container backup instructions](docs/containers.md#backups).
+**Backup storage:** change **Admin → Backups → backup storage directory**, or set `backup_directory` in `settings.toml`, then restart. Existing backups stay in their original location, and only the active location appears in the admin panel. Use a dedicated, writable directory; mount external storage before starting the app. For Docker, a directory outside `/data` needs its own persistent mount. See the [container backup instructions](docs/containers.md#backups). See [backup safety and interrupted restore recovery](docs/backups.md) for limits and recovery behavior.
 
 **Command-line administration:** use `rustchan-cli admin --help` to see account, board, ban, and database commands. In Docker, run it as:
 
@@ -211,25 +212,8 @@ As a site owner, keep settings, secrets, databases, backups, TLS keys, and Tor i
 
 RustChan is written in Rust using Axum, Tokio, bundled SQLite, server-rendered templates, Rustls, and Arti. Docker is optional for development.
 
-Use Rust 1.99.0 and run the Rust checks before submitting changes:
-
-```bash
-cargo fmt --all --check
-cargo check --locked --workspace --all-targets --all-features
-cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-cargo test --locked --workspace --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
-```
-
-The workspace lint tables in `Cargo.toml` enforce the Rust and Clippy policy for
-every RustChan target. They deny the main Clippy groups (`all`, `pedantic`,
-`nursery`, and `cargo`) and explicit checks for panic paths, unchecked arithmetic
-and indexing, conversions, ignored results, documentation, and resource safety.
-Unsafe Rust is forbidden. New workspace packages must inherit this policy with
-`[lints] workspace = true`. The patched upstream AAC dependency under `vendor/`
-is excluded from the workspace and retains its upstream lint configuration.
-
-Browser tests run locally; their harness and npm files are tracked, but GitHub Actions does not run browser checks. Keep browser reports and temporary screenshots out of commits; the demonstration screenshots in `docs/screenshots/` are published documentation. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance.
+Use Rust 1.99.1. [CONTRIBUTING.md](CONTRIBUTING.md) contains the validation commands,
+workspace lint policy, and development workflow.
 
 ## Documentation
 
@@ -237,10 +221,14 @@ Browser tests run locally; their harness and npm files are tracked, but GitHub A
 |---|---|
 | [Container guide](docs/containers.md) | Docker, Compose, image tags, updates, and backups |
 | [Setup guide](SETUP.md) | Installation, server deployment, HTTPS, Tor, and troubleshooting |
+| [Media capabilities](docs/media-capabilities.md) | Supported formats, processing backends, and preview limits |
+| [Database guide](docs/sqlite-engineering.md) | SQLite architecture, migrations, maintenance, and recovery |
+| [Software updates](docs/software-updates.md) | Version checks, manual upgrades, and recovery |
+| [Settings restarts](docs/settings-restarts.md) | Live settings, restart requirements, and configuration recovery |
 | [Contributing](CONTRIBUTING.md) | Development and contribution workflow |
 | [Security policy](SECURITY.md) | Reporting vulnerabilities and security scope |
 | [Support](SUPPORT.md) | Where to get help and what the project supports |
 | [Changelog](CHANGELOG.md) | Release history |
 | [License](LICENSE) | MIT license |
 
-Administrator-controlled native Linux updates, signed release verification, verified pre-upgrade snapshots and automatic rollback are described in [Software Updates](docs/software-updates.md). Containers and other deployments remain check-only. `/readyz` reports the running package version and never exposes update availability.
+The admin [Software Updates](docs/software-updates.md) page checks for a newer stable release and links to its download. Upgrade with your usual deployment tools after stopping RustChan and backing up the complete data directory and old binary. `/readyz` reports the running package version and never exposes update availability.
