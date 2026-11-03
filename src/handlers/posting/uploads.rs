@@ -625,9 +625,10 @@ pub(super) fn finalize_pending_uploads(
     pool: &db::DbPool,
     upload_dir: &str,
     uploads: &ProcessedUploads,
-) {
+    post_url: &str,
+) -> Result<()> {
     let Some(pending) = uploads.pending_finalize.as_ref() else {
-        return;
+        return Ok(());
     };
 
     match crate::pending_fs::finalize_upload_payload_with_pool(
@@ -636,15 +637,58 @@ pub(super) fn finalize_pending_uploads(
         Some(&pending.op_id),
         &pending.payload,
     ) {
-        Ok(()) => {}
+        Ok(()) => Ok(()),
         Err(error) => {
             tracing::error!(target: POSTING_LOG_TARGET,
                 op_id = %pending.op_id,
                 error = %error,
                 "upload finalization failed; leaving pending_fs_op for startup reconciliation"
             );
+            Err(super::unpublished_upload_error(post_url))
         }
     }
+}
+
+/// Check the real publish directories before committing references to staged files.
+fn preflight_publish_directories(
+    upload_dir: &str,
+    relative_paths: &[String],
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let root = std::path::Path::new(upload_dir)
+        .canonicalize()
+        .context("Resolve upload publish root")?;
+    let mut checked = std::collections::HashSet::new();
+    for relative in relative_paths {
+        let relative = crate::utils::fs_security::validate_runtime_relative_path(relative)?;
+        let target = root.join(relative);
+        let parent = target
+            .parent()
+            .context("Upload destination has no parent")?;
+        if !checked.insert(parent.to_path_buf()) {
+            continue;
+        }
+        let mut directory = root.clone();
+        for component in relative
+            .parent()
+            .context("Upload destination has no relative parent")?
+            .components()
+        {
+            directory.push(component.as_os_str());
+            match std::fs::create_dir(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error).context("Create upload publish directory"),
+            }
+            crate::utils::fs_security::assert_dir_no_symlink(&directory)?;
+        }
+        let canonical_parent =
+            crate::utils::fs_security::canonical_parent_for_new_child(&root, &target)?;
+        let probe = tempfile::NamedTempFile::new_in(canonical_parent)
+            .context("Upload publish directory is not writable")?;
+        probe.close().context("Remove upload publish probe")?;
+    }
+    Ok(())
 }
 
 pub(super) fn process_uploads(
@@ -712,6 +756,15 @@ pub(super) fn process_uploads(
         op_id: uuid::Uuid::new_v4().to_string(),
         payload,
     });
+
+    if let Some(pending) = pending_finalize.as_ref() {
+        if let Err(error) =
+            preflight_publish_directories(config.upload_dir, &pending.payload.relative_paths)
+        {
+            cleanup_unused_upload_stage(stage_root.as_deref());
+            return Err(AppError::Internal(error));
+        }
+    }
 
     if pending_finalize.is_none() {
         cleanup_unused_upload_stage(stage_root.as_deref());

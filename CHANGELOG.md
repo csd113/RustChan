@@ -7,6 +7,12 @@ remain in Git history.
 
 ## RustChan 1.7.5 — 2026-11-03
 
+- Enabled HTTPS protocol negotiation for HTTP/2 with HTTP/1.1 fallback on
+  manual, development and ACME certificate paths.
+- Check final media destinations before committing posts. Late publication
+  failures now identify the saved post instead of falsely confirming upload success;
+  retries do not confirm success while required media is missing.
+
 - Fixed private setup by collecting a separate board password and keeping its
   reviewed hash out of the HTML. Invalid upload limits now fail before review
   instead of causing an internal error when setup finishes. Removed the

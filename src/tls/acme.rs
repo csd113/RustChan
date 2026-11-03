@@ -93,7 +93,7 @@ pub(super) fn build_acme_acceptor(
     // Build a ServerConfig that uses the ACME resolver as its certificate
     // source. This is the config we must pass to StartHandshake::into_stream
     // later — it is what makes dynamically-renewed certs visible to rustls.
-    let server_cfg = Arc::new(
+    let server_cfg = super::with_http_alpn(
         ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(state.resolver()),

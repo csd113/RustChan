@@ -282,3 +282,70 @@ fn malformed_upload_and_filesystem_errors_keep_safe_responses() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn publish_preflight_checks_destination_and_removes_its_probe() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_text = root.path().to_str().context("UTF-8 upload fixture")?;
+    let stage = root.path().join(".pending/upload-fixture");
+    std::fs::create_dir_all(&stage)?;
+    std::fs::write(stage.join("source.png"), b"staged source")?;
+    // Staging is writable even when the actual board destination cannot be used.
+    std::fs::write(root.path().join("test"), b"destination is a file")?;
+    ensure!(
+        super::preflight_publish_directories(root_text, &["test/photo.png".to_owned()]).is_err(),
+        "a writable staging area must not hide an unusable final destination"
+    );
+    std::fs::remove_file(root.path().join("test"))?;
+    super::preflight_publish_directories(root_text, &["test/photo.png".to_owned()])?;
+    ensure!(
+        std::fs::read_dir(root.path().join("test"))?
+            .next()
+            .is_none(),
+        "preflight must not publish artifacts or retain probe files"
+    );
+    Ok(())
+}
+
+#[test]
+fn committed_upload_failure_is_not_reported_as_success() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_text = root.path().to_str().context("UTF-8 upload fixture")?;
+    let stage = crate::pending_fs::create_stage_root(root_text, "upload")?;
+    let pool = r2d2::Pool::builder()
+        .max_size(1)
+        .build(r2d2_sqlite::SqliteConnectionManager::memory())?;
+    let uploads = super::ProcessedUploads {
+        primary: None,
+        audio: None,
+        pending_finalize: Some(super::PendingUploadFinalize {
+            op_id: "committed-upload-fixture".to_owned(),
+            payload: crate::pending_fs::UploadFinalizePayload {
+                stage_dir: stage.display().to_string(),
+                relative_paths: vec!["test/missing.png".to_owned()],
+                optional_paths: Vec::new(),
+                artifact_sha256: std::collections::BTreeMap::default(),
+                primary_hash: None,
+                primary_file_path: None,
+                primary_thumb_path: None,
+                primary_mime_type: None,
+            },
+        }),
+    };
+    let error = super::finalize_pending_uploads(&pool, root_text, &uploads, "/test/thread/1#p1")
+        .err()
+        .context("missing committed artifact must produce a warning, not success")?;
+    let AppError::Conflict(message) = error else {
+        anyhow::bail!("committed upload failure must keep its actionable public response");
+    };
+    ensure!(
+        message.contains("saved at /test/thread/1#p1")
+            && message.contains("Do not create another post"),
+        "the author must know the post already exists before retrying"
+    );
+    ensure!(
+        !message.contains(root_text) && stage.exists(),
+        "hide internal paths and retain staged recovery evidence"
+    );
+    Ok(())
+}

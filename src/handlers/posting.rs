@@ -87,17 +87,48 @@ fn existing_submission_result(
 ) -> Result<SubmitPostResult> {
     let stored_post = db::get_post(conn, existing.post_id)?
         .ok_or_else(|| AppError::NotFound("Existing post submission target not found.".into()))?;
+    let redirect_url = format!(
+        "/{board_short}/thread/{}#p{}",
+        existing.thread_id, existing.post_id
+    );
+    // Policy-driven pruning intentionally retains media references and receipts.
+    // It must not be mistaken for an attachment that never finished publishing.
+    if !matches!(
+        stored_post.media_processing_state.as_deref(),
+        Some(db::MEDIA_ORIGINAL_PRUNE_PENDING | db::MEDIA_ORIGINAL_PRUNED)
+    ) {
+        for path in [
+            stored_post.file_path.as_deref(),
+            stored_post.audio_file_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if crate::utils::fs_security::existing_regular_file_child(
+                std::path::Path::new(&crate::config::CONFIG.upload_dir),
+                path,
+            )
+            .is_err()
+            {
+                return Err(unpublished_upload_error(&redirect_url));
+            }
+        }
+    }
     Ok(SubmitPostResult {
-        redirect_url: format!(
-            "/{board_short}/thread/{}#p{}",
-            existing.thread_id, existing.post_id
-        ),
+        redirect_url,
         board_short,
         thread_id: existing.thread_id,
         post_id: existing.post_id,
         deletion_token: stored_post.deletion_token,
         created_at: stored_post.created_at,
     })
+}
+
+/// A late storage failure cannot turn a committed post into confirmed success.
+fn unpublished_upload_error(post_url: &str) -> AppError {
+    AppError::Conflict(format!(
+        "Your post was saved at {post_url}, but its attachment could not be published. Do not create another post. Check that post after the site operator restores storage."
+    ))
 }
 
 /// Schedule best-effort spam analysis after the post commits.
@@ -656,7 +687,7 @@ pub(super) fn submit_post(
         }
     };
 
-    finalize_pending_uploads(pool, &upload_dir, &uploads);
+    finalize_pending_uploads(pool, &upload_dir, &uploads, &redirect_url)?;
     enqueue_spam_check(job_queue, post_id, &ip_hash, body_text.len());
     if prune_board_id.is_some() || pending_media_board.is_some() {
         if let Err(error) = pool

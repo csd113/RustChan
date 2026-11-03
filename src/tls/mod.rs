@@ -14,6 +14,12 @@ use crate::{
     error::AppError,
 };
 
+/// Advertise the HTTP protocols supported by both HTTPS listener paths.
+fn with_http_alpn(mut config: rustls::ServerConfig) -> Arc<rustls::ServerConfig> {
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Arc::new(config)
+}
+
 /// A TLS acceptor that is either a static [`TlsAcceptor`] (manual cert or
 /// self-signed) or an [`rustls_acme::AcmeAcceptor`] (Let's Encrypt / rustls-acme).
 ///
@@ -171,7 +177,7 @@ fn load_pem_as_acceptor(
         .map_err(|e| AppError::Tls(format!("failed to parse key PEM: {e}")))?;
 
     // --- ServerConfig --------------------------------------------------------
-    let server_cfg = Arc::new(
+    let server_cfg = with_http_alpn(
         rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
@@ -180,3 +186,8 @@ fn load_pem_as_acceptor(
     let acceptor = Arc::new(TlsAcceptor::from(Arc::clone(&server_cfg)));
     Ok((acceptor, server_cfg))
 }
+
+#[cfg(test)]
+#[cfg(feature = "tls-self-signed")]
+#[path = "tests/alpn.rs"]
+mod tests;

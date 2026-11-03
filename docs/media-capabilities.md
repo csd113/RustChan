@@ -64,3 +64,12 @@ Backend routing lives in [`src/media/`](../src/media/) and
 [`src/workers/mod.rs`](../src/workers/mod.rs). Capability claims should
 follow the supported backend behavior; successful processing of one file
 does not establish support for every codec profile or container variant.
+
+## Storage failures
+
+An unwritable media destination rejects the upload before committing a new
+post. If storage fails after the post commits, the response identifies the saved
+post and warns that its attachment could not be published. Check that post
+before starting a new submission. Operators should restore storage access and
+restart RustChan to replay its retained upload journal; keep the staged files
+and database together until recovery completes.
