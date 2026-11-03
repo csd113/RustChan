@@ -33,7 +33,7 @@ pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 
 /// Reject ambiguous framing and oversized request headers.
 pub(super) async fn request_boundary_middleware(
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let uri_bytes = req
@@ -44,6 +44,9 @@ pub(super) async fn request_boundary_middleware(
         .saturating_add(req.uri().scheme_str().map_or(0, str::len));
     if uri_bytes > HTTP_MAX_URI_BYTES {
         return boundary_error_response(http::StatusCode::URI_TOO_LONG, "Request URL is too long");
+    }
+    if !normalize_request_host(&mut req) {
+        return boundary_error_response(http::StatusCode::BAD_REQUEST, "Invalid request authority");
     }
     if request_headers_exceed_limits(req.headers()) {
         return boundary_error_response(
@@ -64,9 +67,6 @@ pub(super) async fn request_boundary_middleware(
         );
     }
 
-    if !valid_request_host(req.headers()) {
-        return boundary_error_response(http::StatusCode::BAD_REQUEST, "Invalid Host header");
-    }
     let limit = request_body_limit(req.method(), req.uri().path());
     if req
         .headers()
@@ -132,6 +132,34 @@ fn valid_request_host(headers: &http::HeaderMap) -> bool {
     let Ok(host) = host.to_str() else {
         return false;
     };
+    valid_authority(host)
+}
+
+/// Give all handlers one validated destination, including HTTP/2's `:authority`.
+fn normalize_request_host(request: &mut axum::extract::Request) -> bool {
+    if !valid_request_host(request.headers()) {
+        return false;
+    }
+    let Some(authority) = request.uri().authority() else {
+        return true;
+    };
+    if !valid_authority(authority.as_str()) {
+        return false;
+    }
+    if let Some(host) = request.headers().get(header::HOST) {
+        return host
+            .to_str()
+            .is_ok_and(|host| host.eq_ignore_ascii_case(authority.as_str()));
+    }
+    let Ok(host) = http::HeaderValue::from_str(authority.as_str()) else {
+        return false;
+    };
+    drop(request.headers_mut().insert(header::HOST, host));
+    true
+}
+
+/// Validate either wire representation without trusting forwarded host headers.
+fn valid_authority(host: &str) -> bool {
     !host.is_empty()
         && !host.bytes().any(|byte| {
             byte.is_ascii_whitespace()
@@ -147,6 +175,10 @@ fn valid_request_host(headers: &http::HeaderMap) -> bool {
                 })
         })
 }
+
+#[cfg(test)]
+#[path = "tests/request_authority.rs"]
+mod tests;
 
 /// Render application notices with request preferences before response compression.
 pub(super) async fn theme_error_response(
