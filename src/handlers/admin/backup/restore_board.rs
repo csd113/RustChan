@@ -956,11 +956,11 @@ pub(in crate::server) async fn extract_board_from_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ExtractBoardFromFullBackupForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let maintenance_guard =
         super::recovery::begin_operation(&state, &jar, "Extract board from full backup").await?;
 
@@ -1101,11 +1101,11 @@ pub(in crate::server) async fn restore_saved_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let maintenance_guard =
         super::recovery::begin_operation(&state, &jar, RestoreKind::Board.maintenance_label())
             .await?;
@@ -1205,11 +1205,11 @@ pub(in crate::server) async fn board_restore(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
-    let session_id = match restore_auth_preflight(&state, &headers, &jar, Some(peer)).await {
+    let session_id = match restore_auth_preflight(&state, &headers, &jar, secure_context).await {
         Ok(session) => session,
         Err(error) => return restore_start_response(RestoreKind::Board, xhr_request, &error),
     };

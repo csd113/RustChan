@@ -8,6 +8,8 @@ pub(crate) mod data_access;
 mod ip;
 /// Request-path normalization.
 mod normalize;
+/// Origin, referrer, and fetch-metadata checks for state-changing requests.
+mod origin;
 /// Concurrency admission for memory-hard authentication work.
 mod work_gate;
 
@@ -27,6 +29,7 @@ pub use ip::{extract_ip, ClientIp};
 pub use normalize::normalize_trailing_slash;
 pub use rate_limit::rate_limit_middleware;
 
+pub(crate) use origin::check_same_origin;
 pub(crate) use state::MaintenanceGuard;
 pub use state::{
     AppState, AutoFullBackupSettings, AutoFullBackupSettingsSnapshot, DbMaintenanceJobPhase,

@@ -362,7 +362,7 @@ pub(super) async fn restore_auth_preflight(
     state: &AppState,
     headers: &HeaderMap,
     jar: &CookieJar,
-    peer: Option<std::net::SocketAddr>,
+    peer: crate::middleware::SecureCookieContext,
 ) -> Result<Option<String>> {
     let session_id = jar
         .get(SESSION_COOKIE)

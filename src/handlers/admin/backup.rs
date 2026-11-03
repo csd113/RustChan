@@ -14,8 +14,8 @@ use crate::{
     utils::crypto::new_session_id,
 };
 use axum::{
-    extract::{Query, State},
-    http::header,
+    extract::{Form, Query, State},
+    http::{header, HeaderMap},
     response::{IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -94,7 +94,16 @@ pub(in crate::server) use listing::latest_verified_full_backup_modified_time;
 pub(in crate::server) async fn admin_backup(
     State(state): State<AppState>,
     jar: CookieJar,
+    headers: HeaderMap,
+    secure_context: crate::middleware::SecureCookieContext,
+    Form(form): Form<super::CsrfOnly>,
 ) -> Result<Response> {
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
     let maintenance_guard = recovery::begin_operation(&state, &jar, "Full backup download").await?;
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let upload_dir = CONFIG.upload_dir.clone();

@@ -252,6 +252,12 @@ installations. Do not use them as the current single-executable service setup.
 
 ## Reverse proxy notes
 
+Forms need a matching `Origin` or `Referer`, or `Sec-Fetch-Site: same-origin`,
+as well as their CSRF token. Preserve the public `Host` and trusted forwarded
+protocol. Keep the application's `same-origin` referrer policy: changing it to
+`no-referrer` can prevent native form uploads from supplying their origin.
+Referrers are still omitted when navigating to another site.
+
 Point nginx or Caddy at the local RustChan HTTP listener and terminate TLS at the
 proxy. Set `CHAN_BEHIND_PROXY=true` and `CHAN_TRUSTED_PROXY_CIDRS` to the proxy's
 actual network. Configure allowed public hosts. Keep the backend inaccessible

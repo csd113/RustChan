@@ -8,7 +8,7 @@ use crate::{
     updates::{self, Request, Status},
 };
 use axum::{
-    extract::{ConnectInfo, Form, State},
+    extract::{Form, State},
     http::HeaderMap,
     response::{IntoResponse as _, Response},
     Json,
@@ -99,10 +99,10 @@ pub(in crate::server) async fn check(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<CheckForm>,
 ) -> Result<Response> {
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     authorize(&state, &jar).await.map(|_completed_value| ())?;
     let _guard = state.maintenance_gate.try_begin("Software update check")?;
     let outcome = if updates::managed() {
@@ -144,11 +144,11 @@ pub(in crate::server) async fn install(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client): crate::middleware::ClientIp,
     Form(form): Form<InstallForm>,
 ) -> Result<Response> {
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let session = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());

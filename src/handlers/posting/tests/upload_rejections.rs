@@ -60,7 +60,11 @@ fn wav_fixture() -> Vec<u8> {
 }
 
 async fn parsed_audio(limit: usize) -> crate::error::Result<crate::handlers::PostFormData> {
-    let mut body = b"--test-boundary\r\nContent-Disposition: form-data; name=\"_csrf\"\r\n\r\nfixture-token\r\n--test-boundary\r\nContent-Disposition: form-data; name=\"audio_file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
+    let token = crate::utils::crypto::make_csrf_form_token(
+        "fixture-token",
+        &crate::config::CONFIG.cookie_secret,
+    );
+    let mut body = format!("--test-boundary\r\nContent-Disposition: form-data; name=\"_csrf\"\r\n\r\n{token}\r\n--test-boundary\r\nContent-Disposition: form-data; name=\"audio_file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n").into_bytes();
     body.extend_from_slice(b"\x89PNG\r\n\x1a\n");
     body.extend_from_slice(b"\r\n--test-boundary--\r\n");
     let request = Request::builder()

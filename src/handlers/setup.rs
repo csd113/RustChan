@@ -523,7 +523,7 @@ fn ensure_setup_csrf(
 fn validate_setup_csrf(
     jar: &CookieJar,
     headers: &HeaderMap,
-    peer: Option<std::net::SocketAddr>,
+    peer: crate::middleware::SecureCookieContext,
     token: Option<&str>,
 ) -> Result<()> {
     let csrf_cookie = jar.get("csrf_token").map(Cookie::value);
@@ -532,7 +532,7 @@ fn validate_setup_csrf(
         Some(SETUP_CSRF_SCOPE),
         token.unwrap_or(""),
     );
-    crate::handlers::admin::require_same_origin_or_valid_csrf(headers, peer, csrf_valid)?;
+    crate::handlers::admin::require_same_origin_request(headers, peer)?;
     if csrf_valid {
         Ok(())
     } else {
@@ -615,7 +615,7 @@ pub(in crate::server) async fn setup_review(
 ) -> Result<Response> {
     let (setup_state, _is_admin) = load_setup_state(&state, admin_session_id(&jar)).await?;
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
-    validate_setup_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
+    validate_setup_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let parsed = match parse_setup_form(&form, setup_state.admin_count) {
         Ok(parsed) => parsed,
         Err(errors) => {
@@ -689,7 +689,7 @@ pub(in crate::server) async fn setup_finish(
     Form(form): Form<SetupWizardForm>,
 ) -> Result<Response> {
     let (setup_state, _is_admin) = load_setup_state(&state, admin_session_id(&jar)).await?;
-    validate_setup_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
+    validate_setup_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let pending_admin_hash =
         pending_admin_hash_from_cookie(&jar, form.admin_password_token.as_deref())?;
     let parsed =
@@ -893,14 +893,14 @@ pub(in crate::server) async fn admin_reopen_setup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ReopenSetupForm>,
 ) -> Result<Response> {
     let session_id = admin_session_id(&jar);
     crate::handlers::admin::require_admin_post_origin_and_csrf(
         &jar,
         &headers,
-        Some(peer),
+        secure_context,
         form.csrf.as_deref(),
     )?;
     crate::middleware::data_access::spawn_blocking({
@@ -922,14 +922,14 @@ pub(in crate::server) async fn admin_close_setup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ReopenSetupForm>,
 ) -> Result<Response> {
     let session_id = admin_session_id(&jar);
     crate::handlers::admin::require_admin_post_origin_and_csrf(
         &jar,
         &headers,
-        Some(peer),
+        secure_context,
         form.csrf.as_deref(),
     )?;
     crate::middleware::data_access::spawn_blocking({

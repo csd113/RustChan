@@ -550,13 +550,7 @@ pub(in crate::server) async fn set_theme(
 ) -> Result<Response> {
     let theme = templates::normalize_theme_slug(&theme)
         .ok_or_else(|| AppError::BadRequest("Unknown theme.".into()))?;
-    if params
-        .csrf
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        check_csrf_jar(&jar, params.csrf.as_deref())?;
-    }
+    super::check_menu_action_csrf(&jar, &headers, secure_context, params.csrf.as_deref())?;
 
     let mut cookie = Cookie::new(USER_THEME_COOKIE, theme);
     cookie.set_http_only(false);

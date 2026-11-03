@@ -431,7 +431,11 @@ fn admin_moderation_routes() -> Router<AppState> {
 /// Compose full-site and per-board backup and restore routes.
 fn admin_backup_routes() -> Router<AppState> {
     Router::new()
-        .route("/admin/backup", get(crate::handlers::admin::admin_backup))
+        .route(
+            "/admin/backup",
+            get(|| async { axum::response::Redirect::to("/admin/panel#backups") })
+                .post(crate::handlers::admin::admin_backup),
+        )
         .route(
             "/admin/restore",
             get(|| async { axum::response::Redirect::to("/admin/panel") })

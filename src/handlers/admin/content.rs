@@ -44,12 +44,17 @@ pub(in crate::server) async fn create_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<CreateBoardForm>,
 ) -> Result<Response> {
     // auth + DB write in spawn_blocking
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let short = validate_new_board_short_name(&form.short_name)?;
     let short_for_flash = short.clone();
@@ -124,11 +129,16 @@ pub(in crate::server) async fn delete_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BoardIdForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let upload_dir = CONFIG.upload_dir.clone();
 
@@ -214,11 +224,16 @@ pub(in crate::server) async fn reorder_board(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ReorderBoardForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let move_up = match form.direction.as_str() {
         "up" => true,
@@ -263,11 +278,16 @@ pub(in crate::server) async fn thread_action(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ThreadActionForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     match form.action.as_str() {
         "sticky" | "unsticky" | "lock" | "unlock" | "archive" => {}
@@ -343,11 +363,16 @@ pub(in crate::server) async fn admin_delete_post(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<AdminDeletePostForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let post_id = form.post_id;
@@ -403,11 +428,16 @@ pub(in crate::server) async fn admin_delete_thread(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<AdminDeleteThreadForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let upload_dir = CONFIG.upload_dir.clone();
     let thread_id = form.thread_id;

@@ -7,6 +7,10 @@ remain in Git history.
 
 ## Unreleased
 
+- Fixed banner and favicon uploads rejected by conflicting document and HTTP
+  referrer policies. Thanks to @jfkn1ght for reporting the banner problem in #123.
+- Tightened CSRF checks for forms, login redirects, backups, and browser origins.
+
 - Corrected upload rejection status mapping, including secondary audio type and
   size errors, while keeping filesystem and decoder diagnostics private.
 

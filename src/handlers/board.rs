@@ -324,29 +324,7 @@ pub(super) fn check_menu_action_csrf(
     if cookie.is_some() && !cookie_bound {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
-    let fetch_site = headers
-        .get("sec-fetch-site")
-        .and_then(|value| value.to_str().ok());
-    if fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("cross-site")) {
-        return Err(AppError::Forbidden("Cross-site action denied.".into()));
-    }
-    let null_origin_without_referer = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        == Some("null")
-        && !headers.contains_key(header::REFERER);
-    if null_origin_without_referer {
-        // The site's no-referrer policy makes native form POSTs send Origin:
-        // null in supported browsers. Fetch metadata or a bound Strict cookie
-        // distinguishes these from a cross-site signed-token replay.
-        if cookie_bound || fetch_site.is_some_and(|value| value.eq_ignore_ascii_case("same-origin"))
-        {
-            return Ok(());
-        }
-        return Err(AppError::Forbidden("Cross-site action denied.".into()));
-    }
-    crate::handlers::admin::require_same_origin_or_valid_csrf(headers, peer.peer, cookie_bound)
+    crate::handlers::admin::require_same_origin_request(headers, peer)
 }
 
 pub(super) fn admin_scoped_csrf_token(
@@ -406,12 +384,15 @@ pub(super) fn actor_ban_reason(
 pub(super) fn ensure_actor_not_banned(
     conn: &rusqlite::Connection,
     ip_hash: &str,
-    ban_csrf_token: String,
+    ban_csrf_token: &str,
 ) -> Result<()> {
     if let Some(reason) = actor_ban_reason(conn, ip_hash)? {
         return Err(AppError::BannedUser {
             reason,
-            csrf_token: ban_csrf_token,
+            csrf_token: crate::utils::crypto::make_csrf_form_token(
+                ban_csrf_token,
+                &CONFIG.cookie_secret,
+            ),
         });
     }
     Ok(())

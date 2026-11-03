@@ -72,7 +72,7 @@ pub(in crate::server) async fn file_report(
             }
             // Banned identities must not file reports. CSRF has already been
             // validated above, so the ban notice can render its appeal form.
-            super::ensure_actor_not_banned(&tx, &ip_hash, csrf_cookie)?;
+            super::ensure_actor_not_banned(&tx, &ip_hash, &csrf_cookie)?;
             let board = access_context.board;
             // Verify post exists and belongs to this board to prevent spoofed reports.
             let post = db::get_post(&tx, post_id)?

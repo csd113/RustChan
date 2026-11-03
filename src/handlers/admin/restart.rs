@@ -7,7 +7,7 @@ use crate::{
     restart::View,
 };
 use axum::{
-    extract::{ConnectInfo, Form, State},
+    extract::{Form, State},
     http::HeaderMap,
     response::{IntoResponse as _, Response},
     Json,
@@ -87,10 +87,10 @@ pub(in crate::server) async fn restart(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<RestartForm>,
 ) -> Result<Response> {
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let administrator = updates::authorize(&state, &jar).await?;
     let guard = state.maintenance_gate.try_begin("Settings restart")?;
     let pending =

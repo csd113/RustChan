@@ -24,11 +24,6 @@ fn forwarded_client_ip(
     Some(client.to_string())
 }
 
-/// Returns whether the peer belongs to a configured trusted proxy network.
-fn trusted_proxy_peer(peer: Option<SocketAddr>) -> bool {
-    trusted_proxy_peer_with(peer, &CONFIG.trusted_proxy_cidrs)
-}
-
 /// Tests a peer against an explicit trusted-proxy CIDR list.
 fn trusted_proxy_peer_with(peer: Option<SocketAddr>, trusted_proxy_cidrs: &[String]) -> bool {
     peer.is_some_and(|addr| {
@@ -45,12 +40,24 @@ pub(super) fn forwarded_proto_is_https(
     peer: Option<SocketAddr>,
     behind_proxy: bool,
 ) -> bool {
-    if !behind_proxy || !trusted_proxy_peer(peer) {
+    forwarded_proto_is_https_with(headers, peer, behind_proxy, &CONFIG.trusted_proxy_cidrs)
+}
+
+/// Apply transport trust to both comma-coalesced and repeated forwarding fields.
+fn forwarded_proto_is_https_with(
+    headers: &axum::http::HeaderMap,
+    peer: Option<SocketAddr>,
+    behind_proxy: bool,
+    trusted_proxy_cidrs: &[String],
+) -> bool {
+    if !behind_proxy || !trusted_proxy_peer_with(peer, trusted_proxy_cidrs) {
         return false;
     }
 
     headers
-        .get("x-forwarded-proto")
+        .get_all("x-forwarded-proto")
+        .iter()
+        .next_back()
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| {
             value
@@ -59,6 +66,10 @@ pub(super) fn forwarded_proto_is_https(
                 .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
         })
 }
+
+#[cfg(test)]
+#[path = "tests/proxy_transport.rs"]
+mod tests;
 
 /// Extracts a forwarded client address when the immediate peer is trusted.
 fn forwarded_ip_from_headers_with(

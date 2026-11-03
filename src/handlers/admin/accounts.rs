@@ -29,11 +29,11 @@ pub(in crate::server) async fn update_account(
     Path(action): Path<db::AccountAction>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client): crate::middleware::ClientIp,
     Form(form): Form<AccountForm>,
 ) -> Result<Response> {
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let session = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
     let key = super::auth::login_ip_key(&client);
     if super::auth::is_login_locked(&key) {
@@ -64,14 +64,14 @@ pub(in crate::server) async fn rotate_secret(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     crate::middleware::ClientIp(client): crate::middleware::ClientIp,
     Form(form): Form<std::collections::BTreeMap<String, String>>,
 ) -> Result<Response> {
     require_admin_post_origin_and_csrf(
         &jar,
         &headers,
-        Some(peer),
+        secure_context,
         form.get("_csrf").map(String::as_str),
     )?;
     let session = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());

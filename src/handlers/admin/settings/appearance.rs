@@ -20,11 +20,11 @@ pub(in crate::server) async fn clear_board_favicon_override(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ClearBoardFaviconForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
 
     let board_short = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
@@ -55,11 +55,11 @@ pub(in crate::server) async fn update_site_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     mut multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
 
@@ -125,11 +125,11 @@ pub(in crate::server) async fn update_board_favicon(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     mut multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
 

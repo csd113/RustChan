@@ -745,8 +745,7 @@ pub(in crate::server) async fn admin_restore(
     request: Request,
 ) -> Response {
     let xhr_request = is_xml_http_request(&headers);
-    let session_id = match restore_auth_preflight(&state, &headers, &jar, secure_context.peer).await
-    {
+    let session_id = match restore_auth_preflight(&state, &headers, &jar, secure_context).await {
         Ok(session) => session,
         Err(error) => return restore_start_response(RestoreKind::Full, xhr_request, &error),
     };
@@ -891,7 +890,7 @@ pub(in crate::server) async fn restore_saved_full_backup(
     Form(form): Form<RestoreSavedForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, secure_context.peer, form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let maintenance_guard =
         super::recovery::begin_operation(&state, &jar, RestoreKind::Full.maintenance_label())
             .await?;

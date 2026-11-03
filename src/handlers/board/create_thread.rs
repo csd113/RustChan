@@ -103,7 +103,9 @@ pub(in crate::server) async fn create_thread(
 
     // Clones kept outside the closure so we can re-render the board page inline on error.
     let admin_session_err = admin_session_id.clone();
-    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
+    let csrf_for_error = csrf_cookie
+        .clone()
+        .unwrap_or_else(crate::utils::crypto::new_csrf_token);
 
     let board_short_err = board_short.clone();
     let identity_key = identity_key(&client_ip, &jar);
@@ -235,7 +237,10 @@ pub(in crate::server) async fn create_thread(
                 };
                 Ok(render::render_board_page(
                     &page_data,
-                    &csrf_for_error,
+                    &crate::utils::crypto::make_csrf_form_token(
+                        &csrf_for_error,
+                        &CONFIG.cookie_secret,
+                    ),
                     admin_csrf_for_error.as_deref(),
                     Some(&msg),
                     Some(&post_form_state),

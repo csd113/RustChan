@@ -4535,14 +4535,6 @@ document.addEventListener('click', function (e) {
   if (modal && e.target === modal) closeReportModal();
 });
 
-// Appeal page: fill CSRF from cookie
-(function () {
-  var field = document.getElementById('appeal-csrf-field');
-  if (!field) return;
-  var c = document.cookie.split('; ').find(function (r) { return r.startsWith('csrf_token='); });
-  if (c) field.value = c.split('=')[1];
-})();
-
 // Rate-limit page redirect
 (function () {
   if (!document.body || document.body.dataset.rateLimitPage !== '1') return;

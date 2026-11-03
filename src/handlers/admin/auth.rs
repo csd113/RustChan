@@ -269,7 +269,7 @@ pub(in crate::server) async fn admin_login(
         Some(ADMIN_LOGIN_CSRF_SCOPE),
         form.csrf.as_deref().unwrap_or(""),
     );
-    super::require_same_origin_or_valid_csrf(&headers, secure_context.peer, csrf_valid)?;
+    super::require_same_origin_request(&headers, secure_context)?;
     if !csrf_valid {
         return Err(AppError::Forbidden("CSRF token mismatch.".into()));
     }
@@ -373,12 +373,17 @@ pub(in crate::server) async fn admin_login(
             let jar = super::refresh_admin_csrf_cookie(jar.add(cookie), cookie_secure);
             let redirect = if cookie_secure {
                 Redirect::to("/admin/panel")
-            } else {
-                let bootstrap = super::create_admin_session_bootstrap(&bootstrap_session_id);
+            } else if let Some(rotated_csrf_cookie) = jar.get("csrf_token") {
+                let bootstrap = super::create_admin_session_bootstrap(
+                    &bootstrap_session_id,
+                    rotated_csrf_cookie.value(),
+                );
                 Redirect::to(&format!(
                     "/admin/panel?bootstrap={}",
                     crate::utils::redirect::encode_query_component(&bootstrap)
                 ))
+            } else {
+                Redirect::to("/admin/panel")
             };
             Ok((jar, redirect).into_response())
         }
@@ -390,10 +395,15 @@ pub(in crate::server) async fn admin_logout(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<super::CsrfOnly>,
 ) -> Result<Response> {
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     if let Some(session_cookie) = jar.get(super::SESSION_COOKIE) {
         let session_id = session_cookie.value().to_owned();

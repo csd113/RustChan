@@ -77,7 +77,7 @@ pub(super) fn build_router(state: AppState, direct_https: bool) -> Router {
         )
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             header::HeaderName::from_static("referrer-policy"),
-            header::HeaderValue::from_static("same-origin"),
+            header::HeaderValue::from_static(crate::templates::REFERRER_POLICY),
         ))
         .layer(
             tower_http::set_header::SetResponseHeaderLayer::if_not_present(

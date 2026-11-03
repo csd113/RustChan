@@ -14,13 +14,13 @@ pub(in crate::server) async fn update_runtime_settings(
     Path(section): Path<RuntimeSection>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BTreeMap<String, String>>,
 ) -> Result<Response> {
     require_admin_post_origin_and_csrf(
         &jar,
         &headers,
-        Some(peer),
+        secure_context,
         form.get("_csrf").map(String::as_str),
     )?;
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);

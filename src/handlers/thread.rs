@@ -372,7 +372,9 @@ pub(in crate::server) async fn post_reply(
     // Clones kept outside the closure so we can re-render the thread page inline on error.
     let board_short_err = board_short.clone();
     let admin_session_err = admin_session_id.clone();
-    let csrf_for_error = csrf_cookie.clone().unwrap_or_default();
+    let csrf_for_error = csrf_cookie
+        .clone()
+        .unwrap_or_else(crate::utils::crypto::new_csrf_token);
 
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let identity_key_err = identity_key.clone();
@@ -484,7 +486,10 @@ pub(in crate::server) async fn post_reply(
                 };
                 Ok(render::render_thread_page(
                     &page_data,
-                    &csrf_for_error,
+                    &crate::utils::crypto::make_csrf_form_token(
+                        &csrf_for_error,
+                        &CONFIG.cookie_secret,
+                    ),
                     admin_csrf_for_error.as_deref(),
                     Some(&msg),
                     None,
@@ -1244,7 +1249,7 @@ pub(in crate::server) async fn vote_handler(
             let ip_hash = hash_ip(&identity_key, &cookie_secret);
             // Voting is persisted participation in the thread, so the same ban
             // gate as posting applies; CSRF was validated above.
-            crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, ban_csrf_token)?;
+            crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, &ban_csrf_token)?;
             let (poll_id, resolved_thread_id, resolved_board_short) =
                 db::get_poll_context(&conn, option_id)?
                     .ok_or_else(|| AppError::NotFound("Poll option not found.".into()))?;

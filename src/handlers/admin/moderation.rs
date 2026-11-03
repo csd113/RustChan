@@ -29,11 +29,16 @@ pub(in crate::server) async fn add_ban(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<AddBanForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let expires_at = form
         .duration_hours
@@ -96,11 +101,16 @@ pub(in crate::server) async fn remove_ban(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BanIdForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
@@ -140,11 +150,16 @@ pub(in crate::server) async fn admin_ban_and_delete(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BanDeleteForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let reason = form
         .reason
@@ -214,11 +229,16 @@ pub(in crate::server) async fn dismiss_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
@@ -244,11 +264,16 @@ pub(in crate::server) async fn accept_appeal(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<AppealActionForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
@@ -306,11 +331,16 @@ pub(in crate::server) async fn add_filter(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<AddFilterForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     if form.pattern.trim().is_empty() {
         return Err(AppError::BadRequest("Pattern cannot be empty.".into()));
@@ -352,11 +382,16 @@ pub(in crate::server) async fn remove_filter(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<FilterIdForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
@@ -464,11 +499,16 @@ pub(in crate::server) async fn resolve_report(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ResolveReportForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
@@ -526,11 +566,16 @@ pub(in crate::server) async fn admin_ip_report(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<IpReportForm>,
 ) -> Result<Response> {
     let session_id = jar.get(super::SESSION_COOKIE).map(|c| c.value().to_owned());
-    super::require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    super::require_admin_post_origin_and_csrf(
+        &jar,
+        &headers,
+        secure_context,
+        form.csrf.as_deref(),
+    )?;
 
     let reason = form.reason.trim().chars().take(512).collect::<String>();
     if reason.is_empty() {

@@ -3,17 +3,11 @@ use crate::{
     utils::crypto::{sign_csrf_token, sign_scoped_csrf_token},
 };
 
-/// Validates a form CSRF token against either its cookie or its embedded signature.
+/// Validate a signed public form token, binding it to the cookie when present.
 #[must_use]
 pub fn validate_csrf(cookie_token: Option<&str>, form_token: &str) -> bool {
     if form_token.is_empty() {
         return false;
-    }
-
-    if let Some(cookie) = cookie_token {
-        if !cookie.is_empty() && constant_time_eq(cookie.as_bytes(), form_token.as_bytes()) {
-            return true;
-        }
     }
 
     let Some((raw, sig)) = form_token.rsplit_once('.') else {

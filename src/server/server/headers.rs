@@ -94,33 +94,10 @@ pub(super) async fn mutation_origin_middleware(
         *req.method(),
         http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
     ) {
-        if req
-            .headers()
-            .get("sec-fetch-site")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
+        if let Err(error) =
+            crate::handlers::admin::require_same_origin_request(req.headers(), context)
         {
-            return (http::StatusCode::FORBIDDEN, "Cross-site action denied").into_response();
-        }
-        if req.headers().contains_key(header::ORIGIN) || req.headers().contains_key(header::REFERER)
-        {
-            let jar = axum_extra::extract::CookieJar::from_headers(req.headers());
-            // A Strict public CSRF cookie is unavailable to cross-site forms;
-            // preserve supported same-origin browsers that send Origin: null.
-            let null_with_cookie = req
-                .headers()
-                .get(header::ORIGIN)
-                .and_then(|value| value.to_str().ok())
-                == Some("null")
-                && jar.get("csrf_token").is_some()
-                && !req.headers().contains_key(header::REFERER);
-            if !null_with_cookie {
-                if let Err(error) =
-                    crate::handlers::admin::require_same_origin_request(req.headers(), context.peer)
-                {
-                    return error.into_response();
-                }
-            }
+            return error.into_response();
         }
     }
     next.run(req).await
@@ -222,12 +199,10 @@ pub(super) async fn theme_error_response(
                 &csrf,
                 preferences,
             ),
-            ErrorPage::Ban { reason, csrf_token } => templates::ban_page_with_theme(
-                &reason,
-                &csrf_token,
-                theme.as_deref(),
-                board_default,
-            ),
+            ErrorPage::Ban {
+                reason,
+                csrf_token: _,
+            } => templates::ban_page_with_theme(&reason, &csrf, theme.as_deref(), board_default),
         };
         *response.body_mut() = axum::body::Body::from(html);
         let _previous_content_length = response.headers_mut().remove(header::CONTENT_LENGTH);

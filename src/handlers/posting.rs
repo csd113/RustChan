@@ -178,7 +178,7 @@ fn revalidate_posting_policy(
             "Board posting access changed. Reload the board.".into(),
         ));
     }
-    crate::handlers::board::ensure_actor_not_banned(conn, ip_hash, ban_csrf_token.to_owned())?;
+    crate::handlers::board::ensure_actor_not_banned(conn, ip_hash, ban_csrf_token)?;
     // These settings determined media acceptance and body preparation. Refuse
     // stale preparation rather than publishing under a different policy.
     let media_policy = |board: &Board| {
@@ -370,7 +370,7 @@ pub(super) fn submit_post(
     let effective_max_pdf_size = board.max_pdf_size_bytes();
 
     let ip_hash = hash_ip(&identity_key, &cookie_secret);
-    crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, ban_csrf_token.clone())?;
+    crate::handlers::board::ensure_actor_not_banned(&conn, &ip_hash, &ban_csrf_token)?;
     if let Some(existing) = db::get_post_submission(&conn, &submission_token, &ip_hash, board.id)? {
         let target = match &mode {
             SubmitPostMode::Reply { thread_id, sage: _ } => Some(*thread_id),

@@ -767,13 +767,13 @@ pub(in crate::server) async fn create_full_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<FullBackupCreateForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let maintenance_guard =
         super::recovery::begin_operation(&state, &jar, "Full backup creation").await?;
     let progress = std::sync::Arc::clone(&state.backup_progress);
@@ -829,13 +829,13 @@ pub(in crate::server) async fn create_board_backup(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BoardBackupCreateForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let maintenance_guard =
         super::recovery::begin_operation(&state, &jar, "Board backup creation").await?;
 

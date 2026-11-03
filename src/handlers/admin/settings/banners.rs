@@ -383,13 +383,13 @@ pub(in crate::server) async fn upload_global_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
@@ -430,13 +430,13 @@ pub(in crate::server) async fn upload_home_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
@@ -477,13 +477,13 @@ pub(in crate::server) async fn upload_board_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     multipart: Multipart,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_same_origin_request(&headers, Some(peer))?;
+    require_same_origin_request(&headers, secure_context)?;
     preflight_asset_upload(&state, session_id.clone()).await?;
     let media_permit = state.media_upload_gate.try_begin()?;
     let parsed = parse_banner_upload(multipart).await?;
@@ -528,13 +528,13 @@ pub(in crate::server) async fn update_banner_meta(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<BannerMetaForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let result = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
@@ -596,13 +596,13 @@ pub(in crate::server) async fn delete_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<DeleteBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let anchor = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {
@@ -629,13 +629,13 @@ pub(in crate::server) async fn move_banner(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<MoveBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let move_up = match form.direction.as_str() {
         "up" => true,
         "down" => false,
@@ -673,13 +673,13 @@ pub(in crate::server) async fn clear_board_banner_override(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<ClearBoardBannerForm>,
 ) -> Result<Response> {
     let session_id = jar
         .get(SESSION_COOKIE)
         .map(|cookie| cookie.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
     let board_short = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {

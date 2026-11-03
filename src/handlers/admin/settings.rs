@@ -172,13 +172,13 @@ pub(in crate::server) async fn update_visitor_defaults(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     Form(form): Form<std::collections::BTreeMap<String, String>>,
 ) -> Result<Response> {
     require_admin_post_origin_and_csrf(
         &jar,
         &headers,
-        Some(peer),
+        secure_context,
         form.get("_csrf").map(String::as_str),
     )?;
     let hide = match form.get("default_hide_nsfw_boards").map(String::as_str) {

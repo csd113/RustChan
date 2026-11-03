@@ -24,6 +24,13 @@ pub use admin::*;
 pub use board::*;
 pub use thread::*;
 
+/// Preserve same-origin form provenance without sending referrers to other sites.
+pub(crate) const REFERRER_POLICY: &str = "same-origin";
+
+#[cfg(test)]
+#[path = "tests/request_policy.rs"]
+mod tests;
+
 /// Appends formatted HTML without allocating an intermediate string.
 ///
 /// The `String` sink is infallible; an error indicates that a supplied `Display`
@@ -896,7 +903,7 @@ pub fn base_layout_with_preferences(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
+<meta name="referrer" content="{REFERRER_POLICY}">
 <title>{title}</title>
 {favicon_head}
 <link rel="stylesheet" href="{stylesheet_href}">

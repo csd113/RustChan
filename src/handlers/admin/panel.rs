@@ -22,7 +22,6 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::net::SocketAddr;
 use std::path::Path;
 
 /// Retain the implicit target of these events before extraction from the admin root.
@@ -1570,8 +1569,11 @@ pub(in crate::server) async fn admin_panel(
     let mut jar = jar;
     if session_id.is_none() {
         if let Some(bootstrap_token) = params.bootstrap.as_deref() {
-            if let Some(bootstrapped_session_id) = consume_admin_session_bootstrap(bootstrap_token)
-            {
+            super::require_same_origin_request(&headers, secure_context)?;
+            if let Some(bootstrapped_session_id) = consume_admin_session_bootstrap(
+                bootstrap_token,
+                jar.get("csrf_token").map(Cookie::value),
+            ) {
                 let mut cookie = Cookie::new(SESSION_COOKIE, bootstrapped_session_id.clone());
                 cookie.set_http_only(true);
                 cookie.set_same_site(ADMIN_COOKIE_SAME_SITE);
@@ -1707,11 +1709,11 @@ pub(in crate::server) async fn dismiss_failed_site_health_jobs(
     State(state): State<AppState>,
     jar: CookieJar,
     headers: HeaderMap,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    secure_context: crate::middleware::SecureCookieContext,
     axum::extract::Form(form): axum::extract::Form<DismissFailedJobsForm>,
 ) -> Result<Response> {
     let session_id = jar.get(SESSION_COOKIE).map(|c| c.value().to_owned());
-    require_admin_post_origin_and_csrf(&jar, &headers, Some(peer), form.csrf.as_deref())?;
+    require_admin_post_origin_and_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
 
     let failed_before = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
