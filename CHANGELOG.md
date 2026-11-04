@@ -35,7 +35,7 @@ remain in Git history.
   shared outputs, including concurrent events and suppression-window summaries.
 
 - Updated the supported toolchain to Rust 1.99.1 and refreshed Rust dependencies,
-  including Hayro 0.8 and ZIP 9; Arti remains on 0.47.0.
+  including Hayro 0.8, ZIP 9, and Tor Arti 2.8.0 (0.48.0 crates).
 - Added manual CI validation and native Linux x86_64 builds alongside ARM64,
   Apple Silicon, and Windows.
 
