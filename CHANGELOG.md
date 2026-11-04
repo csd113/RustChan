@@ -7,6 +7,7 @@ remain in Git history.
 
 ## RustChan 1.7.5 — 2026-11-03
 
+- Removed the optional binary-upgrade job from CI.
 - Enabled HTTPS protocol negotiation for HTTP/2 with HTTP/1.1 fallback on
   manual, development and ACME certificate paths.
 - Check final media destinations before committing posts. Late publication
