@@ -20,9 +20,8 @@
 
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
-use uuid::Uuid;
 
-use super::images;
+use super::{image_budget::ImageBudget, images};
 
 /// Describes what action the conversion pipeline should take for a given
 /// source MIME type.
@@ -82,12 +81,31 @@ pub fn convert_file(
     output_dir: &Path,
     file_stem: &str,
 ) -> Result<ConversionResult> {
+    convert_file_with_budget(
+        input_path,
+        mime,
+        output_dir,
+        file_stem,
+        &ImageBudget::default(),
+    )
+}
+
+/// Convert using the deadline and output allowance shared by this upload.
+pub(super) fn convert_file_with_budget(
+    input_path: &Path,
+    mime: &str,
+    output_dir: &Path,
+    file_stem: &str,
+    budget: &ImageBudget,
+) -> Result<ConversionResult> {
     let action = conversion_action(mime);
 
     match action {
-        ConversionAction::ToWebp => convert_to_webp(input_path, mime, output_dir, file_stem),
+        ConversionAction::ToWebp => {
+            convert_to_webp(input_path, mime, output_dir, file_stem, budget)
+        }
         ConversionAction::ToWebpIfSmaller => {
-            convert_png_if_smaller(input_path, output_dir, file_stem)
+            convert_png_if_smaller(input_path, output_dir, file_stem, budget)
         }
         ConversionAction::KeepAsIs => copy_as_is(input_path, mime, output_dir, file_stem),
     }
@@ -103,14 +121,16 @@ fn convert_to_webp(
     mime: &str,
     output_dir: &Path,
     file_stem: &str,
+    budget: &ImageBudget,
 ) -> Result<ConversionResult> {
     let output = output_dir.join(format!("{file_stem}.webp"));
-    let tmp_out = temp_sibling(&output);
+    let temporary = tempfile::NamedTempFile::new_in(output_dir)?;
+    let tmp_out = temporary.path();
 
-    let conversion = images::image_to_webp(input, &tmp_out, None);
+    let conversion = images::image_to_webp_with_budget(input, tmp_out, None, budget);
     match conversion {
         Ok(()) => {
-            atomic_rename(&tmp_out, &output)?;
+            atomic_rename(tmp_out, &output)?;
             let final_size = file_size(&output)?;
             let source_name = input
                 .file_name()
@@ -135,8 +155,8 @@ fn convert_to_webp(
             })
         }
         Err(e) => {
-            drop(std::fs::remove_file(&tmp_out));
-            tracing::warn!("image→webp failed ({:#}); storing original", e);
+            drop(std::fs::remove_file(tmp_out));
+            tracing::warn!(failure = images::failure_kind(&e), error = %e, "image→webp failed; storing original");
             // Preserve the validated MIME even for suffixless or misnamed temporary files.
             copy_as_is(input, mime, output_dir, file_stem)
         }
@@ -148,19 +168,22 @@ fn convert_png_if_smaller(
     input: &Path,
     output_dir: &Path,
     file_stem: &str,
+    budget: &ImageBudget,
 ) -> Result<ConversionResult> {
     let webp_path = output_dir.join(format!("{file_stem}.webp"));
-    let tmp_webp = temp_sibling(&webp_path);
+    let temporary = tempfile::NamedTempFile::new_in(output_dir)?;
+    let tmp_webp = temporary.path();
 
     // Try conversion first
-    match images::image_to_webp(input, &tmp_webp, None) {
+    let conversion = images::image_to_webp_with_budget(input, tmp_webp, None, budget);
+    match conversion {
         Ok(()) => {
             let original_size = file_size(input)?;
-            let webp_size = file_size(&tmp_webp)?;
+            let webp_size = file_size(tmp_webp)?;
 
             if webp_size < original_size {
                 // WebP wins — keep the converted file
-                atomic_rename(&tmp_webp, &webp_path)?;
+                atomic_rename(tmp_webp, &webp_path)?;
                 Ok(ConversionResult {
                     final_path: webp_path,
                     final_mime: "image/webp",
@@ -169,14 +192,14 @@ fn convert_png_if_smaller(
                 })
             } else {
                 // PNG is already optimal
-                drop(std::fs::remove_file(&tmp_webp));
+                drop(std::fs::remove_file(tmp_webp));
                 tracing::debug!("PNG→WebP skipped: webp ({webp_size}B) ≥ png ({original_size}B)");
                 copy_as_is(input, "image/png", output_dir, file_stem)
             }
         }
         Err(e) => {
-            drop(std::fs::remove_file(&tmp_webp));
-            tracing::warn!("png→webp failed ({:#}); storing original PNG", e);
+            drop(std::fs::remove_file(tmp_webp));
+            tracing::warn!(failure = images::failure_kind(&e), error = %e, "png→webp failed; storing original PNG");
             copy_as_is(input, "image/png", output_dir, file_stem)
         }
     }
@@ -208,8 +231,14 @@ fn copy_as_is_with_mime(
     final_mime: &'static str,
 ) -> Result<ConversionResult> {
     let output = output_dir.join(format!("{file_stem}.{ext}"));
-    let _bytes_copied = std::fs::copy(input, &output)
+    let temporary = tempfile::NamedTempFile::new_in(output_dir)?;
+    let _bytes_copied = std::fs::copy(input, temporary.path())
         .with_context(|| format!("failed to copy upload to {}", output.display()))?;
+    drop(
+        temporary
+            .persist(&output)
+            .context("publish original upload")?,
+    );
     let final_size = file_size(&output)?;
     Ok(ConversionResult {
         final_path: output,
@@ -248,21 +277,6 @@ fn upload_mime_to_static(mime: &str) -> &'static str {
 }
 
 // Path and size utilities
-/// Create a UUID-named sibling path for use as an atomic temp output.
-///
-/// Preserve the target extension for consistent temporary-file naming.
-fn temp_sibling(target: &Path) -> PathBuf {
-    let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let tmp_name = if ext.is_empty() {
-        format!(".tmp_{}", Uuid::new_v4().simple())
-    } else {
-        format!(".tmp_{}.{ext}", Uuid::new_v4().simple())
-    };
-    target
-        .parent()
-        .map_or_else(|| PathBuf::from(&tmp_name), |p| p.join(&tmp_name))
-}
-
 /// Rename `src` to `dst` atomically (same filesystem assumed).
 fn atomic_rename(src: &Path, dst: &Path) -> Result<()> {
     std::fs::rename(src, dst)

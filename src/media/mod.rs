@@ -11,6 +11,8 @@ pub mod exif;
 pub mod ffmpeg;
 /// HEIC/HEIF still-image decoding with container and coded-geometry preflight.
 pub(crate) mod heif;
+/// Cooperative image deadlines and output limits.
+pub(crate) mod image_budget;
 /// Bounded image decoding and metadata-free WebP encoding.
 pub(crate) mod images;
 /// Bounded first-page PDF rendering.
@@ -141,12 +143,39 @@ impl MediaProcessor {
         thumb_dir: &Path,
         thumb_max: u32,
     ) -> Result<ProcessedMedia> {
+        self.process_upload_with_budget(
+            input_path,
+            mime,
+            output_dir,
+            file_stem,
+            thumb_dir,
+            thumb_max,
+            &image_budget::ImageBudget::default(),
+        )
+    }
+
+    /// Process an upload using the deadline established during validation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the existing upload API while carrying its shared processing budget"
+    )]
+    pub(crate) fn process_upload_with_budget(
+        self,
+        input_path: &Path,
+        mime: &str,
+        output_dir: &Path,
+        file_stem: &str,
+        thumb_dir: &Path,
+        thumb_max: u32,
+        budget: &image_budget::ImageBudget,
+    ) -> Result<ProcessedMedia> {
         let original_size = std::fs::metadata(input_path)
             .map(|m| m.len())
             .context("failed to stat upload temp file")?;
 
-        let conv = convert::convert_file(input_path, mime, output_dir, file_stem)
-            .context("conversion step failed")?;
+        let conv =
+            convert::convert_file_with_budget(input_path, mime, output_dir, file_stem, budget)
+                .context("conversion step failed")?;
 
         tracing::debug!(
             "media: {} → {} (converted={}, {}→{}B)",
@@ -160,12 +189,19 @@ impl MediaProcessor {
         // A video fallback can write SVG despite a preselected WebP path, so use
         // the actual path returned by thumbnail generation.
         let generated_thumbnail = {
-            self.generate_thumbnail(
-                &conv.final_path,
-                conv.final_mime,
+            let thumb_path = thumbnail::thumbnail_output_path(
                 thumb_dir,
                 file_stem,
+                conv.final_mime,
+                self.ffmpeg_available,
+            );
+            thumbnail::generate_thumbnail_with_budget(
+                &conv.final_path,
+                conv.final_mime,
+                &thumb_path,
                 thumb_max,
+                self.ffmpeg_available,
+                budget,
             )
         };
         let actual_thumb_path = match generated_thumbnail {

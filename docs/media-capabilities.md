@@ -3,7 +3,11 @@
 RustChan validates media content rather than trusting filenames. Upload types
 must also be enabled by site and board policy. Supported preview processing is
 bounded; valid files outside a preview capability keep their original download.
-Malformed data and resource-limit failures follow the upload error contract.
+Initial image validation rejects invalid headers, first-frame decode failures,
+and excessive decoded dimensions. Image conversion failures retain the original,
+with unsupported, malformed, resource and I/O outcomes logged separately. This
+legacy fallback also covers later GIF-frame corruption; retained WebP animations
+are validated through their first frame, not exhaustively.
 
 ## Processing backends
 
@@ -27,6 +31,16 @@ The [vendored AAC patch](../vendor/symphonia-codec-aac/RUSTCHAN-PATCH.md) detect
 in-band SBR and requests compatibility rather than publishing incomplete AAC-LC
 core audio. It does not implement SBR reconstruction.
 
+JPEG metadata removal preserves compressed scan data and retains only a fresh
+orientation tag plus the fixed Adobe color-transform marker when needed. The
+legacy original-byte fallback on normalization failure can retain source metadata.
+Decode applies orientation once before WebP conversion and thumbnail resizing.
+Resizing
+uses associated alpha at 16-bit precision and the existing Triangle filter.
+General ICC-to-sRGB conversion and linear-light filtering are not implemented;
+converted output strips profiles. APNG animation is not preserved by the PNG
+still path, and high-bit-depth inputs become 8-bit WebP.
+
 ## External tools and resource boundaries
 
 FFmpeg is optional unless `require_ffmpeg` is enabled. It is used for video
@@ -39,9 +53,20 @@ Decoded dimensions, animation frames, audio samples/packets, container work,
 PDF syntax/expansion, queue size, and active media work are bounded. Subprocess
 output, deadlines, and descendant cleanup are managed centrally in
 [`src/media/process.rs`](../src/media/process.rs). The configured
-`ffmpeg_timeout_secs` applies to FFmpeg jobs. Native decoders run in-process;
-these limits provide no universal allocation ceiling or forcible cancellation
-for arbitrary library work. See [security limits](../SECURITY.md#operational-security).
+`ffmpeg_timeout_secs` also supplies a cooperative deadline shared across native
+image validation, conversion and thumbnail phases. Animation work is capped at
+400 million decoded canvas pixels per traversal and 10,000 frames. Generated
+image writers/spools are capped at 256 MiB, reduced to the upload image-size limit
+when processing an upload. Temporary image outputs are cleaned on failure and
+published atomically. HEIC preflight checks every SPS, including duplicate IDs,
+and actual NAL headers in primary/alpha grid tiles before picture allocation.
+
+Native decoders run in-process. Library calls can overrun a deadline; encoder
+internal buffers and simultaneous decoder/resizer/compositor buffers remain
+outside a universal allocation ceiling. Alpha filtering uses an 8-byte source
+pixel buffer, and large transparent images can use substantial memory. These
+checks cannot forcibly cancel a codec call or contain a release-mode abort. See
+[security limits](../SECURITY.md#operational-security).
 
 Heavy conversion uses durable jobs. Publication checks generated content and
 coordinates database references with restart-replayable filesystem intents.
