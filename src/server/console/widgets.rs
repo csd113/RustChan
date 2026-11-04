@@ -160,20 +160,10 @@ pub(super) fn stats_freshness(stats: &ChanStats) -> StatusSummary {
             label: "[LOADING]",
             kind: StatusKind::Pending,
         }
-    } else if stats.collection_error.is_some() || stats.operator.error.is_some() {
+    } else if stats.sampled_at.is_none() {
         StatusSummary {
-            label: "[DEGRADED]",
+            label: "[UNAVAILABLE]",
             kind: StatusKind::Error,
-        }
-    } else if stats.operator.jobs.is_some_and(|jobs| jobs.failed > 0)
-        || stats.operator.media_failed > 0
-        || stats.operator.tasks.iter().any(|task| {
-            task.state == super::telemetry::TaskState::Failed && task.id.starts_with("database:")
-        })
-    {
-        StatusSummary {
-            label: "[ATTENTION]",
-            kind: StatusKind::Pending,
         }
     } else if stats
         .sampled_at

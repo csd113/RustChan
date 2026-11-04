@@ -47,7 +47,7 @@ pub enum KeyEvent {
     ClearLine,
     /// Submit the entire form after Ctrl-Enter or F2.
     Submit,
-    /// Request immediate shutdown after Ctrl-C.
+    /// Request graceful shutdown without confirmation after Ctrl-C.
     ForceQuit,
     /// Redraw after resize or terminal focus changes.
     Resize,

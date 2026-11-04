@@ -23,6 +23,14 @@ pub struct Cli {
     #[arg(long, short = 'p', global = true)]
     pub port: Option<u16>,
 
+    /// Operational console: auto, tui, plain or off. Unsupported terminals use plain logs.
+    #[arg(long, global = true, value_enum, default_value = "auto")]
+    pub console: super::console::capabilities::Mode,
+
+    /// Replace non-ASCII display glyphs in the full-screen console.
+    #[arg(long, global = true)]
+    pub ascii: bool,
+
     #[command(subcommand)]
     /// Optional server or administration command.
     pub command: Option<Command>,

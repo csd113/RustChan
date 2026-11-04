@@ -7,6 +7,11 @@ remain in Git history.
 
 ## RustChan 1.7.5 — 2026-11-03
 
+- Hardened the live terminal console: rejected operations recover with feedback,
+  media failures remain reachable at standard sizes, Tor/listener states reflect
+  observed startup/publication, and disk/query freshness is independent of health.
+  Added explicit console/ASCII modes, bounded sampling, stronger log redaction,
+  and ownership of console operations during graceful shutdown.
 - Removed the optional binary-upgrade job from CI.
 - Enabled HTTPS protocol negotiation for HTTP/2 with HTTP/1.1 fallback on
   manual, development and ACME certificate paths.

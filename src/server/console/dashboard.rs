@@ -134,7 +134,13 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats) {
     Paragraph::new(title).render(left, frame.buffer_mut());
 
     let freshness = stats_freshness(stats);
-    let mut right_spans = vec![Span::styled(freshness.label, status_style(freshness.kind))];
+    let age = stats.sampled_at.map_or_else(String::new, |time| {
+        format!(" {}s", time.elapsed().as_secs())
+    });
+    let mut right_spans = vec![Span::styled(
+        format!("{}{age}", freshness.label),
+        status_style(freshness.kind),
+    )];
     if right.width >= 25 {
         right_spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
         let (label, uptime) = if right.width >= 38 {
@@ -243,7 +249,7 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats, offset
             .saturating_add(operations_height)
             .saturating_add(1)
     };
-    let content_height = panels_height.saturating_add(8);
+    let content_height = panels_height.saturating_add(9);
     render_scrollable(frame, area, content_height, offset, |buffer, content| {
         let rows = Layout::vertical([
             Constraint::Length(2),
@@ -252,30 +258,7 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, stats: &ChanStats, offset
         ])
         .spacing(1_i32)
         .split(content);
-        let attention = if !stats.is_ready {
-            "[LOADING] Collecting server state…".to_owned()
-        } else if stats.collection_error.is_some() || stats.operator.error.is_some() {
-            "[ERROR] Some data unavailable · inspect Logs / R retry".to_owned()
-        } else if stats.operator.tasks.iter().any(|task| {
-            task.state == super::telemetry::TaskState::Failed && task.id.starts_with("database:")
-        }) {
-            "[ATTENTION] Database maintenance failed · inspect Tasks / System".to_owned()
-        } else if let Some(jobs) = stats.operator.jobs {
-            format!(
-                "{} {} failed jobs · {} failed media · {} reports · {} appeals",
-                if jobs.failed > 0 || stats.operator.media_failed > 0 {
-                    "[ATTENTION]"
-                } else {
-                    "[LIVE]"
-                },
-                jobs.failed,
-                stats.operator.media_failed,
-                stats.operator.reports,
-                stats.operator.appeals
-            )
-        } else {
-            "[UNKNOWN] Task summary awaiting sample".to_owned()
-        };
+        let attention = attention_line(stats);
         Paragraph::new(attention)
             .style(Style::default().fg(
                 if stats.operator.jobs.is_some_and(|jobs| jobs.failed > 0)
@@ -327,14 +310,24 @@ fn render_service_panel(buffer: &mut Buffer, area: Rect, stats: &ChanStats) {
 
 /// Build service-status and endpoint rows.
 fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
+    let listener_kind = if stats.runtime_ready {
+        StatusKind::Healthy
+    } else {
+        StatusKind::Pending
+    };
+    let listener_phase = if stats.runtime_ready {
+        "BOUND"
+    } else {
+        "STARTING"
+    };
     let mut rows = Vec::with_capacity(7);
     if CONFIG.tls.enabled {
         if CONFIG.enable_tor_support {
             rows.push((
                 Line::from("HTTP backend"),
                 status_value(
-                    StatusKind::Healthy,
-                    "RUNNING",
+                    listener_kind,
+                    listener_phase,
                     backend_address(stats.http_port),
                 ),
             ));
@@ -347,8 +340,8 @@ fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
         rows.push((
             Line::from("HTTPS"),
             status_value(
-                StatusKind::Healthy,
-                "RUNNING",
+                listener_kind,
+                listener_phase,
                 format!("port {} · {}", CONFIG.tls.port, https_cert_label()),
             ),
         ));
@@ -363,8 +356,8 @@ fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
             rows.push((
                 Line::from("HTTP redirect"),
                 status_value(
-                    StatusKind::Healthy,
-                    "RUNNING",
+                    listener_kind,
+                    listener_phase,
                     format!("port {}", CONFIG.tls.http_port),
                 ),
             ));
@@ -373,8 +366,8 @@ fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
         rows.push((
             Line::from("Local server"),
             status_value(
-                StatusKind::Healthy,
-                "RUNNING",
+                listener_kind,
+                listener_phase,
                 format!("port {}", stats.http_port),
             ),
         ));
@@ -391,42 +384,7 @@ fn service_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
         ));
     }
 
-    match (&stats.onion_address, CONFIG.enable_tor_support) {
-        (Some(address), true) => {
-            let detail = if CONFIG.tor_only {
-                "READY · tor-only".to_owned()
-            } else {
-                "READY".to_owned()
-            };
-            rows.push((
-                Line::from("Tor"),
-                status_value(StatusKind::Healthy, &detail, ""),
-            ));
-            rows.push((
-                Line::from("Onion URL"),
-                Line::from(Span::styled(
-                    format!("http://{address}"),
-                    Style::default().fg(ACCENT),
-                )),
-            ));
-        }
-        (None, true) => rows.push((
-            Line::from("Tor"),
-            status_value(
-                StatusKind::Pending,
-                "WAIT",
-                if CONFIG.tor_only {
-                    "bootstrapping · tor-only".to_owned()
-                } else {
-                    "bootstrapping".to_owned()
-                },
-            ),
-        )),
-        (_, false) => rows.push((
-            Line::from("Tor"),
-            status_value(StatusKind::Neutral, "DISABLED", ""),
-        )),
-    }
+    rows.extend(tor_rows(stats));
     rows
 }
 
@@ -462,18 +420,7 @@ fn operations_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
     } else {
         Style::default()
     };
-    let work_label = if stats.active_uploads == 0 && stats.active_ffmpeg_videos == 0 {
-        status_value(StatusKind::Idle, "", "no active media work")
-    } else {
-        status_value(
-            StatusKind::Active,
-            "MEDIA",
-            format!(
-                "{} upload(s) · {} video(s)",
-                stats.active_uploads, stats.active_ffmpeg_videos
-            ),
-        )
-    };
+    let work_label = media_work_label(stats);
     let mut rows = Vec::with_capacity(7);
     if let Some(error) = &stats.collection_error {
         rows.push((
@@ -504,7 +451,7 @@ fn operations_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
         (
             Line::from("Content"),
             Line::from(format!(
-                "{} boards · {} threads · {} posts",
+                "{} boards · {} threads (all) · {} posts",
                 format_number_signed_compact(stats.boards),
                 format_number_signed_compact(stats.threads),
                 format_number_signed_compact(stats.posts)
@@ -513,7 +460,8 @@ fn operations_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
         (
             Line::from("Storage"),
             Line::from(format!(
-                "{} DB · {} uploads",
+                "{} disk · {} logical · {} uploads",
+                fmt_bytes(database_footprint(stats)),
                 fmt_bytes(stats.db_bytes),
                 fmt_bytes(stats.upload_bytes)
             )),
@@ -526,8 +474,18 @@ fn operations_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
                 fmt_bytes(stats.mem_bytes)
             }),
         ),
+        (
+            Line::from("DB files"),
+            Line::from(format!(
+                "{} main · {} WAL · {} SHM",
+                fmt_bytes(stats.db_files.first().copied().unwrap_or(-1)),
+                fmt_bytes(stats.db_files.get(1).copied().unwrap_or(-1)),
+                fmt_bytes(stats.db_files.get(2).copied().unwrap_or(-1))
+            )),
+        ),
         (Line::from("Media work"), work_label),
     ]);
+    rows.push((Line::from("Disk sample"), disk_sample_label(stats)));
     if let Some(summary) = stats.operator.jobs {
         rows.push((
             Line::from("Tasks"),
@@ -687,4 +645,149 @@ const fn footer_hints(app: &ConsoleState, width: u16) -> &'static [(&'static str
             Screen::Help => &[("↑↓", "Scroll"), ("Esc", "Return to screen")],
         }
     }
+}
+
+/// Sum an observed database footprint only when all components are known.
+pub(super) fn database_footprint(stats: &ChanStats) -> i64 {
+    if stats.db_files.iter().any(|bytes| *bytes < 0) {
+        -1
+    } else {
+        stats
+            .db_files
+            .iter()
+            .fold(0_i64, |sum, bytes| sum.saturating_add(*bytes))
+    }
+}
+
+/// Describe health without conflating it with sample freshness.
+fn attention_line(stats: &ChanStats) -> String {
+    if stats.recovery_blocked {
+        "[FAILED] Recovery required; data admission is blocked · inspect System / Logs".to_owned()
+    } else if !stats.is_ready {
+        "[LOADING] Collecting server state…".to_owned()
+    } else if stats.collection_error.is_some() || stats.operator.error.is_some() {
+        "[ERROR] Some data unavailable · inspect Logs / R retry".to_owned()
+    } else if stats
+        .operator
+        .backup_outcome
+        .is_some_and(|(success, _)| !success)
+    {
+        "[ATTENTION] Automatic full backup failed · inspect System / Logs".to_owned()
+    } else if stats.operator.tasks.iter().any(|task| {
+        task.state == super::telemetry::TaskState::Failed && task.id.starts_with("database:")
+    }) {
+        "[ATTENTION] Database maintenance failed · inspect Tasks / System".to_owned()
+    } else if let Some(jobs) = stats.operator.jobs {
+        format!(
+            "{} {} failed jobs · {} failed media · {} reports · {} appeals",
+            if jobs.failed > 0 || stats.operator.media_failed > 0 {
+                "[ATTENTION]"
+            } else {
+                "[OK]"
+            },
+            jobs.failed,
+            stats.operator.media_failed,
+            stats.operator.reports,
+            stats.operator.appeals
+        )
+    } else {
+        "[UNKNOWN] Task summary awaiting sample".to_owned()
+    }
+}
+
+/// Keep Arti publication and observed local forwarding separate.
+fn tor_rows(stats: &ChanStats) -> Vec<(Line<'static>, Line<'static>)> {
+    let mut rows = Vec::new();
+    let tor = stats.tor;
+    let forwarding_failed = tor
+        .last_forward_failure
+        .is_some_and(|failed| tor.last_forwarded.is_none_or(|ok| failed > ok));
+    let tor_detail = tor.retry_at.map_or_else(
+        || {
+            if forwarding_failed {
+                "LOCAL FORWARDING FAILED".to_owned()
+            } else {
+                "external reachability unverified".to_owned()
+            }
+        },
+        |retry| {
+            format!(
+                "retry in {}s",
+                retry
+                    .saturating_duration_since(std::time::Instant::now())
+                    .as_secs()
+            )
+        },
+    );
+    rows.push((
+        Line::from("Tor"),
+        status_value(
+            if forwarding_failed || tor.phase.needs_attention() {
+                StatusKind::Error
+            } else if tor.phase == crate::detect::TorPhase::Published {
+                StatusKind::Healthy
+            } else {
+                StatusKind::Pending
+            },
+            tor.phase.label(),
+            tor_detail,
+        ),
+    ));
+    if let Some(address) = &stats.onion_address {
+        rows.push((
+            Line::from("Onion URL"),
+            Line::from(format!(
+                "http://{}",
+                super::telemetry::display_text(address)
+            )),
+        ));
+    }
+    rows.push((
+        Line::from("Tor traffic"),
+        Line::from(tor.last_forwarded.map_or_else(
+            || "No forwarded connection observed".to_owned(),
+            |time| format!("Last local forwarding {}s ago", time.elapsed().as_secs()),
+        )),
+    ));
+    rows
+}
+
+/// Describe current media execution independently of durable failure counts.
+fn media_work_label(stats: &ChanStats) -> Line<'static> {
+    if stats.active_uploads == 0 && stats.active_ffmpeg_videos == 0 {
+        status_value(StatusKind::Idle, "", "no active media work")
+    } else {
+        status_value(
+            StatusKind::Active,
+            "MEDIA",
+            format!(
+                "{} upload(s) · {} video(s)",
+                stats.active_uploads, stats.active_ffmpeg_videos
+            ),
+        )
+    }
+}
+
+/// Show footprint freshness independently of query health.
+fn disk_sample_label(stats: &ChanStats) -> Line<'static> {
+    Line::from(format!(
+        "{}{}",
+        stats.db_files_sampled_at.map_or_else(
+            || "[UNAVAILABLE]".to_owned(),
+            |time| format!(
+                "[{}] {}s",
+                if time.elapsed().as_secs() > 10 {
+                    "STALE"
+                } else {
+                    "LIVE"
+                },
+                time.elapsed().as_secs()
+            )
+        ),
+        if stats.db_files_error.is_some() || stats.storage_error.is_some() {
+            " [ERROR: inspect System]"
+        } else {
+            ""
+        }
+    ))
 }

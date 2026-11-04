@@ -97,7 +97,7 @@ pub(super) fn render_tasks(
     stats: &ChanStats,
 ) {
     let snapshot = &stats.operator;
-    if !stats.is_ready || snapshot.error.is_some() {
+    if !stats.is_ready || (snapshot.error.is_some() && snapshot.sampled_at.is_none()) {
         let block = panel("Tasks", ACCENT);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
@@ -130,8 +130,16 @@ pub(super) fn render_tasks(
     .split(area);
     if let Some(summary) = snapshot.jobs {
         Paragraph::new(format!(
-            "Workers: {} failed (unacknowledged) · {} running · {} queued · {} completed/24h",
-            summary.failed, summary.running, summary.queued, summary.recent_completed
+            "{} · {} failed · {} running · {} queued · {} completed/24h · {}",
+            sample_age(snapshot.sampled_at),
+            summary.failed,
+            summary.running,
+            summary.queued,
+            summary.recent_completed,
+            snapshot
+                .error
+                .as_deref()
+                .unwrap_or("terminal rows from newest 4096 job IDs")
         ))
         .wrap(Wrap { trim: true })
         .render(regions.first().copied().unwrap_or(area), frame.buffer_mut());
@@ -171,9 +179,9 @@ fn render_task_table(
     truncated: bool,
 ) {
     let block = panel("Tasks · S changes state filter", ACCENT).title_bottom(if truncated {
-        " Bounded rows · some records omitted "
+        " Bounded rows; terminal states within newest 4096 job IDs "
     } else {
-        " Enter inspect · / search "
+        " Enter inspect; terminal states within newest 4096 job IDs "
     });
     if tasks.is_empty() {
         let inner = block.inner(table_area);
@@ -334,9 +342,21 @@ pub(super) fn render_system(
             "Maintenance gate: {}",
             snapshot.maintenance.as_deref().unwrap_or("Idle")
         ),
+        format!(
+            "Last automatic full backup: {}",
+            snapshot.backup_outcome.map_or_else(
+                || "[UNKNOWN] no outcome observed this process".to_owned(),
+                |(success, time)| format!(
+                    "[{}] {}s ago",
+                    if success { "SUCCEEDED" } else { "FAILED" },
+                    time.elapsed().as_secs()
+                )
+            )
+        ),
         format!("Queue rejections since start: {}", snapshot.dropped),
         String::new(),
     ];
+    append_collection_lines(&mut lines, stats);
     append_administration_lines(&mut lines, snapshot, stats.is_ready);
     let reconcile = snapshot.reconcile;
     lines.push(String::new());
@@ -478,4 +498,59 @@ fn render_document(
         block.render(content, buffer);
         paragraph.render(inner, buffer);
     });
+}
+
+/// Label freshness independently from health and collection errors.
+fn sample_age(sampled_at: Option<std::time::Instant>) -> String {
+    sampled_at.map_or_else(
+        || "[UNAVAILABLE] no successful sample".to_owned(),
+        |time| {
+            let age = time.elapsed().as_secs();
+            format!("[{}] {age}s ago", if age > 10 { "STALE" } else { "LIVE" })
+        },
+    )
+}
+
+/// Explain independently collected query, task and disk values.
+fn append_collection_lines(lines: &mut Vec<String>, stats: &ChanStats) {
+    let snapshot = &stats.operator;
+    lines.extend([
+        format!("Query sample age: {}", sample_age(stats.sampled_at)),
+        format!(
+            "DB logical: {} · disk footprint: {}",
+            fmt_bytes(stats.db_bytes),
+            fmt_bytes(super::dashboard::database_footprint(stats))
+        ),
+        format!(
+            "DB main/WAL/SHM: {} / {} / {}",
+            fmt_bytes(stats.db_files.first().copied().unwrap_or(-1)),
+            fmt_bytes(stats.db_files.get(1).copied().unwrap_or(-1)),
+            fmt_bytes(stats.db_files.get(2).copied().unwrap_or(-1))
+        ),
+        format!(
+            "DB file sample: {} · {}",
+            sample_age(stats.db_files_sampled_at),
+            stats
+                .db_files_error
+                .as_deref()
+                .unwrap_or("available; files observed separately, may change during sampling")
+        ),
+        format!(
+            "Upload scan: {}",
+            stats.storage_error.as_deref().unwrap_or("available")
+        ),
+        format!(
+            "Task sample: {} · {}",
+            sample_age(snapshot.sampled_at),
+            snapshot.error.as_deref().unwrap_or("available")
+        ),
+        format!(
+            "Data recovery admission: {}",
+            if stats.recovery_blocked {
+                "BLOCKED: recovery required"
+            } else {
+                "open unless maintenance owns access"
+            }
+        ),
+    ]);
 }

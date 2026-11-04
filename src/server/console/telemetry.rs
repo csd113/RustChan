@@ -118,6 +118,8 @@ impl TaskRow {
 /// Nonsecret data sampled independently of the console interaction state.
 #[derive(Clone, Debug, Default)]
 pub struct OperatorSnapshot {
+    /// Time of the latest successful database-backed task sample.
+    pub sampled_at: Option<std::time::Instant>,
     /// Read failure; unknown counts must never appear as healthy zeros.
     pub error: Option<String>,
     /// Authoritative queue summary, including acknowledged-failure semantics.
@@ -150,6 +152,8 @@ pub struct OperatorSnapshot {
     pub ffmpeg: Option<(bool, bool)>,
     /// Maintenance currently holding the gate.
     pub maintenance: Option<String>,
+    /// Last scheduled backup outcome observed in this process, independent of file age.
+    pub backup_outcome: Option<(bool, std::time::Instant)>,
     /// Effective runtime automatic-backup interval and retention count.
     pub backup_schedule: Option<(u64, u64)>,
 }
@@ -159,8 +163,7 @@ impl OperatorSnapshot {
     ///
     /// # Errors
     /// Returns database acquisition, query or row-validation errors.
-    pub fn read(pool: &crate::db::DbPool) -> anyhow::Result<Self> {
-        let connection = pool.get()?;
+    pub fn read(connection: &rusqlite::Connection) -> anyhow::Result<Self> {
         let transaction = connection.unchecked_transaction()?;
         let jobs = crate::db::background_job_summary(&transaction)?;
         let mut tasks = Vec::new();
@@ -178,7 +181,16 @@ impl OperatorSnapshot {
             } else {
                 " ORDER BY updated_at DESC, id DESC LIMIT ?2"
             };
-            let mut statement = transaction.prepare_cached(&format!("{fields}{ordering}"))?;
+            let bounded_fields = if matches!(status, "failed" | "done") {
+                fields.replace(
+                    "FROM background_jobs",
+                    "FROM (SELECT * FROM background_jobs ORDER BY id DESC LIMIT 4096)",
+                )
+            } else {
+                fields.to_owned()
+            };
+            let mut statement =
+                transaction.prepare_cached(&format!("{bounded_fields}{ordering}"))?;
             let mut rows = statement
                 .query_map(
                     rusqlite::params![status, JOBS_PER_STATE + 1],
@@ -258,6 +270,7 @@ impl OperatorSnapshot {
             .maintenance_gate
             .active_label()
             .map(|label| display_text(&label));
+        self.backup_outcome = *app.backup_progress.automatic_outcome.lock();
         let settings = app.auto_full_backup_settings.snapshot();
         self.backup_schedule = Some((settings.interval_hours, settings.copies_to_keep));
         if let Some(task) = maintenance_task(app.db_maintenance_jobs.snapshot()) {
@@ -353,9 +366,17 @@ fn maintenance_task(status: DbMaintenanceJobStatus) -> Option<TaskRow> {
 pub fn display_text(value: &str) -> String {
     value
         .chars()
-        .filter(|character| !character.is_control())
+        .filter(|character| terminal_character(*character))
         .take(240)
         .collect()
+}
+
+/// Whether a character cannot control or invisibly reorder terminal output.
+pub(super) const fn terminal_character(character: char) -> bool {
+    !character.is_control()
+        && !matches!(character,
+        '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' |
+        '\u{2060}'..='\u{206f}' | '\u{feff}')
 }
 
 /// Format a Unix timestamp as UTC without assuming a host timezone.

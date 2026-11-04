@@ -121,6 +121,7 @@ pub(super) async fn run_scheduled_full_backups(
                 .await;
                 match attempt_result {
                     Ok(Ok(filename)) => {
+                        *maintenance_state.backup_progress.automatic_outcome.lock() = Some((true, Instant::now()));
                         failure_streak = 0;
                         retry_not_before = None;
                         tracing::info!(
@@ -132,6 +133,7 @@ pub(super) async fn run_scheduled_full_backups(
                         );
                     }
                     Ok(Err(error)) => {
+                        *maintenance_state.backup_progress.automatic_outcome.lock() = Some((false, Instant::now()));
                         failure_streak = failure_streak.saturating_add(1);
                         let retry_delay =
                             scheduled_full_backup_failure_retry_delay(interval, failure_streak);
@@ -147,6 +149,7 @@ pub(super) async fn run_scheduled_full_backups(
                         );
                     }
                     Err(error) => {
+                        *maintenance_state.backup_progress.automatic_outcome.lock() = Some((false, Instant::now()));
                         failure_streak = failure_streak.saturating_add(1);
                         let retry_delay =
                             scheduled_full_backup_failure_retry_delay(interval, failure_streak);

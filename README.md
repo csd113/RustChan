@@ -105,6 +105,35 @@ cargo build --locked --release
 
 Follow the same first-run steps as the downloaded app. On Windows, run `./target/release/rustchan-cli.exe`. See [SETUP.md](SETUP.md) for the full walkthrough.
 
+## Terminal console
+
+The live console uses **1 Overview, 2 Tasks, 3 Content, 4 Logs, 5 System,
+6 Configuration**. Tab/Shift-Tab changes destination; arrows, Page Up/Down and
+Home/End scroll; R coalesces refreshes; ? or H opens/closes help. Q asks before
+stopping. Ctrl-C skips that confirmation and uses the same graceful drain.
+
+Use `--console auto` (default), `--console tui`, `--console plain` or
+`--console off`. Full screen requires interactive input/output and a capable
+terminal; `TERM=dumb`, redirected streams and initialization failures retain
+plain logging without raw mode. Explicit `plain` also prints bounded operational
+summaries every 15 seconds. `off` keeps ordinary logs and signal-based shutdown.
+`--ascii` replaces non-ASCII display glyphs; `NO_COLOR=1` disables colors.
+Linux/Windows terminal relaunch is opt-in with `CHAN_LAUNCH_TERMINAL=1`.
+
+Overview shows logical SQLite bytes separately from observed main/WAL/SHM disk
+bytes. All thread counts include archived threads. System shows independent
+query, file and upload sample ages/errors; retained values can be stale. Queries
+normally refresh every 3 seconds (at most once per second under manual refresh),
+file sizes every 3 seconds and uploads every 30 seconds. Upload scans are capped
+at 100,000 entries/two seconds; slow filesystem calls can still take longer.
+Task summaries cover all jobs; bounded terminal-state rows examine the newest
+4,096 job IDs. Logs retain a 256 KiB/4,000-line tail and identify omitted history.
+
+Tor's address, Arti publication state and observed local forwarding are separate.
+An onion address or published descriptor does not establish external reachability.
+Automatic-backup outcomes describe attempts observed during this process;
+`UNKNOWN` does not establish whether an older backup exists.
+
 ## Screenshots
 
 Captured from the published v1.5.0 Docker image, these views show a demonstration site with sample conversations and original sample artwork, using the default Forest theme.

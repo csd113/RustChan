@@ -179,6 +179,10 @@ crossterm = "0.29.0"
 # Crossterm as the sole terminal backend.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 
+[target.'cfg(windows)'.dependencies]
+# Restore the exact host input mode instead of enabling conventional cooked flags.
+crossterm_winapi = "0.9.1"
+
 [target.'cfg(unix)'.dependencies]
 # Safe in-process filesystem-capacity queries for upload disk-space preflights.
 rustix = { version = "1.1.6", features = ["fs"] }

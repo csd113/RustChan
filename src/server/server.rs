@@ -5,7 +5,6 @@ use axum::{
 };
 use dashmap::DashMap;
 use std::future::pending;
-use std::io::IsTerminal as _;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -628,6 +627,7 @@ async fn run_server_lifecycle(
     // Each JoinSet retains task ownership through shutdown; the optional
     // per-task abort handles are intentionally unused.
     let mut background_tasks = tokio::task::JoinSet::new();
+    let console_operations = Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new()));
 
     // Media reconciliation is deliberately paged and periodic: workers poll
     // durable pending rows independently, while this pass repairs only bounded
@@ -863,7 +863,7 @@ async fn run_server_lifecycle(
         super::console::cleanup();
     });
 
-    let has_interactive_console = crate::logging::is_tty() && std::io::stdin().is_terminal();
+    let has_interactive_console = super::console::capabilities::interactive();
 
     // First-run admin wizard: if no admin accounts exist and both terminal
     // streams are interactive, prompt before starting the keyboard handler.
@@ -893,7 +893,7 @@ async fn run_server_lifecycle(
     // Start the full-screen console only when stdout is an interactive terminal.
     // Headless service processes retain the regular logging and signal-driven
     // shutdown path without touching raw mode, stdin, or terminal capabilities.
-    let console_runtime = if has_interactive_console {
+    let console_runtime = if has_interactive_console || super::console::capabilities::plain() {
         let http_port = match &plaintext_server {
             Some((listener, _)) => listener.local_addr()?.port(),
             None => bind_port,
@@ -918,7 +918,10 @@ async fn run_server_lifecycle(
             let force_reload = Arc::clone(&force_reload_notify);
             let _task_abort_handle = background_tasks.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(3));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut sampler = super::console::stats::Sampler::new(start_time);
+                let mut last_collection: Option<Instant> = None;
+                let mut last_plain: Option<Instant> = None;
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {}
@@ -930,25 +933,105 @@ async fn run_server_lifecycle(
                             return;
                         }
                     }
+                    // Coalesce manual refreshes: never sample faster than 1 Hz.
+                    if let Some(previous) = last_collection {
+                        let earliest = previous
+                            .checked_add(Duration::from_secs(1))
+                            .unwrap_or(previous);
+                        tokio::select! {
+                            () = tokio::time::sleep_until(earliest.into()) => {},
+                            () = cancel_stats.cancelled() => return,
+                        }
+                    }
+                    last_collection = Some(Instant::now());
                     let onion = onion_addr.read().await.clone();
-                    let snap = tokio::task::block_in_place(|| {
+                    let mut snap = tokio::task::block_in_place(|| {
                         sampler.collect(&runtime_stats, onion, http_port)
                     });
-                    *stats_w.write().await = snap;
+                    let mut current = stats_w.write().await;
+                    snap.db_files = current.db_files;
+                    snap.db_files_sampled_at = current.db_files_sampled_at;
+                    snap.db_files_error.clone_from(&current.db_files_error);
+                    snap.upload_bytes = current.upload_bytes;
+                    snap.storage_sampled_at = current.storage_sampled_at;
+                    snap.storage_error.clone_from(&current.storage_error);
+                    if super::console::capabilities::plain()
+                        && last_plain.is_none_or(|time| time.elapsed() >= Duration::from_secs(15))
+                    {
+                        super::console::print_plain(&snap);
+                        last_plain = Some(Instant::now());
+                    }
+                    *current = snap;
+                }
+            });
+        }
+
+        // Independent filesystem collectors retain their last successful samples.
+        for uploads in [false, true] {
+            let filesystem_metrics = Arc::clone(&shared_stats);
+            let cancel = worker_cancel.clone();
+            let data_access = state.data_access.clone();
+            let _collector_abort_handle = background_tasks.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(if uploads { 30 } else { 3 }));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {},
+                        () = cancel.cancelled() => return,
+                    }
+                    let Some(access) = data_access.try_read() else {
+                        let mut current = filesystem_metrics.write().await;
+                        if uploads { current.storage_error = Some("Upload collection suspended by maintenance/recovery".to_owned()); }
+                        else { current.db_files_error = Some("File collection suspended by maintenance/recovery".to_owned()); }
+                        drop(current);
+                        continue;
+                    };
+                    let result = tokio::task::spawn_blocking(move || {
+                        let _access = access;
+                        if uploads { super::console::stats::dir_size_bytes(&CONFIG.upload_dir).map(|bytes| [bytes, 0, 0]) }
+                        else { super::console::stats::database_file_sizes() }
+                    }).await;
+                    let mut current = filesystem_metrics.write().await;
+                    match result {
+                        Ok(Ok(bytes)) => {
+                            if uploads {
+                                current.upload_bytes = bytes.first().copied().unwrap_or(-1);
+                                current.storage_sampled_at = Some(Instant::now());
+                                current.storage_error = None;
+                            } else {
+                                current.db_files = bytes;
+                                current.db_files_sampled_at = Some(Instant::now());
+                                current.db_files_error = None;
+                            }
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            if uploads { current.storage_error = Some("Upload scan unavailable or exceeded 100000 entries/2s; retaining last value".to_owned()); }
+                            else { current.db_files_error = Some("Database file sizes unavailable; retaining last value".to_owned()); }
+                        }
+                    }
                 }
             });
         }
 
         // Enter the alternate screen before spawning Tor so bootstrap log
         // events go to the file log rather than disrupting the dashboard.
-        let (key_rx, redraw_console) = super::console::start(&shared_stats, &console_state)?;
-        Some((
-            shared_stats,
-            console_state,
-            force_reload_notify,
-            key_rx,
-            redraw_console,
-        ))
+        if has_interactive_console {
+            match super::console::start(&shared_stats, &console_state) {
+                Ok((key_rx, redraw_console)) => Some((
+                    shared_stats,
+                    console_state,
+                    force_reload_notify,
+                    key_rx,
+                    redraw_console,
+                )),
+                Err(error) => {
+                    tracing::warn!(target: "console", %error, "Console initialization failed; continuing with plain logs");
+                    None
+                }
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -967,6 +1050,7 @@ async fn run_server_lifecycle(
         let cancel_d = worker_cancel.clone();
         let shutdown_tx = worker_cancel.clone();
         let operation_pool = pool.clone();
+        let admitted_operations = Arc::clone(&console_operations);
         let operation_access = state.data_access.clone();
         let _task_abort_handle = background_tasks.spawn(async move {
             loop {
@@ -1006,7 +1090,7 @@ async fn run_server_lifecycle(
                     }
                     ConsoleAction::Shutdown { forced } => {
                         if forced {
-                            tracing::info!(target: "server", "Immediate shutdown initiated from console");
+                            tracing::info!(target: "server", "Graceful shutdown initiated by Ctrl-C");
                         } else {
                             tracing::info!(target: "server", "Graceful shutdown initiated from console");
                         }
@@ -1015,13 +1099,18 @@ async fn run_server_lifecycle(
                         return;
                     }
                     ConsoleAction::Submit(request) => {
-                        let Some(access) = operation_access.try_read() else { continue; };
+                        let Some(access) = admit_console_operation(&operation_access, &console, &request).await else {
+                            redraw.notify_one();
+                            continue;
+                        };
                         let request_for_work = request.clone();
                         let pool_for_work = operation_pool.clone();
                         let state_for_work = Arc::clone(&console);
                         let reload_after_work = Arc::clone(&force_reload);
                         let redraw_after_work = Arc::clone(&redraw);
-                        drop(tokio::spawn(async move {
+                        let mut operations = admitted_operations.lock().await;
+                        while operations.try_join_next().is_some() {}
+                        let _operation_abort_handle = operations.spawn(async move {
                             let result = tokio::task::spawn_blocking(move || {
                                 let _access = access;
                                 super::console::wizard::execute(&request_for_work, &pool_for_work)
@@ -1036,7 +1125,7 @@ async fn run_server_lifecycle(
                                 reload_after_work.notify_one();
                             }
                             redraw_after_work.notify_one();
-                        }));
+                        });
                     }
                 }
             }
@@ -1218,6 +1307,17 @@ async fn run_server_lifecycle(
     if tokio::time::timeout_at(deadline, drain).await.is_err() {
         background_tasks.shutdown().await;
     }
+    // A running spawn_blocking operation cannot be cancelled safely. Do not
+    // checkpoint or advertise graceful completion while it can still write.
+    let mut operations = console_operations.lock().await;
+    let drain_operations = async { while operations.join_next().await.is_some() {} };
+    if tokio::time::timeout_at(deadline, drain_operations)
+        .await
+        .is_err()
+    {
+        anyhow::bail!("Shutdown deadline reached with admitted console work still running; final checkpoint skipped, SQLite WAL recovery remains available");
+    }
+    drop(operations);
     let checkpoint_pool = pool.clone();
     let checkpoint = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let conn = checkpoint_pool.get()?;
@@ -1775,3 +1875,22 @@ async fn onion_location_middleware(
 
     resp
 }
+
+/// Couple rejected admission with operation completion so Progress cannot be stranded.
+async fn admit_console_operation(
+    access: &crate::middleware::data_access::DataAccess,
+    console: &super::console::SharedConsoleState,
+    request: &super::console::OperationRequest,
+) -> Option<crate::middleware::data_access::AccessLease> {
+    let lease = access.try_read();
+    if lease.is_none() {
+        console.write().await.finish_operation(request, Err(
+            "Operation rejected: backup, maintenance or recovery owns data access. Wait for it to finish, then retry; inspect System for recovery status.".to_owned()
+        ));
+    }
+    lease
+}
+
+#[cfg(test)]
+#[path = "server/tests/console_admission.rs"]
+mod console_admission_tests;

@@ -38,7 +38,7 @@ pub(super) fn render_help(frame: &mut Frame<'_>, area: Rect, offset: &mut u16) {
         ("Enter", "Advance or submit final field"),
         ("Ctrl-Enter / F2", "Submit the full form"),
         ("Ctrl-U", "Clear focused text"),
-        ("Ctrl-C", "Immediate server stop"),
+        ("Ctrl-C", "Graceful stop, bypasses prompt"),
     ];
     let wide = area.width >= 84;
     let panel_width = if wide {

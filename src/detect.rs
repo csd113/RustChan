@@ -1,7 +1,9 @@
 //! Startup detection for optional tools and the in-process Tor service.
 
 mod tor;
-pub use tor::{detect_tor, tor_stream_token_identity, TOR_STREAM_TOKENS};
+pub use tor::{
+    detect_tor, tor_status, tor_stream_token_identity, TorPhase, TorStatus, TOR_STREAM_TOKENS,
+};
 
 use std::process::{Command, Stdio};
 use std::time::Duration;

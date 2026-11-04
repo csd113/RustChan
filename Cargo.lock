@@ -4691,6 +4691,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "crossterm_winapi",
  "dashmap",
  "data-encoding",
  "flate2",
