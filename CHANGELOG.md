@@ -1,9 +1,35 @@
 # Changelog
 
-Release highlights and upgrade cautions. For current operating instructions, use
-[setup](SETUP.md), [backups](docs/backups.md), and
-[software updates](docs/software-updates.md). Earlier implementation details
-remain in Git history.
+Read this page to see what changed between releases. For installation or an
+upgrade, use [setup](SETUP.md), [backups](docs/backups.md), and
+[software updates](docs/software-updates.md). Unreleased entries describe the
+working branch and are not part of the latest published download.
+
+## Unreleased
+
+- Reworked the documentation around downloading, running, and setting up a first
+  site. Added separate administration and deployment guides, kept the README
+  artwork, and clarified platform requirements and manual updates.
+- Updated Tor Arti to 2.8.0 (0.48.0 crates).
+- Hardened the live terminal console: rejected operations recover with feedback,
+  media failures remain reachable at standard sizes, Tor/listener states reflect
+  observed startup/publication, and disk/query freshness is independent of health.
+  Added explicit console/ASCII modes, bounded sampling, stronger log redaction,
+  and ownership of console operations during graceful shutdown.
+- Removed the optional binary-upgrade job from CI.
+- Enabled HTTPS protocol negotiation for HTTP/2 with HTTP/1.1 fallback on
+  manual, development and ACME certificate paths.
+- Check final media destinations before committing posts. Late publication
+  failures now identify the saved post instead of falsely confirming upload success;
+  retries do not confirm success while required media is missing.
+
+- Fixed private setup by collecting a separate board password and keeping its
+  reviewed hash out of the HTML. Invalid upload limits now fail before review
+  instead of causing an internal error when setup finishes. Removed the
+  nonfunctional read-only setup toggle; password-required posting remains available.
+- Fixed setup silently disabling video, audio, and PDF uploads when image
+  uploads were unchecked. Each media setting now applies independently.
+- Made advertised BMP and TIFF uploads selectable in posting file pickers.
 
 ## RustChan 1.7.5 — 2026-11-03
 
@@ -22,7 +48,7 @@ remain in Git history.
   shared outputs, including concurrent events and suppression-window summaries.
 
 - Updated the supported toolchain to Rust 1.99.1 and refreshed Rust dependencies,
-  including Hayro 0.8 and ZIP 9; Arti remains on 0.47.0.
+  including Hayro 0.8 and ZIP 9; Arti remained on 0.47.0 in this release.
 - Added manual CI validation and native Linux x86_64 builds alongside ARM64,
   Apple Silicon, and Windows.
 

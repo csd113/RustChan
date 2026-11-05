@@ -29,7 +29,7 @@ pub(crate) const REFERRER_POLICY: &str = "same-origin";
 
 #[cfg(test)]
 #[path = "tests/request_policy.rs"]
-mod tests;
+pub mod tests;
 
 /// Appends formatted HTML without allocating an intermediate string.
 ///

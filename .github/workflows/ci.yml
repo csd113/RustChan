@@ -2,9 +2,9 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, master]
+    branches: [main, master, indev]
   push:
-    branches: [main, master]
+    branches: [main, master, indev]
   merge_group:
   workflow_dispatch:
 
@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Keep the old-version build evidence from manual release checks.
+  # Pushes must not cancel manually requested CI validation.
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'manual-' || '' }}${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
@@ -131,8 +131,3 @@ jobs:
         env:
           PLATFORM_RESULT: ${{ needs.platform-smoke.result }}
         run: test "$PLATFORM_RESULT" = success
-
-  binary-upgrade:
-    name: Binary upgrade
-    if: github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/upgrade.yml

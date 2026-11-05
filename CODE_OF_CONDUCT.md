@@ -1,61 +1,50 @@
 # RustChan Code of Conduct
 
-## Purpose and scope
+Treat people respectfully and keep project discussions useful. These rules apply
+to RustChan issues, pull requests, reviews, discussions, and other spaces managed
+by the project.
 
-RustChan is self-hosted imageboard software written in Rust. This Code of
-Conduct governs participation in the RustChan project: issues, pull requests,
-reviews, discussions, and other project-managed spaces.
-
-It does not govern independently operated RustChan instances. Each operator is
-responsible for that instance's laws, moderation rules, content, users,
-security, and infrastructure. The RustChan project does not operate, endorse,
-monitor, or control those sites.
+[All guides](README.md#documentation) · [Contributing](CONTRIBUTING.md) · [Support](SUPPORT.md)
 
 ## Expected conduct
 
-Project participants are expected to:
+- Discuss ideas and code without attacking people.
+- Give specific, constructive feedback.
+- Respect different experience levels, backgrounds, and communication styles.
+- Keep reports focused and remove private or identifying information.
+- Respect final maintainer decisions about project scope.
+- Help keep project spaces useful for contributors and site operators.
 
-- discuss ideas and code without attacking the people behind them;
-- give technically specific, constructive feedback;
-- respect differing experience levels, backgrounds, and communication styles;
-- keep reports focused and remove personal, private, or instance-sensitive
-  information;
-- accept maintainer decisions about project scope and move on when a decision
-  is final; and
-- help keep public project spaces useful for contributors and operators.
+Technical discussion of abuse prevention, moderation, media validation, Tor,
+and security is welcome when it helps improve RustChan and uses sanitized evidence.
 
 ## Unacceptable conduct
 
-The following is not acceptable in project-managed spaces:
-
-- harassment, threats, stalking, intimidation, or sustained personal attacks;
-- discriminatory or demeaning language or imagery;
-- sexualized attention directed at another participant;
-- publishing or threatening to publish another person's private information;
-- sharing credentials, private keys, database contents, private media, onion
-  private keys, or other sensitive instance data;
-- posting illegal content or using the repository to coordinate illegal
-  activity; or
-- filing project issues to pursue moderation disputes or abuse reports about an
+- Harassment, threats, stalking, intimidation, or sustained personal attacks.
+- Discriminatory or demeaning language or imagery.
+- Sexualized attention directed at another participant.
+- Publishing or threatening to publish someone's private information.
+- Sharing credentials, private keys, database contents, private media, Tor
+  identity keys, or other sensitive site data.
+- Posting illegal content or coordinating illegal activity.
+- Using project issues to pursue a moderation dispute or abuse report about an
   independently operated RustChan site.
 
-Good-faith technical discussion of abuse resistance, content handling,
-moderation tooling, media validation, Tor behavior, or security is welcome when
-it is necessary to improve RustChan and uses sanitized evidence.
+## Reporting and enforcement
 
-## Enforcement
+For conduct on GitHub, use GitHub's report, block, and abuse-reporting controls
+where applicable. Do not open a public issue containing private information or
+sensitive evidence. The project publishes no private conduct-reporting address;
+maintainers should add one if they adopt a private reporting process.
 
-Maintainers may edit or remove contributions that violate this Code of Conduct
-and may warn, temporarily restrict, or permanently remove a participant from
-project-managed spaces. Decisions should consider context, severity, repeated
-behavior, and the safety of other participants.
+Maintainers may edit or remove contributions, warn participants, or temporarily
+or permanently restrict participation in project-managed spaces. Decisions should
+consider context, severity, repeated behavior, and other participants' safety.
 
-For conduct visible on GitHub, use GitHub's report, block, and abuse-reporting
-controls where applicable. Do not open a public issue containing personal
-information or sensitive conduct-report evidence. The project currently
-publishes no private conduct-reporting address; maintainers should add one if
-they adopt a private reporting process.
+## Independent sites
 
-Questions about operating or moderating a separate RustChan instance belong
-with that instance's operator, not the RustChan project. See [SUPPORT.md](SUPPORT.md)
-for repository support boundaries.
+This policy does not govern independently operated RustChan instances. Contact
+the relevant site's operator about its content, rules, moderation, or abuse
+process. The RustChan project does not operate, endorse, monitor, or control
+those sites. Each operator is responsible for its laws, moderation, content,
+users, security, and infrastructure. See [support boundaries](SUPPORT.md#problems-on-someone-elses-site).

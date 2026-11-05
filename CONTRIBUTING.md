@@ -1,73 +1,77 @@
-# Contributing to RustChan
+# Contribute to RustChan
 
-RustChan is self-hosted imageboard software written in Rust. Contributions are
-welcome when they are focused, testable, and safe for operators and people who
-use independently run instances.
+You can help by reporting a bug, improving the docs, or making a focused code
+change. You do not need to build RustChan to suggest a documentation correction.
+Start by checking existing [issues](https://github.com/csd113/RustChan/issues)
+and pull requests for related work.
 
-By participating, you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). For a
-security vulnerability, follow [SECURITY.md](SECURITY.md) before sharing any
-details publicly. General support boundaries are in [SUPPORT.md](SUPPORT.md).
+[All guides](README.md#documentation) · [Support](SUPPORT.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 
-## Before starting
+For a security defect, read [SECURITY.md](SECURITY.md) before posting details.
+Keep credentials, private media, personal information, and real instance data out
+of reports, commits, screenshots, and fixtures. Discuss the problem and scope
+before starting a large behavior or architecture change.
 
-- Search existing issues and pull requests for related work.
-- Use the bug, feature, or documentation issue form when an issue is useful and
-  issue creation is available to your account.
-- Keep secrets, personal information, private media, and real instance data out
-  of all issues, commits, fixtures, logs, and screenshots.
-- For a large behavioral or architectural change, establish the problem and
-  intended scope before investing in an implementation.
+## Build and run
 
-The project does not operate or control independent RustChan instances. Do not
-submit another site's content, moderation dispute, abuse report, database, or
-operational secrets as repository evidence.
+Install Git, [Rust through rustup](https://rustup.rs), and your platform's native
+build tools. The supported minimum Rust version is **1.99.1**, also used in CI.
+Linux needs a C/C++ build toolchain; macOS needs Xcode Command Line Tools; Windows
+MSVC builds need the Visual Studio C++ build tools and Windows SDK.
 
-## Branches and pull requests
+```sh
+git clone https://github.com/csd113/RustChan.git
+cd RustChan
+cargo build --locked --release
+```
 
-Create a focused branch from the current default branch:
+On macOS/Linux, start a local trial with:
+
+```sh
+CHAN_HOST=127.0.0.1 CHAN_TOR_SUPPORT=false ./target/release/rustchan-cli
+```
+
+On Windows, use PowerShell:
+
+```powershell
+$env:CHAN_HOST = "127.0.0.1"
+$env:CHAN_TOR_SUPPORT = "false"
+.\target\release\rustchan-cli.exe
+```
+
+Follow [first setup](SETUP.md#finish-setup). Data defaults to
+`target/release/rustchan-data`; use an absolute `--data-dir` if you want to keep it
+outside build output. Do not use production data for development checks.
+FFmpeg is [optional for media processing](SETUP.md#install-ffmpeg).
+
+Default features include `tls-self-signed`. Other supported build modes are
+`--no-default-features`, optional `--features tls-acme`, and `--all-features`.
+Keep `rust-version` and `cargo-msrv` metadata aligned. Do not change the toolchain,
+features, lockfile, or dependencies as unrelated cleanup; consider existing
+crates and the standard library before adding a dependency.
+
+## Make a focused change
+
+Start from the current default branch, or the working branch agreed for your task:
 
 ```sh
 git switch main
 git pull --ff-only
-git switch -c fix/short-description
+git switch -c docs/short-description
 ```
 
-Use a descriptive prefix such as `fix/`, `feature/`, or `docs/`. Keep commits
-and the pull request narrowly scoped. Preserve unrelated behavior, route names,
-element IDs, form fields, JavaScript and CSS hooks, no-JavaScript fallbacks, and
-public APIs unless the change specifically requires otherwise.
+Use a descriptive name such as `fix/`, `feature/`, or `docs/`. Keep unrelated work
+intact. Preserve routes, element IDs, form fields, JavaScript/CSS hooks,
+no-JavaScript fallbacks, and public APIs unless the change needs to update them.
 
-In the pull request:
-
-- explain the problem and the chosen approach;
-- identify behavior and deployment surfaces that changed;
-- list the exact validation commands run and their results;
-- call out migrations, compatibility concerns, operational steps, or remaining
-  risks; and
-- link the relevant issue when one exists.
-
-Do not include vulnerability details in a public pull request unless disclosure
-has already been coordinated under [SECURITY.md](SECURITY.md).
-
-## Rust and feature policy
-
-The workspace currently declares Rust `1.99.1` as its minimum supported Rust
-version (MSRV). Keep `rust-version` and the `cargo-msrv` metadata aligned; do not
-raise the MSRV incidentally.
-
-The current Cargo feature sets are:
-
-- default features, which include `tls-self-signed`;
-- `--no-default-features`; and
-- optional `tls-acme` or `--all-features` builds.
-
-Do not change toolchain, feature, lockfile, or CI policy as unrelated cleanup.
-Do not add a dependency until the standard library and existing crates have
-been considered.
+A pull request should explain the problem and resulting behavior, list affected
+areas and validation results, and identify migrations, compatibility concerns,
+operator steps, or remaining risks. Link the issue when one exists. Do not put
+uncoordinated vulnerability details in a public PR.
 
 ## Validation
 
-The repository's baseline Rust checks are:
+For application changes, run the baseline checks:
 
 ```sh
 cargo fmt --all --check
@@ -78,104 +82,95 @@ cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
 
-The focused regressions cover CSRF and upload responses, version checks, retained
-recovery admission, log-event counting, and backup safety. They use small
-synthetic inputs without starting a server. Release validation and manually
-requested CI also run [binary upgrade checks](src/db/tests/binary_upgrade.py)
-against disposable 1.7.1 installations; this slower gate is separate from normal
-Cargo tests.
+The last line uses POSIX-shell environment syntax. In PowerShell set
+`$env:RUSTDOCFLAGS = "-D warnings"` before the `cargo doc` command.
 
-Use a small runtime smoke check with disposable local data when application
-startup or request handling changes. Keep generated evidence out of commits.
+The focused regressions use small synthetic inputs for CSRF/uploads, update
+checks, retained recovery, log counting, console behavior, and backup safety.
+For startup or request changes, add an appropriate disposable local smoke check.
+Keep generated evidence out of commits.
 
-Run the full Rust validation sequence before handoff for application changes.
-Documentation-only changes may use the repository's applicable documentation,
-YAML, and link checks instead of compiling the application. Always run:
+Documentation-only changes can use documentation, YAML, and link checks instead
+of compiling. There is no separate Markdown site build in this repository.
+Check relative paths and heading links, keep README artwork references working,
+validate examples against code, and always run:
 
 ```sh
 git diff --check
+python3 tools/check_local_tooling.py
 ```
 
-## Change-specific expectations
+### Binary-upgrade validation
 
-### Database and migrations
+The release workflow and separately dispatched
+[upgrade workflow](.github/workflows/upgrade.yml) run
+[`src/db/tests/binary_upgrade.py`](src/db/tests/binary_upgrade.py) against
+disposable 1.7.1 installations. This slower gate is separate from normal push CI
+and Cargo tests. Follow that workflow's inputs; do not use a live installation.
 
-Released schema changes need a forward migration tied to a RustChan release.
-Preserve data and fail closed on partial, unknown, or corrupt schemas. Validate
-fresh creation, supported upgrade paths, invalid input, rollback, and backup/restore
-interaction as applicable, subject to the essential-value test policy below.
-Do not silently rewrite or discard an operator's database.
+The Windows 1.7.1 baseline has a drive-prefix bug that returns 404 for board
+media. The report records that limitation and checks original bytes on disk,
+including after rollback. The candidate must serve exact retained bytes with
+HTTP 200 after upgrade and restart; it never inherits the baseline exception.
+
+## Code and data changes
+
+The workspace lint tables in [Cargo.toml](Cargo.toml) define Rust/Clippy policy;
+unsafe Rust is forbidden. New workspace packages inherit it with
+`[lints] workspace = true`. Keep lint exceptions narrow with a reason at the
+code. The patched AAC crate in `vendor/` is outside the workspace and retains
+its upstream lint configuration. Review dependency exceptions in [deny.toml](deny.toml).
+
+Treat posts, uploads, archives, paths, cookies, headers, configuration, environment
+variables, and databases as untrusted. Validate them before changing files,
+writing data, redirecting, restoring, or launching a process. Authentication,
+moderation, backup, restore, and migration work should stop safely when state is
+uncertain and avoid partial-success outcomes.
+
+Released schema changes need a forward migration tied to a release. Preserve data
+and reject unknown, partial, or corrupt schemas. Validate relevant fresh, upgrade,
+invalid-input, rollback, and backup/restore paths under the test policy below.
+See the [database guide](docs/sqlite-engineering.md).
 
 ### Tests and fixtures
 
-New tests are permitted only when absolutely needed to protect a concrete,
-important behavior or a confirmed regression. Before adding one, explain the
-failure it catches, why existing validation is insufficient, and its maintenance
-and execution cost. Prefer the smallest focused test. Do not add speculative
-coverage, duplicate assertions, trivial implementation-detail tests, or expensive
-full-application tests by default. Any future tests must live in a clearly named
+Add a new test only when needed for an important concrete behavior or confirmed
+regression. Explain the failure it catches, why existing validation is insufficient,
+and its maintenance and execution cost first. Prefer the smallest focused test;
+avoid speculative coverage, duplicate assertions, implementation-detail tests,
+and expensive full-app tests by default. New tests belong in a clearly named
 `tests` directory under their owning subsystem, with correct discovery wiring.
+Do not run removed suites or recreate them solely to replace deleted coverage.
 
-Any essential fixtures must be small, synthetic or redistribution-safe, and
-free of private instance data and identifying metadata.
+Fixtures must be small, synthetic or safe to redistribute, and free of private
+instance data or identifying metadata.
 
-### Documentation and changelog
+## Documentation and generated files
 
-Update `README.md`, `SETUP.md`, generated configuration guidance, or other
-operator documentation when behavior, defaults, features, storage, Tor, TLS,
-backups, or moderation changes. Add a concise entry under the matching
-subsection in the top `CHANGELOG.md` section for notable changes. Do not promise
-anonymity, perfect security, availability, legal compliance, or protection from
-a malicious operator.
+When behavior changes, update its authoritative guide and add a concise changelog
+entry. Keep new work under **Unreleased** until it ships; move it into the named
+release section when preparing that release. Preserve published release history.
+Each permanent document needs a continuing purpose. Prefer linking to one guide
+over repeating the same instructions across files.
 
-Permanent documentation should describe the current software, supported
-workflows, or necessary design decisions. Each new document needs a continuing
-maintenance purpose. Update the authoritative guide when implementation changes;
-avoid duplicating the same system across files and prefer concise explanations.
+Keep completed audits, AI activity reports, implementation plans, debugging
+transcripts, benchmarks, and temporary validation output out of Git. Put useful
+verified conclusions in the relevant guide. Use Git history for past investigations;
+do not create obsolete report archives. Preserve operational, security, licensing,
+compliance, and release records.
 
-Keep AI activity summaries, completed audits and implementation plans, debugging
-transcripts, benchmark output, and temporary validation evidence out of version
-control. Incorporate useful, verified conclusions into the existing guide, then
-remove the completed report or plan. Use git history for past investigations;
-do not retain obsolete narratives in archives or giant consolidated reports.
-One-off work generally does not need a new Markdown file. Preserve required
-operational, security, licensing, compliance, and release records.
-
-Place disposable evidence under the ignored `output/` or `audit-output/`
-directories, or outside the checkout. Keep permanent test infrastructure separate
-from its generated results. Review links when moving or deleting documentation.
-`tools/check_local_tooling.py` checks that local instructions and designated
+Use ignored `output/` or `audit-output/`, or a location outside the checkout, for
+disposable evidence. Keep test infrastructure separate from its output.
+`tools/check_local_tooling.py` verifies that designated local instructions and
 generated evidence remain untracked.
 
-The workspace lint tables in `Cargo.toml` are the authoritative Rust/Clippy
-policy; unsafe Rust is forbidden. New workspace packages must inherit it with
-`[lints] workspace = true`. The patched upstream AAC crate under `vendor/` is
-excluded from the workspace and keeps its upstream lint configuration. Keep
-lint expectations narrow, with an explicit reason at the affected code; review
-dependency exceptions in `deny.toml` rather than copying generated inventories
-into documentation.
-
-### Generated files
-
 Do not hand-edit generated output when a source or generator is authoritative.
-Commit generated files only when they are intentionally versioned and required
-by the change, and document how they were regenerated. Avoid large generated
-artifacts and temporary validation evidence.
-
-### Sensitive paths
-
-Treat public posts, uploads, archive contents, paths, cookies, headers,
-environment variables, configuration, and databases as untrusted. Validate them
-before filesystem mutation, database writes, redirects, restore operations, or
-process execution. Backup, restore, migration, authentication, administration,
-and moderation changes should avoid partial-success states and fail closed where
-safety is uncertain.
-
-Never commit runtime data, `rustchan-data/`, SQLite databases, backups, logs,
-credentials, tokens, TLS private keys, Tor/onion private keys, private media,
-temporary evidence, or other large generated artifacts.
+Commit generated files only when intentionally versioned and required; explain
+how they were regenerated. Never commit runtime data, databases, backups, logs,
+credentials, TLS/Tor keys, private media, or large temporary artifacts. Do not
+promise anonymity, perfect security, availability, or legal compliance.
 
 ## License
 
-RustChan is licensed under the [MIT License](LICENSE). By contributing, you
-agree that your contribution is provided under that license.
+Contributions are provided under RustChan's [MIT license](LICENSE). Preserve
+third-party licenses and [vendored patch provenance](vendor/symphonia-codec-aac/RUSTCHAN-PATCH.md).

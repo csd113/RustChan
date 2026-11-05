@@ -1,7 +1,8 @@
 // Thumbnail generation for uploaded media.
 
+use super::image_budget::ImageBudget;
 use anyhow::{Context as _, Result};
-use image::{imageops::FilterType, GenericImageView as _, ImageFormat};
+use image::GenericImageView as _;
 use std::path::{Path, PathBuf};
 
 use super::ffmpeg;
@@ -96,6 +97,26 @@ pub fn generate_thumbnail(
     max_dim: u32,
     ffmpeg_available: bool,
 ) -> Result<PathBuf> {
+    generate_thumbnail_with_budget(
+        input_path,
+        mime,
+        output_path,
+        max_dim,
+        ffmpeg_available,
+        &ImageBudget::default(),
+    )
+}
+
+/// Generate a thumbnail using the upload's cooperative image budget.
+pub(super) fn generate_thumbnail_with_budget(
+    input_path: &Path,
+    mime: &str,
+    output_path: &Path,
+    max_dim: u32,
+    ffmpeg_available: bool,
+    budget: &ImageBudget,
+) -> Result<PathBuf> {
+    super::images::validate_dimensions(max_dim, max_dim)?;
     match mime {
         // SVG and audio: always use static placeholder
         "image/svg+xml" => write_placeholder(output_path, PlaceholderKind::Video)
@@ -140,11 +161,11 @@ pub fn generate_thumbnail(
         }
 
         // WebP previews always use the Rust decoder, including animation.
-        "image/webp" => image_crate_thumbnail(input_path, mime, output_path, max_dim)
+        "image/webp" => image_crate_thumbnail_with_budget(input_path, output_path, max_dim, budget)
             .map(|()| output_path.to_path_buf()),
 
         _ if mime.starts_with("image/") => {
-            image_crate_thumbnail_or_placeholder(input_path, mime, output_path, max_dim)
+            image_crate_thumbnail_or_placeholder(input_path, mime, output_path, max_dim, budget)
         }
 
         // Unknown MIME: placeholder
@@ -194,7 +215,18 @@ pub(super) fn image_crate_thumbnail(
     output_path: &Path,
     max_dim: u32,
 ) -> Result<()> {
-    let img = super::images::decode_still(input_path)?;
+    image_crate_thumbnail_with_budget(input_path, output_path, max_dim, &ImageBudget::default())
+}
+
+/// Resize and atomically encode a bounded first-frame preview.
+fn image_crate_thumbnail_with_budget(
+    input_path: &Path,
+    output_path: &Path,
+    max_dim: u32,
+    budget: &ImageBudget,
+) -> Result<()> {
+    super::images::validate_dimensions(max_dim, max_dim)?;
+    let img = super::images::decode_still(input_path, budget)?;
 
     let (w, h) = img.dimensions();
     let (tw, th) = if w > h {
@@ -206,12 +238,21 @@ pub(super) fn image_crate_thumbnail(
     let thumb = if w <= tw && h <= th {
         img
     } else {
-        img.resize(tw, th, FilterType::Triangle)
+        super::images::resize(img, (tw, th))?
     };
 
-    thumb
-        .save_with_format(output_path, ImageFormat::WebP)
-        .with_context(|| format!("failed to save WebP thumbnail to {}", output_path.display()))
+    let parent = output_path
+        .parent()
+        .context("thumbnail output has no parent")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    super::images::write_pixels(&thumb, temporary.as_file_mut(), budget)?;
+    budget.check()?;
+    drop(
+        temporary
+            .persist(output_path)
+            .context("publish WebP thumbnail")?,
+    );
+    Ok(())
 }
 
 /// Generate an image fallback or replace a failed decode with a placeholder.
@@ -220,8 +261,9 @@ fn image_crate_thumbnail_or_placeholder(
     mime: &str,
     output_path: &Path,
     max_dim: u32,
+    budget: &ImageBudget,
 ) -> Result<PathBuf> {
-    match image_crate_thumbnail(input_path, mime, output_path, max_dim) {
+    match image_crate_thumbnail_with_budget(input_path, output_path, max_dim, budget) {
         Ok(()) => Ok(output_path.to_path_buf()),
         Err(error) => {
             tracing::warn!(

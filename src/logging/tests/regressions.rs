@@ -256,3 +256,17 @@ fn window_boundary_summarizes_exact_count_and_resets() -> Result<()> {
     );
     Ok(())
 }
+
+/// A truncated credential line must never expose its unlabelled suffix.
+#[test]
+fn log_tail_discards_a_partial_line_without_a_newline() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("synthetic.log");
+    std::fs::write(&path, "password=FAKE_SECRET_SUFFIX")?;
+    let (tail, truncated) = super::read_log_tail(&path, 8).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        truncated && tail.is_empty(),
+        "a partial credential line must be discarded"
+    );
+    Ok(())
+}

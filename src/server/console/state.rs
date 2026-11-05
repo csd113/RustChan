@@ -357,7 +357,11 @@ impl ConsoleState {
 
     /// Replace the current notice with a new message.
     pub fn set_notice(&mut self, severity: NoticeSeverity, message: impl Into<String>) {
-        self.notice = Some(Notice::new(severity, message));
+        let message = super::logs::safe_log_line(&message.into());
+        self.notice = Some(Notice::new(
+            severity,
+            super::telemetry::display_text(&message),
+        ));
     }
 
     /// Complete a background operation and return to its most useful screen.
@@ -407,7 +411,10 @@ impl ConsoleState {
         }
 
         if self.screen == Screen::Help
-            && matches!(key, KeyEvent::Escape | KeyEvent::Character('?' | 'q' | 'h'))
+            && matches!(
+                key,
+                KeyEvent::Escape | KeyEvent::Character('?' | 'q' | 'Q' | 'h' | 'H')
+            )
         {
             self.screen = self.help_return.take().unwrap_or_default();
             return ConsoleAction::None;
@@ -796,7 +803,7 @@ pub enum ConsoleAction {
     None,
     /// Refresh the statistics snapshot immediately.
     Reload,
-    /// Gracefully or immediately stop the server.
+    /// Gracefully stop the server, optionally bypassing confirmation.
     Shutdown {
         /// Whether Ctrl-C bypassed the confirmation.
         forced: bool,

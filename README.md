@@ -8,102 +8,93 @@
 
 [![CI](https://github.com/csd113/RustChan/actions/workflows/ci.yml/badge.svg)](https://github.com/csd113/RustChan/actions/workflows/ci.yml)
 
-[Get started](#quick-start) · [Screenshots](#screenshots) · [Features](#features) · [Settings](#configuration) · [Help and guides](#documentation)
+[Get started](#quick-start) · [Screenshots](#screenshots) · [Features](#features) · [Guides](#documentation)
 
 </div>
 
-RustChan is a free, self-hosted imageboard: a discussion website where people start conversations, share pictures and other media, and reply to one another. **Self-hosted** means you run the site on your own computer or server and manage its content and settings.
+RustChan is a free app for running your own discussion website. People choose a
+**board** (a topic), start **threads** (conversations), and reply with text,
+pictures, or other media. You manage the site in your browser.
 
-Conversations are organized into **boards** (topics such as photography or technology). Each board contains **threads** (individual conversations) and **replies**. You manage the site through an admin panel in your browser.
-
-RustChan runs as a single app, with a built-in database. You do not need to set up a separate database server.
-
-**Source version:** v1.7.5. **Downloads:** [latest published release](https://github.com/csd113/RustChan/releases/latest). **Docker image:** `ghcr.io/csd113/rustchan:latest`.
+You run RustChan on your computer or server. It includes its own database and
+website files, so you do not need a separate database, Rust, or Docker to use a
+downloaded copy.
 
 ## Quick start
 
-Choose the option that suits you:
+### 1. Download the app
 
-| Option | Best for | What you need |
-|---|---|---|
-| [Docker](#start-with-docker) | Running the ready-made app with its media tools included | Docker running on your computer or server |
-| [Download the app](#download-the-app) | Running RustChan directly, without Docker or compiling code | A supported Linux, macOS, or Windows computer |
-| [Build from source](#build-from-source) | Developers who want to build the app themselves | Git and Rust 1.99.1 or newer |
+Open the [official releases page](https://github.com/csd113/RustChan/releases/latest)
+and expand **Assets**. Download the ZIP for your computer, then extract it to a
+folder you can write to. Choose an app ZIP, not GitHub's **Source code** archive.
 
-### Start with Docker
+The published v1.7.5 downloads are:
 
-The published container packages RustChan and its media tools together. It supports Linux AMD64 and ARM64, including use through Docker Desktop on compatible Macs and Windows computers.
-
-Run these commands in a terminal:
-
-```bash
-docker pull ghcr.io/csd113/rustchan:latest
-docker volume create rustchan-data
-docker run -d --name rustchan --restart unless-stopped \
-  -p 127.0.0.1:8080:8080 \
-  -v rustchan-data:/data \
-  ghcr.io/csd113/rustchan:latest
-```
-
-Then finish the initial setup in your browser:
-
-1. Open [the setup page](http://localhost:8080/setup).
-2. Choose a site name, create an admin account with a unique password, and name your first board. For a local trial, choose **Local/testing → load defaults** before entering your details.
-3. Select **review setup**, check the details, then select **finish setup**.
-4. Visit [your home page](http://localhost:8080) to start a conversation. Sign in at [the admin panel](http://localhost:8080/admin) to manage your site.
-
-The command above makes the site available on your own computer. The `rustchan-data` volume is the storage area for your posts, uploads, settings, and backups; it keeps them when you replace the container.
-
-Useful everyday commands:
-
-```bash
-docker logs -f rustchan   # View the app's logs; Ctrl+C stops viewing them
-docker stop rustchan     # Stop the site
-docker start rustchan    # Start it again
-```
-
-Images, animated GIF/WebP conversion, HEIC/HEIF, container inspection, common audio waveforms, and supported PDF previews run in Rust. The image includes `ffmpeg` for video thumbnails, WebM transcoding, and audio codecs the Rust decoders do not cover. Tor is off by default in Docker.
-
-For **Docker Compose, updates, backups, or a public website**, follow the [container guide](docs/containers.md). Public sites need HTTPS and suitable network settings; complete setup before allowing visitors. The guide also explains how to pin an image to a specific revision instead of following `latest`.
-
-### Download the app
-
-Open the [latest release](https://github.com/csd113/RustChan/releases/latest), download the ZIP for your operating system, and extract it into a folder where the app can save files.
-
-ZIP names include the release version; the v1.7.5 names are shown below. Choose the matching files from the published release you download.
-
-| Your computer | Download |
-|---|---|
+| Your computer | ZIP filename |
+| --- | --- |
+| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-windows-x86_64.zip` |
+| Mac with an Apple chip, such as M1 or later | `rustchan-cli-v1.7.5-macos-apple-silicon.zip` |
+| Mac with an Intel processor | `rustchan-cli-v1.7.5-macos-intel.zip` |
 | Linux, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-linux-x86_64.zip` |
 | Linux, ARM64 | `rustchan-cli-v1.7.5-linux-arm64.zip` |
-| macOS, Intel 64-bit | `rustchan-cli-v1.7.5-macos-intel.zip` |
-| macOS, Apple silicon | `rustchan-cli-v1.7.5-macos-apple-silicon.zip` |
-| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-windows-x86_64.zip` |
 
-From a terminal in the extracted folder, run:
+Linux v1.7.5 binaries require **glibc 2.39 or newer**, as provided by Ubuntu
+24.04. For another environment, see [requirements and alternatives](SETUP.md#requirements).
+The [setup guide](SETUP.md#check-the-download) also explains how to verify the ZIP.
 
-```bash
-# Linux or macOS
+### 2. Run it
+
+Open a terminal in the extracted folder that contains `rustchan-cli` (or
+`rustchan-cli.exe` on Windows). A terminal is the app where you enter commands.
+
+For a first local trial, these commands keep the site on your own computer and
+turn off Tor. Use them each time you start this trial.
+
+**Windows — PowerShell:**
+
+```powershell
+$env:CHAN_HOST = "127.0.0.1"
+$env:CHAN_TOR_SUPPORT = "false"
+.\rustchan-cli.exe
+```
+
+**macOS or Linux — Terminal:**
+
+```sh
 chmod +x rustchan-cli
-./rustchan-cli
+CHAN_HOST=127.0.0.1 CHAN_TOR_SUPPORT=false ./rustchan-cli
 ```
 
-On Windows, run `rustchan-cli.exe` (or `./rustchan-cli.exe` in PowerShell). Follow the terminal's first-run prompts to create your administrator and, optionally, your first board. You can also create boards in [the admin panel](http://localhost:8080/admin). Keep the app running while you use the site.
+Follow the terminal prompts to create an administrator account. Choose **yes**
+when asked to create a first board, then enter its short name and title.
+Keep the app running while you use the site.
 
-RustChan creates a `rustchan-data` folder next to the app. Keep that folder when updating. Installing `ffmpeg` enables video processing and the audio compatibility fallback; see [SETUP.md](SETUP.md) for installation and deployment details.
+### 3. Open your site
 
-### Build from source
+Open **<http://localhost:8080>** in a browser on the same computer. Choose your
+board and start a thread. Sign in at **<http://localhost:8080/admin>** with the
+administrator account you just created to change the site name, add boards, or
+manage posts.
 
-With Git and Rust **1.99.1 or newer** installed:
+If the app starts without asking for an account, open
+**<http://localhost:8080/setup>**. On a fresh site, choose **Local/testing → load
+defaults**, enter the site name, administrator details, and first board, then
+select **review setup** and **finish setup**. This page closes once an
+administrator exists. See [first-run help](SETUP.md#finish-setup) if you get stuck.
 
-```bash
-git clone https://github.com/csd113/RustChan.git
-cd RustChan
-cargo build --locked --release
-./target/release/rustchan-cli
-```
+### 4. Keep your data
 
-Follow the same first-run steps as the downloaded app. On Windows, run `./target/release/rustchan-cli.exe`. See [SETUP.md](SETUP.md) for the full walkthrough.
+RustChan creates a **`rustchan-data`** folder beside the executable. It contains
+your posts, uploads, settings, and other site data. Keep the whole folder when
+you move or update the app. Press **Ctrl-C** in the terminal and wait for the app
+to exit to stop the site; run the same command to start it again.
+
+The app works without FFmpeg. Install it later if you want video processing or
+additional audio previews; [setup instructions](SETUP.md#install-ffmpeg) explain how.
+For a public website, follow the [deployment guide](docs/deployment.md) after setup.
+
+Prefer another installation method? Use [Docker](docs/containers.md) or
+[build from source](CONTRIBUTING.md#build-and-run).
 
 ## Screenshots
 
@@ -147,88 +138,38 @@ Captured from the published v1.5.0 Docker image, these views show a demonstratio
 ## Features
 
 | For visitors | For site owners |
-|---|---|
-| Topic boards, conversations, replies, search, and a visual catalog | Create boards and choose who can view or post |
-| Pictures, video, and audio; optional PDF and other file uploads | Set upload limits and enable media types per board |
-| Quotes, polls, spoilers, and conversation archives | Review reports, manage bans and appeals, and moderate posts |
-| Themes and layouts that work on phones and computers | Customize the site name, themes, banners, and favicon |
-| Core browsing and posting without JavaScript | Create and restore site or board backups; schedule automatic backups |
-| Optional access through a Tor onion address | Built-in Tor hosting, optional HTTPS, and site-health tools |
+| --- | --- |
+| Boards, threads, replies, search, and a visual catalog | Create boards and choose who can view or post |
+| Pictures, video, audio, and optional PDF or other files | Choose upload types and limits for each board |
+| Quotes, polls, spoilers, and archived conversations | Review reports, manage bans and appeals, and moderate posts |
+| Themes and layouts for phones and computers | Change themes, banners, favicon, and site appearance |
+| Core browsing and posting without JavaScript | Save and restore backups; schedule automatic backups |
+| Optional Tor onion access | Built-in Tor hosting, optional HTTPS, and health information |
 
-Supported media includes JPEG, PNG, GIF, WebP, HEIC/HEIF, BMP, TIFF, MP4, WebM, MP3, OGG, FLAC, WAV, M4A, and AAC. Available uploads depend on the site's and board's settings. SVG uploads are rejected because they can contain executable content.
-
-## Configuration
-
-Most everyday settings are available in the admin panel. For server settings, edit **`settings.toml`** in the app's data directory and restart RustChan. The generated file includes explanations of its settings.
-
-| Installation | Where your data lives |
-|---|---|
-| Downloaded app or source build | `rustchan-data/` next to the executable |
-| Docker | `/data` inside the container, stored in the mounted volume |
-| Custom location | The absolute path passed with `--data-dir /absolute/path` |
-
-This directory contains your settings, database (`chan.db`), board uploads, logs, backups, and runtime files such as Tor identity and TLS certificates. **Keep the entire directory when moving or updating the site.** The app reads settings from this directory, regardless of where you run the command.
-
-Common settings:
-
-| Setting | What it controls |
-|---|---|
-| `forum_name` / `site_subtitle` | The site's name and short description |
-| `port` | The HTTP port; normally `8080` |
-| `enable_tor_support` | Whether the built-in Tor onion service runs |
-| `tor_only` | Whether the site is served through Tor with a local-only listener |
-| `require_ffmpeg` | Whether startup requires FFmpeg for video and uncovered audio codecs |
-| `auto_full_backup_interval_hours` | How often automatic full-site backups run |
-| `backup_directory` | An optional absolute path for saved backups |
-| `[tls].enabled` | Whether the app's built-in HTTPS listener runs |
-
-Matching `CHAN_*` environment variables take priority over file settings. For example, Docker's `CHAN_TOR_SUPPORT=false` keeps Tor off even if the file enables it. Docker networking and Tor-only mode need special care; use the [container guide](docs/containers.md) before changing them.
-
-See [SETUP.md](SETUP.md) for all settings, HTTPS, Tor, reverse proxies, and running RustChan as a service.
-
-## Administration and recovery
-
-Sign in at `/admin` on your site to manage boards, posts, reports, bans, appearance, backups, and maintenance.
-
-**Backups:** the admin panel can save or download full-site and per-board backups and restore them later. Keep independent copies and test that you can restore them. To copy the whole data directory yourself, stop the app first so the database and uploaded files remain consistent.
-
-**Backup storage:** change **Admin → Backups → backup storage directory**, or set `backup_directory` in `settings.toml`, then restart. Existing backups stay in their original location, and only the active location appears in the admin panel. Use a dedicated, writable directory; mount external storage before starting the app. For Docker, a directory outside `/data` needs its own persistent mount. See the [container backup instructions](docs/containers.md#backups). See [backup safety and interrupted restore recovery](docs/backups.md) for limits and recovery behavior.
-
-**Command-line administration:** use `rustchan-cli admin --help` to see account, board, ban, and database commands. In Docker, run it as:
-
-```bash
-docker exec rustchan rustchan-cli --data-dir /data admin --help
-```
-
-**Health checks:** `/healthz` shows that the app is running; `/readyz` checks that its database is ready. Detailed readiness and `/metrics` are optional and should be restricted to trusted access. Docker's built-in health check uses `/readyz`.
-
-## Security notes
-
-RustChan stores hashed client IP addresses, hashes admin passwords with Argon2id, protects forms and sessions, and validates uploads and backup archives. These protections do not guarantee anonymity or make a site operator trustworthy.
-
-As a site owner, keep settings, secrets, databases, backups, TLS keys, and Tor identity private. Keep the generated `cookie_secret` stable between restarts. You are responsible for your server, moderation, backups, and network configuration. See [SECURITY.md](SECURITY.md) for the security policy and how to report a vulnerability.
-
-## Development
-
-RustChan is written in Rust using Axum, Tokio, bundled SQLite, server-rendered templates, Rustls, and Arti. Docker is optional for development.
-
-Use Rust 1.99.1. [CONTRIBUTING.md](CONTRIBUTING.md) contains the validation commands,
-workspace lint policy, and development workflow.
+Uploads depend on site and board settings. See [media support](docs/media-capabilities.md)
+for supported formats and preview limits.
 
 ## Documentation
 
-| Guide | What you will find |
-|---|---|
-| [Container guide](docs/containers.md) | Docker, Compose, image tags, updates, and backups |
-| [Setup guide](SETUP.md) | Installation, server deployment, HTTPS, Tor, and troubleshooting |
-| [Media capabilities](docs/media-capabilities.md) | Supported formats, processing backends, and preview limits |
-| [Database guide](docs/sqlite-engineering.md) | SQLite architecture, migrations, maintenance, and recovery |
-| [Software updates](docs/software-updates.md) | Version checks, manual upgrades, and recovery |
-| [Settings restarts](docs/settings-restarts.md) | Live settings, restart requirements, and configuration recovery |
-| [Contributing](CONTRIBUTING.md) | Development and contribution workflow |
-| [Security policy](SECURITY.md) | Reporting vulnerabilities and security scope |
-| [Support](SUPPORT.md) | Where to get help and what the project supports |
-| [Changelog](CHANGELOG.md) | Release history |
-| [License](LICENSE) | MIT license |
+Start with the setup guide. The other guides cover tasks you may need later.
+If you are reading the README included in a ZIP, open the
+[online guide list](https://github.com/csd113/RustChan#documentation) for these links.
 
-The admin [Software Updates](docs/software-updates.md) page checks for a newer stable release and links to its download. Upgrade with your usual deployment tools after stopping RustChan and backing up the complete data directory and old binary. `/readyz` reports the running package version and never exposes update availability.
+| I want to… | Guide |
+| --- | --- |
+| Download, run, or troubleshoot my first site | [Setup](SETUP.md) |
+| Manage boards, appearance, accounts, or the terminal console | [Administration](docs/administration.md) |
+| Change settings and know when to restart | [Settings](docs/settings-restarts.md) |
+| Make the site available to other people | [Deployment: service, HTTPS, proxy, Tor](docs/deployment.md) |
+| Use Docker or Compose | [Containers](docs/containers.md) |
+| Save or recover my site | [Backups](docs/backups.md) |
+| Install a newer version | [Software updates](docs/software-updates.md) |
+| Understand supported uploads | [Media capabilities](docs/media-capabilities.md) |
+| Diagnose or work on the database | [SQLite guide](docs/sqlite-engineering.md) |
+| Build or contribute to RustChan | [Contributing](CONTRIBUTING.md) |
+| Get help or report a problem | [Support](SUPPORT.md) · [Security](SECURITY.md) |
+| Read project policies and history | [Code of Conduct](CODE_OF_CONDUCT.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE) |
+
+These guides describe this checkout. The [changelog](CHANGELOG.md) separates
+unreleased work from published releases; a download may not include every feature
+shown here. The package version is currently 1.7.5.

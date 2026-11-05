@@ -195,7 +195,7 @@ pub fn read_log_tail(path: &Path, max_bytes: usize) -> Result<(String, bool), St
         let prefix = bytes
             .iter()
             .position(|byte| *byte == b'\n')
-            .map_or(1, |index| index.saturating_add(1));
+            .map_or(bytes.len(), |index| index.saturating_add(1));
         bytes.get(prefix..).unwrap_or_default()
     } else {
         bytes.as_slice()
@@ -568,7 +568,13 @@ pub fn init_logging(log_dir: &Path) {
 
     let tty = io::stdout().is_terminal();
     IS_TTY.store(tty, Ordering::Relaxed);
-    ANSI_ENABLED.store(detect_ansi_enabled(tty), Ordering::Relaxed);
+    ANSI_ENABLED.store(
+        detect_ansi_enabled(tty)
+            && std::env::var_os("NO_COLOR").is_none()
+            && std::env::var("TERM").is_ok_and(|term| term != "dumb")
+            && !crate::server::console::capabilities::plain(),
+        Ordering::Relaxed,
+    );
 
     // FIX (filename): tracing_appender::rolling::daily(dir, "rustchan.log")
     // appends the date *after* the full string → "rustchan.log.2024-01-15"

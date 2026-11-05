@@ -7,7 +7,7 @@ On Linux, --manual-linux-root verifies the protected/check-only root context.
 --managed-linux-baseline verifies an ordinary-user 1.7.1 installation's real
 controller state is preserved when its executable is replaced by a new check-only
 release. Neither mode installs a signed managed update or bypasses old admission.
-POSIX graceful shutdown is required; Windows needs a console-control adapter.
+Graceful shutdown uses SIGINT on POSIX and an isolated console on Windows.
 """
 
 import argparse
@@ -228,6 +228,7 @@ class Smoke:
         self.log_handle = None
         self.log_paths = []
         self.checks = []
+        self.baseline_observations = {}
         self.password = "Upgrade-fixture-only-" + secrets.token_hex(12)
         self.username = "upgrade_fixture_admin"
         self.media = png(24, 16)
@@ -274,12 +275,23 @@ class Smoke:
 
     def launch(self, binary, label):
         require(self.process is None, "an owned server is already running")
+        if os.name == "nt":
+            import ctypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            # CI shells can pass an inheritable "ignore Ctrl+C" attribute to
+            # children. Clear it before creating the server's isolated console.
+            # A verifier launched without a console needs its own console first.
+            if not kernel.SetConsoleCtrlHandler(None, False):
+                require(ctypes.get_last_error() == 6 and kernel.AllocConsole()
+                        and kernel.SetConsoleCtrlHandler(None, False),
+                        "could not enable Ctrl+C inheritance for the owned Windows server")
         log = self.temporary / (label + ".log")
         self.log_paths.append(log)
         self.log_handle = log.open("wb")
         self.process = subprocess.Popen([str(binary), "--port", str(self.port), "serve"],
                                         cwd=binary.parent, env=self.env, stdin=subprocess.DEVNULL,
-                                        stdout=self.log_handle, stderr=subprocess.STDOUT)
+                                        stdout=self.log_handle, stderr=subprocess.STDOUT,
+                                        creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0)
         return log
 
     def ready(self, expected_version, timeout=45):
@@ -312,7 +324,35 @@ class Smoke:
         forced = False
         try:
             if process.poll() is None:
-                process.send_signal(signal.SIGINT)
+                if os.name == "nt":
+                    helper = r"""
+import ctypes, sys, time
+kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel.FreeConsole()
+if not kernel.AttachConsole(int(sys.argv[1])):
+    raise ctypes.WinError(ctypes.get_last_error())
+if not kernel.SetConsoleCtrlHandler(None, True):
+    raise ctypes.WinError(ctypes.get_last_error())
+if not kernel.GenerateConsoleCtrlEvent(0, 0):
+    raise ctypes.WinError(ctypes.get_last_error())
+time.sleep(0.2)
+"""
+                    try:
+                        result = subprocess.run([sys.executable, "-c", helper, str(process.pid)],
+                                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, timeout=10)
+                        delivered = result.returncode == 0
+                        if not delivered and self.log_handle is not None:
+                            self.log_handle.write(b"Windows console signal failed: " + result.stderr[:2048])
+                    except (OSError, subprocess.TimeoutExpired):
+                        delivered = False
+                    if not delivered:
+                        # Failed validation must still stop the owned process so
+                        # cleanup can release its files. Never count this as a pass.
+                        forced = True
+                        process.terminate()
+                else:
+                    process.send_signal(signal.SIGINT)
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
@@ -325,7 +365,7 @@ class Smoke:
                         process.wait(timeout=5)
             if strict:
                 require(not forced and process.returncode == 0,
-                        "owned server did not exit cleanly after SIGINT")
+                        "owned server did not exit cleanly after its graceful shutdown signal")
         finally:
             if process.poll() is not None:
                 self.process = None
@@ -352,7 +392,7 @@ class Smoke:
     @staticmethod
     def install(directory, source):
         directory.mkdir()
-        binary = directory / "rustchan-cli"
+        binary = directory / ("rustchan-cli.exe" if os.name == "nt" else "rustchan-cli")
         shutil.copy2(source, binary)
         binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
         return binary, directory / "rustchan-data"
@@ -428,12 +468,25 @@ class Smoke:
         settings.write_text(text)
         return thread
 
-    def readable(self, client, thread, banner_id, banner_hash):
+    def readable(self, client, thread, banner_id, banner_hash, legacy_data=None):
         status, _, content = client.request("/test/thread/" + str(thread))
         require(status == 200 and b"upgrade-retained-original" in content
                 and b"upgrade-retained-reply" in content, "retained posts were not readable")
         status, _, content = client.request("/boards/test/" + self.media_name)
-        require(status == 200 and digest(content) == digest(self.media), "retained media was not readable")
+        if os.name == "nt" and legacy_data is not None:
+            previous = self.baseline_observations.setdefault("windows_171_media_http_status", status)
+            require(previous == status, "rolled-back Windows media behavior differs from its baseline")
+        if os.name == "nt" and legacy_data is not None and status == 404:
+            # The official Windows 1.7.1 binary stats an incomplete canonical
+            # drive prefix and rejects board media. Keep that defect visible,
+            # verify its fixture directly, and require HTTP 200 from the candidate.
+            media_file = legacy_data / "boards" / "test" / self.media_name
+            require(media_file.is_file() and digest(media_file.read_bytes()) == digest(self.media),
+                    "legacy Windows media fixture is absent or changed on disk")
+            self.baseline_observations["windows_171_media_verified_on_disk"] = True
+        else:
+            require(status == 200 and digest(content) == digest(self.media),
+                    "retained media was not readable (HTTP " + str(status) + ")")
         status, _, content = client.request("/banner/assets/" + str(banner_id))
         require(status == 200 and digest(content) == banner_hash, "retained banner was not readable")
         public = Client(self.origin)
@@ -495,7 +548,7 @@ class Smoke:
         status, _, content = client.request("/banner/assets/" + str(banner_id))
         require(status == 200, "old binary could not read its own banner")
         banner_hash = digest(content)
-        self.readable(client, thread, banner_id, banner_hash)
+        self.readable(client, thread, banner_id, banner_hash, legacy_data=data)
         status, _, _ = client.request("/admin/backup/create", {
             "_csrf": client.csrf(), "storage_mode": "directory"}, timeout=60)
         require(status == 303, "old binary could not create a saved full backup")
@@ -645,7 +698,7 @@ class Smoke:
         self.ready("1.7.1")
         rollback_client = Client(self.origin)
         rollback_client.login(self.username, self.password)
-        self.readable(rollback_client, thread, banner_id, banner_hash)
+        self.readable(rollback_client, thread, banner_id, banner_hash, legacy_data=data)
         expected_rollback_rows = self.completed_pending_job(original_rows, data, pending_job)
         self.stop()
         inspect_database(data / "chan.db", "1.7.1")
@@ -721,7 +774,7 @@ def main():
     smoke, temporary = None, None
     exit_code = 1
     try:
-        require(os.name == "posix", "full smoke requires POSIX graceful SIGINT; Windows console adapter is not implemented")
+        require(os.name in ("posix", "nt"), "unsupported process and shutdown platform")
         linux = sys.platform.startswith("linux")
         require(not linux or os.geteuid() == 0 or args.managed_linux_baseline,
                 "ordinary-user Linux requires explicit --managed-linux-baseline")
@@ -730,7 +783,8 @@ def main():
         require(not args.managed_linux_baseline or (linux and os.geteuid() != 0),
                 "--managed-linux-baseline requires Linux and an actual ordinary user")
         report["deployment_context"] = ("linux-ordinary-171-managed-to-check-only" if args.managed_linux_baseline
-                                        else "linux-protected-root-manual" if linux else "native-posix-manual")
+                                        else "linux-protected-root-manual" if linux
+                                        else "native-windows-manual" if os.name == "nt" else "native-posix-manual")
         require(args.old_bin.is_file() and args.new_bin.is_file(), "both supplied executables must be regular files")
         report["old_version"], report["candidate_version"] = version(args.old_bin), version(args.new_bin)
         require(report["old_version"] == "1.7.1", "baseline executable must be exactly 1.7.1")
@@ -764,6 +818,11 @@ def main():
                 report["success"] = False
                 exit_code = 1
             report["checks"] = smoke.checks
+            report["baseline_observations"] = smoke.baseline_observations
+            if smoke.baseline_observations.get("windows_171_media_http_status") == 404:
+                report["limits"].append(
+                    "Windows 1.7.1 cannot serve board media: baseline and rollback verify the file on disk; "
+                    "candidate upgrade and restart still require HTTP 200 and exact media bytes")
             report["sanitized_logs"] = str(smoke.logs)
         if temporary is not None:
             if smoke is not None and smoke.process is not None:

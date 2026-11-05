@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::disk_space::check_disk_space;
-use super::jpeg::{read_exif_orientation_from_file, strip_jpeg_exif_file};
+use super::jpeg::strip_jpeg_exif_file;
 use super::mime::detect_mime_type;
 use super::{UploadRejection, AMBIGUOUS_WEBM_MIME};
 
@@ -60,8 +60,8 @@ struct UploadPlan {
     mime_type: String,
     /// Media category derived from the MIME type.
     media_type: crate::models::MediaType,
-    /// JPEG EXIF orientation applied during processing.
-    jpeg_orientation: u32,
+    /// Shared image deadline and output allowance from validation.
+    image_budget: crate::media::image_budget::ImageBudget,
     /// Whether the worker queue must finish processing.
     processing_pending: bool,
     /// Absolute destination directory for the original.
@@ -347,14 +347,14 @@ fn build_upload_plan(
     Ok(UploadPlan {
         mime_type: validated.mime_type,
         media_type: validated.media_type,
-        jpeg_orientation: validated.jpeg_orientation,
+        image_budget: validated.image_budget,
         processing_pending,
         dest_dir,
         thumbs_dir,
     })
 }
 
-/// MIME, media, and orientation data accepted by upload validation.
+/// MIME and media data accepted by upload validation.
 #[derive(Debug)]
 #[expect(
     clippy::redundant_pub_crate,
@@ -369,8 +369,8 @@ pub(crate) struct ValidatedUpload {
     mime_type: String,
     /// Media category derived from the canonical MIME type.
     media_type: crate::models::MediaType,
-    /// JPEG EXIF orientation to apply after processing.
-    jpeg_orientation: u32,
+    /// Cooperative image budget that persists through storage.
+    image_budget: crate::media::image_budget::ImageBudget,
 }
 
 /// Validate an upload against media policy before deduplication or persistence.
@@ -439,8 +439,12 @@ fn validate_upload(
             format_upload_limit(max_size)
         )));
     }
+    let image_budget =
+        crate::media::image_budget::ImageBudget::new(u64::try_from(options.max_image_size)?);
     if media_type == crate::models::MediaType::Image {
+        image_budget.check()?;
         validate_decodable_image(input_path, &mime_type)?;
+        image_budget.check()?;
     } else if media_type == crate::models::MediaType::Pdf {
         validate_pdf_structure(input_path)?;
     } else if matches!(
@@ -453,18 +457,12 @@ fn validate_upload(
         validate_av_stream_kind(input_path, &mime_type, media_type)?;
     }
 
-    let jpeg_orientation = if mime_type == "image/jpeg" {
-        read_exif_orientation_from_file(input_path)?
-    } else {
-        1
-    };
-
     Ok(ValidatedUpload {
         input_path: input_path.to_path_buf(),
         original_size,
         mime_type,
         media_type,
-        jpeg_orientation,
+        image_budget,
     })
 }
 
@@ -528,27 +526,16 @@ fn save_processed_upload(
     let processor_input = prepare_processor_input(input_path, &plan.dest_dir, &plan.mime_type)?;
     let processor = crate::media::MediaProcessor::new_with_ffmpeg(options.ffmpeg_available);
     let processed = processor
-        .process_upload(
+        .process_upload_with_budget(
             processor_input.path(),
             &plan.mime_type,
             &plan.dest_dir,
             file_id,
             &plan.thumbs_dir,
             options.thumb_size,
+            &plan.image_budget,
         )
         .context("Media processing pipeline failed")?;
-
-    if plan.jpeg_orientation > 1 && processed.file_path.exists() {
-        apply_image_exif_orientation(&processed.file_path, plan.jpeg_orientation);
-    }
-
-    if let Some(thumbnail_path) = processed.thumbnail_path.as_ref().filter(|thumbnail_path| {
-        plan.jpeg_orientation > 1
-            && thumbnail_path.exists()
-            && thumbnail_path.extension().and_then(|ext| ext.to_str()) == Some("webp")
-    }) {
-        apply_thumb_exif_orientation(thumbnail_path, plan.jpeg_orientation);
-    }
 
     let final_size = final_processed_size_within_limit(&processed, options)?;
 
@@ -609,7 +596,7 @@ fn final_processed_size_within_limit(
         .len();
     if final_size != processed.final_size {
         tracing::debug!(
-            before_orientation_bytes = processed.final_size,
+            processed_bytes = processed.final_size,
             final_bytes = final_size,
             "stored upload size changed after post-processing"
         );
@@ -1113,79 +1100,6 @@ fn validate_adts_aac_reader(
             .map(|_completed_value| ())?;
     }
 
-    Ok(())
-}
-
-/// Best-effort applies EXIF orientation to a generated WebP thumbnail.
-fn apply_thumb_exif_orientation(thumb_path: &Path, orientation: u32) {
-    if orientation <= 1 {
-        return;
-    }
-
-    let Ok(data) = std::fs::read(thumb_path) else {
-        return;
-    };
-    let Ok(img) = image::load_from_memory_with_format(&data, image::ImageFormat::WebP) else {
-        return;
-    };
-    let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
-    if let Err(error) = write_image_atomic(thumb_path, &rotated, image::ImageFormat::WebP) {
-        tracing::warn!("failed to re-orient thumbnail: {error}");
-    }
-}
-
-/// Best-effort applies EXIF orientation to a processed image.
-fn apply_image_exif_orientation(image_path: &Path, orientation: u32) {
-    if orientation <= 1 {
-        return;
-    }
-
-    let Ok(data) = std::fs::read(image_path) else {
-        return;
-    };
-    let Ok(format) = image::guess_format(&data) else {
-        return;
-    };
-    let Ok(img) = image::load_from_memory_with_format(&data, format) else {
-        return;
-    };
-    let rotated = crate::media::exif::apply_exif_orientation(img, orientation);
-    if let Err(error) = write_image_atomic(image_path, &rotated, format) {
-        tracing::warn!("failed to re-orient stored image: {error}");
-    }
-}
-
-/// Writes a transformed image to a temporary file and atomically replaces it.
-///
-/// # Errors
-/// Returns an error if the destination has no parent or if temporary-file
-/// creation, encoding, or persistence fails.
-fn write_image_atomic(
-    output_path: &Path,
-    image: &image::DynamicImage,
-    format: image::ImageFormat,
-) -> Result<()> {
-    let parent = output_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("output path has no parent: {}", output_path.display()))?;
-    let tmp = tempfile::Builder::new()
-        .prefix("rustchan-orient-")
-        .suffix(".tmp")
-        .tempfile_in(parent)
-        .with_context(|| format!("failed to create temp file for {}", output_path.display()))?;
-    image
-        .save_with_format(tmp.path(), format)
-        .with_context(|| {
-            format!(
-                "failed to write re-oriented image to {}",
-                tmp.path().display()
-            )
-        })?;
-    drop(
-        tmp.persist(output_path)
-            .map_err(|error| error.error)
-            .with_context(|| format!("failed to atomically replace {}", output_path.display()))?,
-    );
     Ok(())
 }
 

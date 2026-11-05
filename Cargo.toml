@@ -54,7 +54,7 @@ tokio      = { version = "1.54.1", features = ["full"] }
 tokio-util = "0.7.20"
 captcha    = { version = "1.0.0", default-features = false }
 
-# Arti 0.47 requires rusqlite >=0.36,<0.41, and r2d2_sqlite 0.35 requires 0.40.
+# Arti 0.48 requires rusqlite >=0.36,<0.41, and r2d2_sqlite 0.35 requires 0.40.
 # rusqlite 0.41 uses a different libsqlite3-sys; Cargo cannot link both SQLite
 # libraries. Keep 0.40.2 until both upstream dependencies support 0.41.
 rusqlite    = { version = "0.40.2", features = ["bundled", "backup", "hooks", "blob"] }
@@ -137,16 +137,16 @@ tempfile  = "3.27.0"
 # Verification:
 #   cargo tree --edges features | grep -iE "openssl|native.tls"   # expect nothing
 #   cargo tree -i openssl-sys                                       # expect error: not found
-# Arti 0.47.0 requires Rust 1.92. Congestion control is unconditional;
+# Arti 0.48.0 (Arti 2.8.0) requires Rust 1.92. Congestion control is unconditional;
 # the former flowctl-cc feature has been removed upstream.
-arti-client = { version = "0.47.0", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
+arti-client = { version = "0.48.0", default-features = false, features = ["tokio", "rustls", "onion-service-service"] }
 
 # tor-hsservice / tor-cell: also part of the arti workspace.  Their `full`
 # default feature bundle can activate the native-tls TLS backend through
 # tor-rtcompat.  Disable defaults; add back only what the build requires.
 # If compilation fails with "feature X not found", re-add that feature here.
-tor-hsservice = { version = "0.47.0", default-features = false }
-tor-cell      = { version = "0.47.0", default-features = false }
+tor-hsservice = { version = "0.48.0", default-features = false }
+tor-cell      = { version = "0.48.0", default-features = false }
 
 futures       = "0.3.34"
 sha3          = "0.12.0"
@@ -178,6 +178,10 @@ crossterm = "0.29.0"
 # Ratatui provides Unicode-aware, diff-rendered layout primitives while keeping
 # Crossterm as the sole terminal backend.
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+
+[target.'cfg(windows)'.dependencies]
+# Restore the exact host input mode instead of enabling conventional cooked flags.
+crossterm_winapi = "0.9.1"
 
 [target.'cfg(unix)'.dependencies]
 # Safe in-process filesystem-capacity queries for upload disk-space preflights.

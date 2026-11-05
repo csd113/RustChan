@@ -16,6 +16,8 @@ const LOG_TAIL_BYTES: usize = 256 * 1024;
 /// Cached tail of the current application log.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogSnapshot {
+    /// Monotonic time of the latest successful tail read.
+    pub sampled_at: Option<std::time::Instant>,
     /// Source filename, when a main log exists.
     pub source: Option<String>,
     /// Complete lines retained from the tail.
@@ -74,23 +76,7 @@ pub(super) fn render_logs(
             Style::default().fg(WARNING),
         )
     };
-    let source = logs
-        .source
-        .as_deref()
-        .unwrap_or("waiting for first log file");
-    Paragraph::new(Line::from(vec![
-        follow,
-        Span::styled("  Source  ", Style::default().fg(MUTED)),
-        Span::raw(super::telemetry::display_text(source)),
-        Span::styled(
-            format!(
-                "   {} retained lines",
-                format_number(u64::try_from(lines.len()).unwrap_or(u64::MAX))
-            ),
-            Style::default().fg(MUTED),
-        ),
-    ]))
-    .render(info_area, frame.buffer_mut());
+    Paragraph::new(log_header(logs, follow, lines.len())).render(info_area, frame.buffer_mut());
 
     let block = panel("Live log", ACCENT).title_bottom(Line::from(Span::styled(
         " ↑↓ scroll · ←→ pan · Enter inspect last visible · P/F pause/follow ",
@@ -101,8 +87,10 @@ pub(super) fn render_logs(
 
     app.selected_log = None;
     if let Some(error) = &logs.error {
-        render_centered_state(frame.buffer_mut(), inner, "LOG ERROR", error, DANGER);
-        return;
+        if lines.is_empty() {
+            render_centered_state(frame.buffer_mut(), inner, "LOG ERROR", error, DANGER);
+            return;
+        }
     }
     if lines.is_empty() {
         app.selected_log = None;
@@ -155,8 +143,17 @@ fn log_line_style(line: &str) -> Style {
 #[must_use]
 pub fn load_log_snapshot() -> LogSnapshot {
     let logs_dir = crate::config::logs_dir();
-    let Some(path) = latest_log_file(&logs_dir) else {
-        return LogSnapshot::default();
+    let path = match latest_log_file(&logs_dir) {
+        Ok(Some(path)) => path,
+        Ok(None) => return LogSnapshot::default(),
+        Err(_) => {
+            return LogSnapshot {
+                error: Some(
+                    "Log directory cannot be read; check permissions and storage.".to_owned(),
+                ),
+                ..LogSnapshot::default()
+            }
+        }
     };
     let source = path
         .file_name()
@@ -165,6 +162,7 @@ pub fn load_log_snapshot() -> LogSnapshot {
         .to_owned();
     match crate::logging::read_log_tail(&path, LOG_TAIL_BYTES) {
         Ok((content, truncated)) => LogSnapshot {
+            sampled_at: Some(std::time::Instant::now()),
             source: Some(source),
             lines: content
                 .lines()
@@ -181,6 +179,7 @@ pub fn load_log_snapshot() -> LogSnapshot {
             error: None,
         },
         Err(error) => LogSnapshot {
+            sampled_at: None,
             source: Some(source),
             lines: Vec::new(),
             truncated: false,
@@ -190,38 +189,91 @@ pub fn load_log_snapshot() -> LogSnapshot {
 }
 
 /// Redact credential fields and URL userinfo before buffering or inspecting logs.
-fn safe_log_line(line: &str) -> String {
+pub(super) fn safe_log_line(line: &str) -> String {
     use std::sync::LazyLock;
     /// Known credential fields; compilation failure disables unsafe presentation.
     static FIELDS: LazyLock<Option<regex::Regex>> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?i)(\"?(?:password|new_password|cookie_secret|session_secret|api_key|access_token|refresh_token|token|authorization|cookie|ip_hash)\"?\s*[:=]\s*)(?:\"[^\"]*\"|[^,}\n]+)"#).ok()
+        regex::Regex::new(r#"(?i)("?(?:password|password_hash|new_password|cookie_secret|session_secret|api_key|access_token|refresh_token|token|authorization|cookie|ip_hash)"?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,}\n]+)"#).ok()
     });
     /// URI credentials are private even when no secret field label is present.
     static URLS: LazyLock<Option<regex::Regex>> =
-        LazyLock::new(|| regex::Regex::new(r"(?i)(https?://)[^/\s@]+:[^/\s@]+@").ok());
+        LazyLock::new(|| regex::Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@").ok());
     let (Some(fields), Some(urls)) = (&*FIELDS, &*URLS) else {
         return "[UNAVAILABLE] Log redaction could not initialize".to_owned();
     };
     let cleaned: String = line
         .chars()
-        .filter(|character| !character.is_control())
-        .take(4096)
+        .filter(|character| super::telemetry::terminal_character(*character))
         .collect();
     let cleaned = fields.replace_all(&cleaned, "$1[REDACTED]");
-    urls.replace_all(&cleaned, "$1[REDACTED]@").into_owned()
+    urls.replace_all(&cleaned, "$1[REDACTED]@")
+        .chars()
+        .take(4096)
+        .collect()
 }
 
 /// Find the newest main-process log file.
-pub(super) fn latest_log_file(logs_dir: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(logs_dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| crate::logging::is_main_log_file(path))
-        .filter_map(|path| {
-            let metadata = path.metadata().ok()?;
-            metadata.is_file().then(|| (metadata.modified().ok(), path))
-        })
-        .max()
-        .map(|(_, path)| path)
+pub(super) fn latest_log_file(logs_dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    let mut latest = None;
+    for (count, entry) in std::fs::read_dir(logs_dir)?.enumerate() {
+        if count >= 4096 {
+            return Err(std::io::Error::other("Log directory entry limit reached"));
+        }
+        let path = entry?.path();
+        if !crate::logging::is_main_log_file(&path) {
+            continue;
+        }
+        let metadata = path.metadata()?;
+        if metadata.is_file() {
+            let candidate = (metadata.modified()?, path);
+            if latest.as_ref().is_none_or(|current| &candidate > current) {
+                latest = Some(candidate);
+            }
+        }
+    }
+    Ok(latest.map(|(_, path)| path))
+}
+
+#[cfg(test)]
+#[path = "tests/log_redaction.rs"]
+mod redaction_tests;
+
+/// Show retained-tail limits, sample age and failures independently.
+fn log_header(logs: &LogSnapshot, follow: Span<'static>, matching: usize) -> Line<'static> {
+    let age = logs.sampled_at.map_or_else(
+        || "[UNAVAILABLE]".to_owned(),
+        |time| {
+            format!(
+                "[{}] {}s",
+                if time.elapsed().as_secs() > 5 {
+                    "STALE"
+                } else {
+                    "LIVE"
+                },
+                time.elapsed().as_secs()
+            )
+        },
+    );
+    let tail = if logs.truncated {
+        " [TAIL LIMITED]"
+    } else {
+        ""
+    };
+    let error = if logs.error.is_some() {
+        " [READ ERROR: retained]"
+    } else {
+        ""
+    };
+    Line::from(vec![
+        follow,
+        Span::raw(format!(
+            " Source {} · {} retained{tail} · {age}{error}",
+            super::telemetry::display_text(
+                logs.source
+                    .as_deref()
+                    .unwrap_or("waiting for first log file")
+            ),
+            format_number(u64::try_from(matching).unwrap_or(u64::MAX))
+        )),
+    ])
 }

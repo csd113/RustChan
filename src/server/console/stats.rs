@@ -25,12 +25,26 @@ pub struct ChanStats {
     pub online: usize,
     /// Board count.
     pub boards: i64,
-    /// Active thread count.
+    /// Total retained thread count, including archived threads.
     pub threads: i64,
     /// Post count.
     pub posts: i64,
-    /// Database file size in bytes.
+    /// Logical SQLite bytes (`page_count` times `page_size`), independent of WAL files.
     pub db_bytes: i64,
+    /// Last observed main database, WAL and SHM file sizes; -1 is unavailable.
+    pub db_files: [i64; 3],
+    /// Time of the most recent complete database file-size sample.
+    pub db_files_sampled_at: Option<Instant>,
+    /// Database footprint collection error, independent of query health.
+    pub db_files_error: Option<String>,
+    /// Upload-tree collection error; the last successful value is retained.
+    pub storage_error: Option<String>,
+    /// Whether final listener and database startup readiness was observed.
+    pub runtime_ready: bool,
+    /// Whether admission is blocked pending recovery.
+    pub recovery_blocked: bool,
+    /// Observed Tor lifecycle, publication and forwarding state.
+    pub tor: crate::detect::TorStatus,
     /// Upload-tree size in bytes.
     pub upload_bytes: i64,
     /// Last slow upload-tree sample, refreshed at most every thirty seconds.
@@ -65,11 +79,18 @@ impl Default for ChanStats {
             rps: 0.0,
             in_flight: 0,
             online: 0,
-            boards: 0,
-            threads: 0,
-            posts: 0,
-            db_bytes: 0,
-            upload_bytes: 0,
+            boards: -1,
+            threads: -1,
+            posts: -1,
+            db_bytes: -1,
+            db_files: [-1; 3],
+            db_files_sampled_at: None,
+            db_files_error: None,
+            storage_error: None,
+            runtime_ready: false,
+            recovery_blocked: false,
+            tor: crate::detect::TorStatus::default(),
+            upload_bytes: -1,
             storage_sampled_at: None,
             mem_bytes: 0,
             board_rows: Vec::new(),
@@ -92,10 +113,10 @@ pub struct Sampler {
     previous_requests: u64,
     /// Time of the previous request sample.
     previous_tick: Instant,
-    /// Most recent upload-tree byte count; -1 means unavailable.
-    upload_bytes: i64,
-    /// Time of the slow storage scan.
-    storage_sampled_at: Option<Instant>,
+    /// Most recent successful query values, retained across collection failures.
+    database: ChanStats,
+    /// Last successful operator snapshot, independent of database counters.
+    operator: super::telemetry::OperatorSnapshot,
     /// Bounded ten-second request intervals.
     history: super::history::TrafficHistory,
 }
@@ -108,8 +129,8 @@ impl Sampler {
             started,
             previous_requests: crate::server::REQUEST_COUNT.load(Ordering::Relaxed),
             previous_tick: Instant::now(),
-            upload_bytes: -1,
-            storage_sampled_at: None,
+            database: ChanStats::default(),
+            operator: super::telemetry::OperatorSnapshot::default(),
             history: super::history::TrafficHistory::default(),
         }
     }
@@ -126,7 +147,6 @@ impl Sampler {
         onion_address: Option<String>,
         http_port: u16,
     ) -> ChanStats {
-        let pool = &app.db;
         let job_queue = &app.job_queue;
         let uptime_secs = self.started.elapsed().as_secs();
         let now = Instant::now();
@@ -145,55 +165,60 @@ impl Sampler {
         let active_ffmpeg_videos = job_queue.active_video_count();
         let online = crate::server::ACTIVE_IPS.len();
 
-        let database = match read_database_stats(pool) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::warn!(target: "console", error = %error, "Console database metrics unavailable");
-                ChanStats {
-                    boards: -1,
-                    threads: -1,
-                    posts: -1,
-                    db_bytes: -1,
-                    collection_error: Some(
-                        "Database metrics are temporarily unavailable.".to_owned(),
+        // An isolated, read-only connection never occupies the application pool.
+        // SQLite VM work has a 200 ms budget shared by all queries in this sample.
+        let access = app.data_access.try_read();
+        let connection = access
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Data access suspended"))
+            .and_then(|_| telemetry_connection());
+        let database = match &connection {
+            Ok(connection) => read_database_stats(connection),
+            Err(error) => Err(anyhow::anyhow!("{error}")),
+        };
+        let collection_error = match database {
+            Ok(mut snapshot) => {
+                snapshot.sampled_at = Some(Instant::now());
+                self.database = snapshot;
+                None
+            }
+            Err(_) => Some("Database collection unavailable, suspended or over its 200ms budget; retaining the last successful values.".to_owned()),
+        };
+        match &connection {
+            Ok(connection) => {
+                match super::telemetry::OperatorSnapshot::read(connection) {
+                    Ok(mut operator) => {
+                        operator.sampled_at = Some(Instant::now());
+                        self.operator = operator;
+                    }
+                    Err(_) => self.operator.error = Some(
+                        "Task collection unavailable or over budget; retained values may be stale."
+                            .to_owned(),
                     ),
-                    ..ChanStats::default()
                 }
             }
-        };
-
-        let mut operator = super::telemetry::OperatorSnapshot::read(pool).unwrap_or_else(|error| {
-            tracing::warn!(target: "console", %error, "Operator snapshot unavailable");
-            super::telemetry::OperatorSnapshot {
-                error: Some(
-                    "Task and administrative data unavailable; press R to retry and inspect Logs."
-                        .to_owned(),
-                ),
-                ..super::telemetry::OperatorSnapshot::default()
+            Err(_) => {
+                self.operator.error =
+                    Some("Task collection suspended; retained values may be stale.".to_owned());
             }
-        });
-
+        }
+        let mut operator = self.operator.clone();
         operator.attach_runtime(app);
         self.history.observe(now, req_count);
-        if self
-            .storage_sampled_at
-            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(30))
-        {
-            self.upload_bytes = dir_size_bytes(&crate::config::CONFIG.upload_dir).unwrap_or(-1);
-            self.storage_sampled_at = Some(now);
-        }
 
         ChanStats {
             is_ready: true,
-            sampled_at: Some(now),
+            sampled_at: self.database.sampled_at,
+            collection_error,
             uptime_secs,
             http_port,
             req_count,
             rps,
             in_flight,
             online,
-            upload_bytes: self.upload_bytes,
-            storage_sampled_at: self.storage_sampled_at,
+            runtime_ready: app.runtime_ready.load(Ordering::Acquire),
+            recovery_blocked: app.data_access.is_blocked(),
+            tor: crate::detect::tor_status(),
             history: self.history.clone(),
             mem_bytes: process_rss_kb().cast_signed().saturating_mul(1_024),
             active_uploads,
@@ -201,21 +226,16 @@ impl Sampler {
             operator,
             spinner_tick: 0,
             onion_address,
-            ..database
+            ..self.database.clone()
         }
     }
 }
 
 /// Read all database metrics from one consistent snapshot, preserving failures.
-fn read_database_stats(pool: &crate::db::DbPool) -> anyhow::Result<ChanStats> {
-    let connection = pool.get()?;
+fn read_database_stats(connection: &rusqlite::Connection) -> anyhow::Result<ChanStats> {
     let transaction = connection.unchecked_transaction()?;
     let boards = transaction.query_row("SELECT COUNT(*) FROM boards", [], |row| row.get(0))?;
-    let threads = transaction.query_row(
-        "SELECT COUNT(*) FROM threads WHERE archived = 0",
-        [],
-        |row| row.get(0),
-    )?;
+    let threads = transaction.query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))?;
     let posts = transaction.query_row("SELECT COUNT(*) FROM posts", [], |row| row.get(0))?;
     let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
@@ -231,27 +251,67 @@ fn read_database_stats(pool: &crate::db::DbPool) -> anyhow::Result<ChanStats> {
     })
 }
 
+/// Open a bounded, read-only telemetry connection, never creating a database.
+fn telemetry_connection() -> anyhow::Result<rusqlite::Connection> {
+    let connection = rusqlite::Connection::open_with_flags(
+        &crate::config::CONFIG.database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_millis(50))?;
+    let started = Instant::now();
+    connection.progress_handler(
+        1000,
+        Some(move || started.elapsed() >= Duration::from_millis(200)),
+    )?;
+    Ok(connection)
+}
+
 /// Return a directory tree's total size as a signed display value.
-fn dir_size_bytes(path: &str) -> std::io::Result<i64> {
+pub(in crate::server) fn dir_size_bytes(path: &str) -> std::io::Result<i64> {
     walkdir_size(std::path::Path::new(path)).map(|size| i64::try_from(size).unwrap_or(i64::MAX))
 }
 
-/// Recursively sum regular-file sizes beneath a path.
+/// Sum a bounded upload-tree observation without following symlinks.
 fn walkdir_size(path: &std::path::Path) -> std::io::Result<u64> {
+    let started = Instant::now();
+    let mut pending = vec![path.to_path_buf()];
+    let mut visited = 0_u32;
     let mut total = 0_u64;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let size = if file_type.is_dir() {
-            walkdir_size(&entry.path())?
-        } else if file_type.is_file() {
-            entry.metadata()?.len()
-        } else {
-            0
-        }; // Do not follow symlinks outside the configured upload tree.
-        total = total.saturating_add(size);
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory)? {
+            visited = visited.saturating_add(1);
+            if visited > 100_000 || started.elapsed() >= Duration::from_secs(2) {
+                return Err(std::io::Error::other(
+                    "Upload-tree scan exceeded its entry/time budget",
+                ));
+            }
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() {
+                total = total.saturating_add(entry.metadata()?.len());
+            }
+        }
     }
     Ok(total)
+}
+
+/// Observe main/WAL/SHM bytes. Missing sidecars mean zero; a missing main file is unavailable.
+pub(in crate::server) fn database_file_sizes() -> std::io::Result<[i64; 3]> {
+    let path = &crate::config::CONFIG.database_path;
+    let mut sizes = [-1; 3];
+    for (index, suffix) in ["", "-wal", "-shm"].into_iter().enumerate() {
+        let bytes = match std::fs::metadata(format!("{path}{suffix}")) {
+            Ok(metadata) => i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+            Err(error) if index != 0 && error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error),
+        };
+        if let Some(size) = sizes.get_mut(index) {
+            *size = bytes;
+        }
+    }
+    Ok(sizes)
 }
 
 /// Read the process resident-set size in kibibytes when supported.

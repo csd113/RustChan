@@ -17,6 +17,129 @@ use tokio_util::sync::CancellationToken;
 use tor_cell::relaycell::msg::Connected;
 use tor_hsservice::{config::OnionServiceConfigBuilder, handle_rend_requests, HsId, StreamRequest};
 
+/// Explicit service lifecycle, independent of address and log text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TorPhase {
+    /// No service task has been started.
+    #[default]
+    NotStarted,
+    /// Tor support is disabled.
+    Disabled,
+    /// Downloading directory state and establishing circuits.
+    Bootstrapping,
+    /// Establishing introduction points and publishing a descriptor.
+    Publishing,
+    /// Arti reports satisfied introduction points and an up-to-date descriptor.
+    Published,
+    /// Publication is current but introduction-point health is degraded.
+    DegradedIntroduction,
+    /// Descriptor publication is degraded.
+    DegradedPublication,
+    /// Arti is recovering after an interruption.
+    Recovering,
+    /// Arti reports a broken service.
+    Failed,
+    /// A service lifecycle failed and restart is delayed.
+    Retrying,
+    /// Service task is stopped.
+    Stopped,
+    /// An unrecognized upstream state cannot establish health.
+    Unknown,
+}
+
+impl TorPhase {
+    /// Nonsecret label; a published descriptor does not verify client reachability.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotStarted => "NOT STARTED",
+            Self::Disabled => "DISABLED",
+            Self::Bootstrapping => "BOOTSTRAPPING",
+            Self::Publishing => "PUBLISHING",
+            Self::Published => "PUBLISHED",
+            Self::DegradedIntroduction => "DEGRADED: INTRODUCTION POINTS",
+            Self::DegradedPublication => "DEGRADED: PUBLICATION",
+            Self::Recovering => "RECOVERING",
+            Self::Failed => "FAILED",
+            Self::Retrying => "FAILED: RETRYING",
+            Self::Stopped => "STOPPED",
+            Self::Unknown => "UNKNOWN ARTI STATUS",
+        }
+    }
+    /// Whether publication/lifecycle observations currently require attention.
+    #[must_use]
+    pub const fn needs_attention(self) -> bool {
+        matches!(
+            self,
+            Self::DegradedIntroduction
+                | Self::DegradedPublication
+                | Self::Failed
+                | Self::Retrying
+                | Self::Unknown
+        )
+    }
+}
+
+/// Observed onion-service lifecycle; address availability never establishes health.
+#[derive(Clone, Copy, Debug)]
+pub struct TorStatus {
+    /// Arti publication/introduction state, or bootstrap/retry/shutdown phase.
+    pub phase: TorPhase,
+    /// Next retry time, when the task is in failure backoff.
+    pub retry_at: Option<Instant>,
+    /// Last successful forwarding connection in this process.
+    pub last_forwarded: Option<Instant>,
+    /// Last failed forwarding connection in this process.
+    pub last_forward_failure: Option<Instant>,
+}
+
+impl Default for TorStatus {
+    fn default() -> Self {
+        Self {
+            phase: TorPhase::NotStarted,
+            retry_at: None,
+            last_forwarded: None,
+            last_forward_failure: None,
+        }
+    }
+}
+
+/// Nonsecret operational observations, independent of the onion address.
+static STATUS: parking_lot::Mutex<TorStatus> = parking_lot::Mutex::new(TorStatus {
+    phase: TorPhase::Disabled,
+    retry_at: None,
+    last_forwarded: None,
+    last_forward_failure: None,
+});
+
+/// Return a cheap snapshot without retaining raw errors or service keys.
+#[must_use]
+pub fn tor_status() -> TorStatus {
+    *STATUS.lock()
+}
+
+/// Set lifecycle phase without discarding observed forwarding history.
+fn set_phase(phase: TorPhase, retry_at: Option<Instant>) {
+    let mut status = STATUS.lock();
+    status.phase = phase;
+    status.retry_at = retry_at;
+}
+
+/// Map Arti's authoritative introduction/publication state to explicit UI text.
+const fn publication_phase(state: tor_hsservice::status::State) -> TorPhase {
+    use tor_hsservice::status::State;
+    match state {
+        State::Shutdown => TorPhase::Stopped,
+        State::Bootstrapping => TorPhase::Publishing,
+        State::Running => TorPhase::Published,
+        State::DegradedReachable => TorPhase::DegradedIntroduction,
+        State::DegradedUnreachable => TorPhase::DegradedPublication,
+        State::Recovering => TorPhase::Recovering,
+        State::Broken => TorPhase::Failed,
+        _ => TorPhase::Unknown,
+    }
+}
+
 // Per-stream identity map
 // random pseudonymous token.
 //
@@ -81,8 +204,10 @@ pub fn detect_tor(
     cancel: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !enable_tor_support {
+        set_phase(TorPhase::Disabled, None);
         return None;
     }
+    set_phase(TorPhase::Bootstrapping, None);
 
     let data_dir = data_dir.to_path_buf();
 
@@ -99,12 +224,14 @@ pub fn detect_tor(
                 attempt = attempt.saturating_add(1),
                 "Starting Tor"
             );
+            set_phase(TorPhase::Bootstrapping, None);
             let run_start = Instant::now();
             let result = tokio::select! {
                 r = run_arti(data_dir.clone(), bind_port, Arc::clone(&onion_address)) => r,
                 () = cancel.cancelled() => {
                     tracing::info!(target: "rustchan::detect", "Tor: shutdown signal — exiting");
                     *onion_address.write().await = None;
+                    set_phase(TorPhase::Stopped, None);
                     return;
                 }
             };
@@ -126,11 +253,13 @@ pub fn detect_tor(
             *onion_address.write().await = None;
 
             let backoff = Duration::from_secs(30_u64.saturating_mul(1 << attempt.min(4)));
+            set_phase(TorPhase::Retrying, Instant::now().checked_add(backoff));
             tracing::warn!(target: "rustchan::detect", retry_in = ?backoff, "Tor: scheduling restart");
             tokio::select! {
                 () = tokio::time::sleep(backoff) => {}
                 () = cancel.cancelled() => {
                     tracing::info!(target: "rustchan::detect", "Tor: shutdown during backoff — exiting");
+                    set_phase(TorPhase::Stopped, None);
                     return;
                 }
             }
@@ -148,6 +277,7 @@ pub fn detect_tor(
 // Core Arti task
 #[expect(
     clippy::cognitive_complexity,
+    clippy::too_many_lines,
     reason = "the Tor bootstrap and onion-service lifecycle is a single fail-closed state machine"
 )]
 /// Runs one complete Arti client and onion-service lifecycle.
@@ -197,6 +327,7 @@ async fn run_arti(
             .map_err(|e| format!("Tor bootstrap failed: {e}"))?;
 
     tracing::info!(target: "rustchan::detect", "Tor: connected to the Tor network");
+    set_phase(TorPhase::Publishing, None);
 
     // Configurable nicknames distinguish instances that share Arti state.
     let onion_key_dir = crate::config::runtime_tor_hidden_service_keys_dir();
@@ -245,14 +376,23 @@ async fn run_arti(
         target: "rustchan::detect",
         local_target = %local_addr.as_ref(),
         max_streams,
-        "Tor: onion service ready and forwarding to local HTTP server"
+        "Tor: onion address available; publication is monitored separately"
     );
     publish_onion_address(&onion_name, &onion_address).await;
 
     let mut stream_requests = handle_rend_requests(rend_requests);
-
+    let mut status_events = onion_service.status_events();
+    set_phase(publication_phase(onion_service.status().state()), None);
     loop {
-        let next_request = stream_requests.next().await;
+        let next_request = tokio::select! {
+            request = stream_requests.next() => request,
+            status = status_events.next() => {
+                if let Some(status) = status {
+                    set_phase(publication_phase(status.state()), None);
+                } else { break; }
+                continue;
+            }
+        };
         let Some(stream_req) = next_request else {
             break;
         };
@@ -290,8 +430,8 @@ async fn run_arti(
 /// Activation logs omit the address at every level. The terminal dashboard,
 /// eligible TTY banner and admin panel display the full address from shared state.
 async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<String>>) {
-    tracing::debug!(target: "rustchan::detect", "Tor: hidden service active");
-    tracing::info!(target: "rustchan::detect", "Tor: hidden service active");
+    tracing::debug!(target: "rustchan::detect", "Tor: onion address available");
+    tracing::info!(target: "rustchan::detect", "Tor: onion address available; external reachability unverified");
 
     *onion_address.write().await = Some(onion_name.to_owned());
 
@@ -301,18 +441,7 @@ async fn publish_onion_address(onion_name: &str, onion_address: &RwLock<Option<S
     // the user is on a plain TTY without the TUI, print the full box as before.
     if crate::logging::is_tty() && !crate::logging::is_tui_active() {
         crate::logging::console_print_raw(&format!(
-            "\n\
-            ╔══════════════════════════════════════════════════════╗\n\
-            ║  TOR ONION SERVICE ACTIVE  ✓                         ║\n\
-            ╠══════════════════════════════════════════════════════╣\n\
-            ║  http://{onion:<44}║\n\
-            ║                                                      ║\n\
-            ║  Keys stored at:                                     ║\n\
-            ║    {keys:<50}║\n\
-            ║  Back up this directory to preserve your address.    ║\n\
-            ╚══════════════════════════════════════════════════════╝\n\n",
-            onion = onion_name,
-            keys = crate::config::runtime_tor_hidden_service_keys_dir().display(),
+            "\nOnion address: http://{onion_name}\nPublication pending; external reachability is unverified.\n\n"
         ));
     }
 }
@@ -331,6 +460,7 @@ fn spawn_tor_stream_proxy(
             if msg.contains("local TCP connect failed")
                 || msg.contains("timed out connecting to local HTTP server")
             {
+                STATUS.lock().last_forward_failure = Some(Instant::now());
                 tracing::error!(
                     target: "rustchan::detect",
                     error = %e,
@@ -359,6 +489,7 @@ async fn proxy_tor_stream(
         .await
         .map_err(|_error| "timed out connecting to local HTTP server")?
         .map_err(|e| format!("local TCP connect failed: {e}"))?;
+    STATUS.lock().last_forwarded = Some(Instant::now());
     // local address. axum's ConnectInfo sees this exact socket address as the
     // peer on the accepted connection, so a different loopback address cannot
     // impersonate the Tor proxy merely by reusing its source port.

@@ -98,7 +98,7 @@ const AUDIO_ACCEPT: &str =
 const VIDEO_ACCEPT: &str = "video/mp4,video/webm,video/x-matroska,video/matroska,.mp4,.webm,.mkv";
 /// MIME types and extensions accepted by the image input.
 const IMAGE_ACCEPT: &str =
-    "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif";
+    "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,image/bmp,image/x-ms-bmp,image/tiff,.jpg,.jpeg,.png,.gif,.webp,.heic,.heif,.bmp,.tif,.tiff";
 /// Maximum number of characters in a poll option.
 const POLL_OPTION_MAX_LENGTH: usize = 200;
 /// Maximum number of options in a poll.
@@ -200,7 +200,9 @@ fn single_upload_accept_and_hint(
 
     if board.allow_images {
         accept_parts.push(IMAGE_ACCEPT);
-        hint_parts.push(format!("jpg/png/gif/webp/heic · max {image_mb} MiB"));
+        hint_parts.push(format!(
+            "jpg/png/gif/webp/heic/bmp/tiff · max {image_mb} MiB"
+        ));
     }
     if board.allow_video {
         accept_parts.push(VIDEO_ACCEPT);
@@ -260,7 +262,7 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
               <div class="upload-secondary-panel">
                 <label class="upload-secondary-label" for="post-form-image-file">optional image</label>
                 <input type="file" id="post-form-image-file" name="image_file" data-onchange-check-size="1" accept="{IMAGE_ACCEPT}">
-                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic · max {image_mb} MiB · oversized images can auto-compress</span>
+                <span class="form-field-help">{audio_image_hint} · jpg/png/gif/webp/heic/bmp/tiff · max {image_mb} MiB · oversized images can auto-compress</span>
               </div>
             </details>"#
         )

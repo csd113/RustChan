@@ -1,53 +1,49 @@
-# RustChan Support
+# Get help with RustChan
 
-RustChan is self-hosted imageboard software written in Rust. This repository
-provides project documentation and issue tracking; it is not a hosted RustChan
-service or an operations help desk for independent instances.
+Start with [setup](SETUP.md) if you are downloading or running RustChan for the
+first time. For a specific task, use the [guide list](README.md#documentation).
+RustChan is software you run yourself; this repository is not a hosted service
+or an operations help desk for independent sites.
 
-## Start here
+## Report a project problem
 
-- Read [README.md](README.md) for the project overview and quick start.
-- Read [SETUP.md](SETUP.md) for installation, configuration, Tor, TLS, reverse
-  proxy, backup, update, and troubleshooting guidance.
-- Search existing issues before filing a new one.
-- Use the structured bug, feature, or documentation form when issue creation is
-  available to your account.
-- Read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
+Search [existing issues](https://github.com/csd113/RustChan/issues) first.
+If your problem is new, use **Report an issue** or a blank issue where available.
+The form asks for your version, platform, and what went wrong. It can also be
+used to explain a documentation problem or request.
 
-When requesting project help, include the RustChan version or commit, operating
-system and architecture, installation method, enabled Cargo features, relevant
-deployment configuration, exact reproduction steps, and sanitized logs. State
-whether the database, media processing, backup/restore, reverse proxy, TLS, Tor,
-public/admin UI, or moderation is involved.
+Include enough detail to reproduce the problem:
 
+- RustChan version or source commit, operating system, and processor type.
+- How you installed it: native download, Docker, or source build.
+- What you did, what you expected, and what happened instead.
+- Relevant settings and a short log excerpt, with private information removed.
+
+For technical problems, also mention custom Cargo features and whether the issue
+involves uploads, the database, backups, a proxy, HTTPS, Tor, or moderation. A
+small example using disposable data is more useful than a real database dump.
 There is no guaranteed response time or individual support entitlement.
 
-## Repository issues are not for
+## Keep private information out of reports
 
-Do not use GitHub issues for:
+Do not attach databases, backups, private posts/media, passwords, cookies, tokens,
+API keys, TLS keys, Tor identity keys, identifying logs, or sensitive configuration.
+For a possible security vulnerability, read [SECURITY.md](SECURITY.md) before
+posting anything publicly.
 
-- illegal content or links to it;
-- personal information, private posts, private media, or identifying logs;
-- credentials, cookies, tokens, API keys, TLS keys, onion private keys,
-  databases, backups, or sensitive instance configuration;
-- harassment reports, moderation appeals, ban disputes, takedown requests, or
-  other abuse reports concerning an independently operated RustChan site; or
-- vulnerability details that belong under [SECURITY.md](SECURITY.md).
+## Problems on someone else's site
 
-Contact the relevant site's operator for its rules, content, moderation, and
-abuse processes. The RustChan project does not operate, endorse, monitor, or
-control independent instances and cannot moderate them or recover their data.
+Contact that site's operator for content, rules, bans, appeals, harassment,
+takedowns, or other abuse reports. Do not post illegal content or links to it in
+project issues. The RustChan project does not operate, endorse, monitor, or
+control independent sites and cannot moderate them or recover their data.
 
-## Operator responsibility
+Operators are responsible for their content, moderation, users, infrastructure,
+network boundaries, secrets, backups, Tor identity, availability, and applicable
+law. RustChan does not guarantee anonymity, perfect security, legal compliance,
+uninterrupted service, or protection from a malicious operator.
 
-Each operator is responsible for their instance's laws, moderation rules,
-content, users, security, availability, backups, Tor/onion-service identity,
-network boundaries, and infrastructure. Running RustChan does not guarantee
-anonymity, perfect security, uninterrupted service, legal compliance, or
-protection against a malicious operator.
-
-For deployment-specific troubleshooting, reproduce the problem on a disposable
-local instance with synthetic data before posting. If the problem occurs only
-because of local permissions, proxy configuration, exposed credentials,
-firewalling, unsupported changes, or third-party services, the operator or that
-service's support channel is the appropriate source of help.
+For a deployment-specific problem, check permissions, firewall/proxy settings,
+and third-party services, then try to reproduce it locally with synthetic data.
+The operator or service provider may need to resolve configuration and
+infrastructure problems outside RustChan itself.

@@ -55,7 +55,11 @@ pub(crate) fn decode(input: &Path) -> Result<image::DynamicImage> {
 
 /// Inspect every coded tile before the decoder allocates its picture planes.
 fn preflight_item(context: &Context<'_>, item: u32) -> Result<u64> {
-    let tiles = if let Some((_, tiles)) = context.grid(item)? {
+    let properties = context.props(item)?;
+    let (width, height) = context.coded_size(item, &properties)?;
+    super::images::validate_dimensions(width, height)?;
+    let tiles = if let Some((grid, tiles)) = context.grid(item)? {
+        super::images::validate_dimensions(grid.output_width, grid.output_height)?;
         tiles
     } else {
         vec![item]
@@ -63,25 +67,11 @@ fn preflight_item(context: &Context<'_>, item: u32) -> Result<u64> {
     let mut area = 0_u64;
     ensure!(tiles.len() <= 4096, "HEIC has too many tiles");
     for tile in tiles {
-        let properties = context.props(tile)?;
-        let config = properties
+        let tile_properties = context.props(tile)?;
+        let config = tile_properties
             .hvcc
             .context("HEIC coded item has no HEVC configuration")?;
-        let mut largest = 0;
-        for array in &config.arrays {
-            if array.nal_type == heic_rs::props::hvcc::NAL_SPS {
-                for nal in &array.nals {
-                    let (width, height) = sps_dimensions(nal)?;
-                    super::images::validate_dimensions(width, height)?;
-                    largest = largest.max(
-                        u64::from(width)
-                            .checked_mul(u64::from(height))
-                            .context("HEIC tile area overflow")?,
-                    );
-                }
-            }
-        }
-        ensure!(largest > 0, "HEIC item has no sequence geometry");
+        let largest = preflight_arrays(&config.arrays)?;
         area = area
             .checked_add(largest)
             .context("HEIC coded area overflow")?;
@@ -91,6 +81,43 @@ fn preflight_item(context: &Context<'_>, item: u32) -> Result<u64> {
         );
     }
     Ok(area)
+}
+
+/// Check every entry, including duplicate SPS IDs that replace earlier entries.
+///
+/// heic-rs dispatches parameter sets using the actual NAL header, rather than
+/// the hvcC array type. Both must agree before any picture geometry is allocated.
+fn preflight_arrays(arrays: &[heic_rs::props::hvcc::NalArray<'_>]) -> Result<u64> {
+    let mut largest = 0;
+    for array in arrays {
+        for nal in &array.nals {
+            let header: [u8; 2] = nal
+                .get(..2)
+                .context("truncated HEIC NAL header")?
+                .try_into()?;
+            let [first, second] = header;
+            ensure!(
+                first & 0x80 == 0 && second & 7 != 0,
+                "invalid HEIC NAL header"
+            );
+            let actual_type = (first >> 1_i32) & 0x3f;
+            ensure!(
+                actual_type == array.nal_type,
+                "HEIC parameter-set type disagrees with its array"
+            );
+            if actual_type == heic_rs::props::hvcc::NAL_SPS {
+                let (width, height) = sps_dimensions(nal)?;
+                super::images::validate_dimensions(width, height)?;
+                largest = largest.max(
+                    u64::from(width)
+                        .checked_mul(u64::from(height))
+                        .context("HEIC tile area overflow")?,
+                );
+            }
+        }
+    }
+    ensure!(largest > 0, "HEIC item has no sequence geometry");
+    Ok(largest)
 }
 
 /// Inspect raw SPS dimensions, before cropping, to prevent forged `ispe` limits.
@@ -215,3 +242,7 @@ impl Bits<'_> {
             .context("HEIC sequence integer overflows")
     }
 }
+
+#[cfg(test)]
+#[path = "tests/heif.rs"]
+mod tests;

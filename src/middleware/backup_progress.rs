@@ -15,6 +15,8 @@ pub mod backup_phase {
 /// Shared atomic progress state for backup operations.
 #[derive(Debug)]
 pub struct BackupProgress {
+    /// Last automatic full-backup outcome and monotonic finish time in this process.
+    pub automatic_outcome: parking_lot::Mutex<Option<(bool, std::time::Instant)>>,
     /// Current backup phase code.
     pub phase: std::sync::atomic::AtomicU64,
     /// Number of files processed so far.
@@ -33,6 +35,7 @@ impl BackupProgress {
     pub const fn new() -> Self {
         use std::sync::atomic::AtomicU64;
         Self {
+            automatic_outcome: parking_lot::Mutex::new(None),
             phase: AtomicU64::new(backup_phase::IDLE),
             files_done: AtomicU64::new(0),
             files_total: AtomicU64::new(0),

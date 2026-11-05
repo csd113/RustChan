@@ -64,8 +64,8 @@ pub mod workers;
 
 use config::{generate_settings_file_if_missing, CONFIG};
 
-/// Relaunches a no-argument, non-interactive Linux or Windows invocation in a
-/// terminal when a supported terminal host is available.
+/// Relaunches only when the operator opts in with `CHAN_LAUNCH_TERMINAL=1`.
+/// Redirected service/CLI launches otherwise keep their original streams.
 ///
 /// # Errors
 ///
@@ -81,7 +81,8 @@ fn relaunch_in_terminal_if_needed() -> anyhow::Result<bool> {
     use std::io::IsTerminal as _;
 
     let launched_without_arguments = std::env::args_os().nth(1).is_none();
-    if !launched_without_arguments
+    if std::env::var_os("CHAN_LAUNCH_TERMINAL").as_deref() != Some(std::ffi::OsStr::new("1"))
+        || !launched_without_arguments
         || io::stdout().is_terminal()
         || std::env::var("RUSTCHAN_SPAWNED").is_ok()
     {
@@ -144,14 +145,13 @@ fn main() -> anyhow::Result<()> {
     // generation, or CONFIG access. Clap handles --help and --version here and
     // exits successfully without mutating runtime state.
     let cli = server::cli::Cli::parse();
+    server::console::capabilities::configure(cli.console, cli.ascii);
     config::configure_data_dir(cli.data_dir.as_deref())?;
     updates::check_legacy_state()?;
     config::configure_port_override(cli.port)?;
 
-    // Double-click / no-TTY guard
-    // When launched from a file manager (Linux) or Explorer (Windows), stdout
-    // is not a TTY. Re-attach to a terminal so the banner, first-run wizard,
-    // and keyboard console are visible to the user.
+    // Optional file-manager launcher. Redirection alone never implies consent
+    // to create a window or detach a service from its original streams.
     if relaunch_in_terminal_if_needed()? {
         return Ok(());
     }
