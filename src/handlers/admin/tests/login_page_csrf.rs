@@ -21,7 +21,7 @@ fn login_preferences_use_public_tokens_from_the_login_cookie() -> anyhow::Result
             .value();
         for error in [None, Some("Invalid username or password.")] {
             let page = crate::templates::admin_login_page(error, &csrf, &[], None);
-            let token = crate::templates::tests::check_action_page_csrf(
+            let token = crate::handlers::csrf_test_support::check_action_page_csrf(
                 &page,
                 raw,
                 ADMIN_LOGIN_CSRF_SCOPE,

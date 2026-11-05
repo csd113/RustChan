@@ -95,7 +95,9 @@ fn protected_setup_requires_its_own_authenticated_password_handoff() -> anyhow::
 
 #[test]
 fn setup_preferences_keep_public_tokens_through_review_and_errors() -> anyhow::Result<()> {
-    use crate::{db, middleware::SecureCookieContext, templates::tests::check_action_page_csrf};
+    use crate::{
+        db, handlers::csrf_test_support::check_action_page_csrf, middleware::SecureCookieContext,
+    };
     use anyhow::ensure;
     use axum::http::{header, HeaderValue};
 
