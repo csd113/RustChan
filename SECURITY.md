@@ -79,7 +79,11 @@ See [proxy guidance](docs/deployment.md#reverse-proxy).
 
 RustChan validates upload/backup paths, media, archive inventories, and restored
 database structures before publication. That does not mean every original upload
-has had metadata removed; see [media limits](docs/media-capabilities.md#image-and-metadata-limits).
+has had metadata removed. An optional per-board
+[strict metadata policy](docs/media-capabilities.md#strict-metadata-safe-uploads-optional)
+requires supported new images to be re-encoded and rejects unsupported or failed
+sanitization. It does not certify historical media, remove identifying image
+content or guarantee anonymity; see [media limits](docs/media-capabilities.md#image-and-metadata-limits).
 
 Keep recovery journals and snapshots after failed restores or older update
 transactions. For rollback, restore a complete stopped backup with its matching

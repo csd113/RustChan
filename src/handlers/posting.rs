@@ -220,6 +220,7 @@ fn revalidate_posting_policy(
                 board.allow_audio,
                 board.allow_pdf,
                 board.allow_any_files,
+                board.strict_metadata_uploads,
             ),
             (
                 board.max_image_size,

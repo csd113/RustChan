@@ -218,6 +218,9 @@ fn render_board_settings_card(
     <label><input type="checkbox" name="allow_audio" value="1"{audio_checked}> Allow audio</label>
     <label><input type="checkbox" name="allow_pdf" value="1"{pdf_checked}> Allow PDF uploads</label>
     {any_files_toggle}
+    <label><input type="checkbox" name="strict_metadata_uploads" value="1"{strict_metadata_checked}> Strict metadata-safe uploads
+      <span class="admin-quick-help">New uploads must be re-encoded to metadata-free WebP. Supports JPEG, static PNG, BMP, GIF and WebP animation; rejects other files and failed conversions. Overrides video, audio, PDF and any-file permissions. Existing files and backups are unchanged. Does not remove identifying image content or guarantee anonymity.</span>
+    </label>
     <label><input type="checkbox" name="allow_tripcodes" value="1"{tripcodes_checked}> Allow tripcodes</label>
     <label><input type="checkbox" name="allow_video_embeds" value="1"{video_embeds_checked}> Embed video links (YouTube)</label>
     <label><input type="checkbox" name="show_poster_ids" value="1"{poster_ids_checked}> Show thread-local poster IDs</label>
@@ -324,6 +327,7 @@ fn render_board_settings_card(
         },
         cooldown = board.post_cooldown_secs,
         captcha_checked = checked(board.allow_captcha),
+        strict_metadata_checked = checked(board.strict_metadata_uploads),
         images_checked = checked(board.allow_images),
         video_checked = checked(board.allow_video),
         audio_checked = checked(board.allow_audio),

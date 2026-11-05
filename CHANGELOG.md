@@ -7,6 +7,13 @@ working branch and are not part of the latest published download.
 
 ## Unreleased
 
+- Added opt-in per-board strict metadata-safe uploads. Supported images are
+  rebuilt as metadata-free WebP; unsupported formats and failed sanitization
+  are rejected without retaining originals. Covers posting slots, historical
+  deduplication and policy changes during posting, with transactional schema
+  upgrades and board-backup compatibility. Existing media is unchanged; see
+  the media guide for supported formats and privacy/rendering limits.
+
 - Reworked the documentation around downloading, running, and setting up a first
   site. Added separate administration and deployment guides, kept the README
   artwork, and clarified platform requirements and manual updates.

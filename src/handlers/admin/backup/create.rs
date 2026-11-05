@@ -1135,7 +1135,7 @@ pub(super) fn build_board_backup_manifest(
                      allow_images, allow_video, allow_audio, allow_pdf, allow_any_files, allow_tripcodes,
                      edit_window_secs, allow_editing, allow_self_delete, allow_archive, allow_video_embeds,
                      allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs,
-                     banner_mode, access_mode, access_password_hash, created_at
+                     banner_mode, access_mode, access_password_hash, created_at, strict_metadata_uploads
               FROM boards WHERE short_name = ?1",
             params![board_short],
             |row| {
@@ -1167,6 +1167,7 @@ pub(super) fn build_board_backup_manifest(
                     access_mode: row.get(24)?,
                     access_password_hash: row.get(25)?,
                     created_at: row.get(26)?,
+                    strict_metadata_uploads: row.get::<_, i64>(27)? != 0,
                 })
             },
         )

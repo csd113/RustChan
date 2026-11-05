@@ -13,7 +13,7 @@ const BOARD_SELECT_COLUMNS: &str = "id, display_order, short_name, name, descrip
     max_image_size, max_video_size, max_audio_size, max_pdf_size, allow_pdf, allow_any_files, allow_tripcodes, \
     edit_window_secs, allow_editing, allow_self_delete, allow_archive, \
     allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext, \
-    post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at";
+    post_cooldown_secs, default_theme, banner_mode, access_mode, access_password_hash, created_at, strict_metadata_uploads";
 /// Shared projection used to decode a board selected with alias `b`.
 const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_name, b.name, \
     b.description, b.nsfw, b.max_threads, b.max_archived_threads, b.bump_limit, \
@@ -21,7 +21,7 @@ const BOARD_SELECT_COLUMNS_WITH_ALIAS: &str = "b.id, b.display_order, b.short_na
     b.max_pdf_size, b.allow_pdf, b.allow_any_files, b.allow_tripcodes, b.edit_window_secs, b.allow_editing, \
     b.allow_self_delete, b.allow_archive, b.allow_video_embeds, b.allow_captcha, \
     b.show_poster_ids, b.collapse_greentext, b.post_cooldown_secs, \
-    b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at";
+    b.default_theme, b.banner_mode, b.access_mode, b.access_password_hash, b.created_at, b.strict_metadata_uploads";
 
 /// Decode a board from the shared board-column projection.
 pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
@@ -80,6 +80,7 @@ pub(super) fn map_board(row: &rusqlite::Row<'_>) -> rusqlite::Result<Board> {
         access_mode,
         access_password_hash: row.get(31)?,
         created_at: row.get(32)?,
+        strict_metadata_uploads: row.get::<_, i64>(33)? != 0,
     })
 }
 
@@ -708,6 +709,7 @@ pub fn update_board_settings(
     banner_mode: BoardBannerMode,
     access_mode: BoardAccessMode,
     access_password_hash: &str,
+    strict_metadata_uploads: bool,
 ) -> Result<()> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current_nsfw: bool = tx.query_row(
@@ -725,7 +727,7 @@ pub fn update_board_settings(
              allow_pdf=?14, allow_any_files=?15, allow_tripcodes=?16, edit_window_secs=?17,
              allow_editing=?18, allow_self_delete=?19, allow_archive=?20, allow_video_embeds=?21,
              allow_captcha=?22, show_poster_ids=?23, collapse_greentext=?24, post_cooldown_secs=?25,
-             default_theme=?26, banner_mode=?27, access_mode=?28, access_password_hash=?29
+             default_theme=?26, banner_mode=?27, access_mode=?28, access_password_hash=?29, strict_metadata_uploads=?31
              WHERE id=?30",
             params![
                 name,
@@ -758,6 +760,7 @@ pub fn update_board_settings(
                 access_mode.as_str(),
                 access_password_hash,
                 id,
+                i32::from(strict_metadata_uploads),
             ],
         )
     } else {
@@ -770,7 +773,7 @@ pub fn update_board_settings(
              allow_pdf=?15, allow_any_files=?16, allow_tripcodes=?17, edit_window_secs=?18,
              allow_editing=?19, allow_self_delete=?20, allow_archive=?21, allow_video_embeds=?22,
              allow_captcha=?23, show_poster_ids=?24, collapse_greentext=?25, post_cooldown_secs=?26,
-             default_theme=?27, banner_mode=?28, access_mode=?29, access_password_hash=?30
+             default_theme=?27, banner_mode=?28, access_mode=?29, access_password_hash=?30, strict_metadata_uploads=?32
              WHERE id=?31",
             params![
                 name,
@@ -804,6 +807,7 @@ pub fn update_board_settings(
                 access_mode.as_str(),
                 access_password_hash,
                 id,
+                i32::from(strict_metadata_uploads),
             ],
         )
     }

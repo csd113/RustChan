@@ -322,6 +322,9 @@ pub struct Board {
     pub allow_pdf: bool,
     /// Whether generic file uploads are accepted.
     pub allow_any_files: bool,
+    /// Require successful metadata-free image re-encoding for new uploads.
+    #[serde(default)]
+    pub strict_metadata_uploads: bool,
     /// Whether posters may use tripcodes.
     pub allow_tripcodes: bool,
     /// Whether posters may edit their posts.

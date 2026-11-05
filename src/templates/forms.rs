@@ -99,6 +99,8 @@ const VIDEO_ACCEPT: &str = "video/mp4,video/webm,video/x-matroska,video/matroska
 /// MIME types and extensions accepted by the image input.
 const IMAGE_ACCEPT: &str =
     "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,image/bmp,image/x-ms-bmp,image/tiff,.jpg,.jpeg,.png,.gif,.webp,.heic,.heif,.bmp,.tif,.tiff";
+/// Formats currently supported by the strict metadata sanitizer.
+const STRICT_IMAGE_ACCEPT: &str = "image/jpeg,image/png,image/gif,image/webp,image/bmp,image/x-ms-bmp,.jpg,.jpeg,.png,.gif,.webp,.bmp";
 /// Maximum number of characters in a poll option.
 const POLL_OPTION_MAX_LENGTH: usize = 200;
 /// Maximum number of options in a poll.
@@ -109,10 +111,8 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
 
     let uploads_enabled = board.allow_images
-        || board.allow_audio
-        || board.allow_video
-        || board.allow_pdf
-        || allow_any_files;
+        || (!board.strict_metadata_uploads
+            && (board.allow_audio || board.allow_video || board.allow_pdf || allow_any_files));
 
     UploadFormPolicy { uploads_enabled }
 }
@@ -195,6 +195,9 @@ fn single_upload_accept_and_hint(
     limits: UploadSizeLimitsMb,
 ) -> (String, String) {
     let (image_mb, video_mb, audio_mb, pdf_mb, generic_upload_mb) = limits;
+    if board.strict_metadata_uploads {
+        return (STRICT_IMAGE_ACCEPT.to_owned(), format!("Metadata-safe uploads required · jpg/static png/bmp/gif/webp · max {image_mb} MiB. Re-encoded as WebP; unsupported files and failed conversions are rejected. Does not remove identifying image content."));
+    }
     let mut accept_parts: Vec<&str> = Vec::new();
     let mut hint_parts: Vec<String> = Vec::new();
 
@@ -248,7 +251,8 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     let limits = upload_size_limits_mb(board);
     let (image_mb, _, audio_mb, _, _) = limits;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
-    let audio_image_dual_mode = board.allow_audio
+    let audio_image_dual_mode = !board.strict_metadata_uploads
+        && board.allow_audio
         && board.allow_images
         && !board.allow_video
         && !board.allow_pdf

@@ -51,6 +51,8 @@ pub struct SaveUploadOptions<'a> {
     pub ffmpeg_available: bool,
     /// Whether otherwise-unrecognized files may be stored as downloads.
     pub allow_any_files: bool,
+    /// Require successful metadata-free re-encoding; never retain original bytes.
+    pub strict_metadata_uploads: bool,
 }
 
 /// Derived storage and processing decisions for a validated upload.
@@ -441,6 +443,11 @@ fn validate_upload(
     }
     let image_budget =
         crate::media::image_budget::ImageBudget::new(u64::try_from(options.max_image_size)?);
+    if options.strict_metadata_uploads {
+        image_budget.check()?;
+        crate::media::strict::validate_format(input_path, &mime_type)?;
+        image_budget.check()?;
+    }
     if media_type == crate::models::MediaType::Image {
         image_budget.check()?;
         validate_decodable_image(input_path, &mime_type)?;
@@ -523,11 +530,18 @@ fn save_processed_upload(
     plan: &UploadPlan,
     file_id: &str,
 ) -> Result<UploadedFile> {
-    let processor_input = prepare_processor_input(input_path, &plan.dest_dir, &plan.mime_type)?;
-    let processor = crate::media::MediaProcessor::new_with_ffmpeg(options.ffmpeg_available);
+    // Strict re-encoding consumes the validated source directly. The ordinary
+    // best-effort JPEG normalization and its original-byte fallback stay outside
+    // this path; orientation is applied by the strict decoder before encoding.
+    let prepared = (!options.strict_metadata_uploads)
+        .then(|| prepare_processor_input(input_path, &plan.dest_dir, &plan.mime_type))
+        .transpose()?;
+    let processor_input = prepared.as_ref().map_or(input_path, |file| file.path());
+    let processor = crate::media::MediaProcessor::new_with_ffmpeg(options.ffmpeg_available)
+        .with_strict_metadata_uploads(options.strict_metadata_uploads);
     let processed = processor
         .process_upload_with_budget(
-            processor_input.path(),
+            processor_input,
             &plan.mime_type,
             &plan.dest_dir,
             file_id,

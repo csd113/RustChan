@@ -25,6 +25,16 @@ upload switch. Board settings control whether people can edit or delete their
 own posts; the global signed self-action window defaults to 60 seconds and can
 be set from 1 to 3,600 seconds.
 
+For an optional per-board privacy policy, enable **Strict metadata-safe uploads**
+in the board's upload settings. New attachments must be successfully rebuilt as
+WebP; unsupported formats and failed sanitization are rejected. The supported
+set is JPEG, static PNG, BMP, GIF and WebP. Video, audio, documents, APNG,
+TIFF and HEIC/HEIF are rejected while it is enabled, even if their upload
+permissions are checked. Existing media is unchanged. It does not remove
+identifying image content or guarantee anonymity. Read the
+[precise scope and tradeoffs](media-capabilities.md#strict-metadata-safe-uploads-optional)
+before enabling it.
+
 ## Banners and appearance
 
 Upload a supported bitmap such as PNG, JPEG, GIF, or WebP. Banners must have
