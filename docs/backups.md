@@ -1,52 +1,111 @@
-# Backup and restore safety
+# Back up and restore your site
 
-Saved full-site backups are published as verified only after checking their
-payload checksums, database baseline, restored post bodies, and referenced media.
-Automatic retention counts usable full-site backups independently of board
-exports and leaves incomplete or damaged evidence available for inspection.
-Pre-maintenance snapshots remain evidence of the original database, including
-damage that the repair operation is intended to fix.
+A backup is a copy you can use if data is lost or an update goes wrong. Start
+with **Backups** in the admin panel, and keep an independent copy away from the
+running site. Test a restore on a disposable installation before relying on it.
 
-Backup and restore drain normal requests, background maintenance, and media jobs
-before accessing live state exclusively. Normal requests receive HTTP 503 during
-that exclusive phase. The drain has a two-minute deadline; an operation fails
-without changing live data if existing work cannot finish in time. Uploads are
-received before this exclusive phase. The authenticated backup progress endpoint
-remains available. Blocking work retains its access if the client disconnects.
+[All guides](../README.md#documentation) · [Updates](software-updates.md) · [Docker backups](containers.md#backups)
 
-Local archive uploads are limited to 8 GiB of uploaded data and 8 GiB of extracted
-payload. Transfer conversion enforces the same cumulative extraction budget.
-Legacy ZIP downloads must fit this restore budget. Individual board exports are limited to a 64 MiB JSON manifest; larger boards can still be recovered through a full-site restore. For larger sites, use a saved
-directory or split-ZIP backup and **Restore saved backup**: its extraction budget
-comes from the verified inventory, rather than the local-upload limit. Restore
-also needs free space for the converted archive, staged files, and live database
-safety snapshot; an I/O failure aborts without publishing an incomplete backup.
+## Choose a backup
+
+| Need | Use |
+| --- | --- |
+| Save site content and settings | A full-site backup in the admin panel |
+| Export or restore one board | A board backup, or extract/restore that board from a saved full backup |
+| Recover an entire installation or roll back an upgrade | A complete stopped filesystem copy plus its matching executable or container image |
+
+In the admin panel, choose **Save to server** for a saved full backup. You can
+also download an archive and schedule automatic full backups there. Review the
+retention count and whether to include Tor identity keys. Those keys are private.
+For restore, choose a saved backup or upload a supported archive from your computer.
+Read the selected operation's scope before confirming: a full restore replaces
+site data.
+
+Full application backups include the database, settings, managed media and
+appearance assets, and optionally Tor keys. They do **not** replace a full copy
+of TLS/runtime state and every custom external path. Board backups do not
+preserve the site's Tor identity.
+
+## Make a complete filesystem copy
+
+1. Identify the executable, data directory, and any custom database, media,
+   backup, certificate, or other persistent paths.
+2. Stop RustChan normally and confirm it has exited.
+3. Copy the **whole data directory**, including `chan.db`, any WAL/SHM sidecars,
+   settings, boards, backups, logs, runtime/Tor/TLS state, and older recovery files.
+   Copy external persistent paths too, preserving ownership and private permissions.
+4. Keep the matching executable or image revision with the backup record.
+5. Start the site again and check it.
+
+Never copy only `chan.db` while the site is running. SQLite may have committed
+changes in its WAL file, and media files can be changing at the same time.
+Use the [container example](containers.md#backups) for a Docker volume.
+
+## Backup storage and retention
+
+Change **Admin → Backups → backup storage directory**, or `backup_directory` in
+`settings.toml`, then restart. `CHAN_BACKUP_DIRECTORY` overrides the file.
+Existing backups stay in the old location; the panel lists only the active
+location. Changing the path back makes existing backups there visible again.
+
+Use a dedicated writable directory where RustChan can set private permissions.
+Mount external storage before startup. In Docker, paths outside `/data` need
+their own persistent mount. A copy on the same disk is not protection against
+losing that disk.
+
+Automatic retention counts usable full-site backups separately from board
+exports. Incomplete or damaged backups remain available for inspection.
+Pre-maintenance snapshots preserve the original database, including damage the
+repair operation is meant to fix.
+
+## Limits and temporary downtime
+
+During the exclusive part of a backup or restore, normal requests return
+HTTP 503. RustChan waits up to two minutes for requests, maintenance, and media
+jobs to finish; if they cannot drain, the operation fails without changing live
+data. Archive uploads arrive before this phase. Authenticated backup progress
+remains available, and a disconnected browser does not release active blocking work.
+
+Local archive uploads allow at most **8 GiB uploaded and 8 GiB extracted**.
+Transfer conversion shares the extraction budget, and legacy ZIP downloads must
+fit the restore budget. Board exports have a 64 MiB JSON manifest limit; larger
+boards can still be recovered through a full-site restore.
+
+For larger sites, use a saved directory or split-ZIP backup and **Restore saved
+backup**. Its extraction budget comes from its verified inventory. Allow extra
+disk space for archive conversion, staged files, and a live-database safety copy.
+An I/O failure must not publish an incomplete backup.
+
+Saved full backups are marked verified after payload checksum, database,
+restored-post-body, and referenced-media checks. These checks do not replace an
+independent recovery test.
 
 ## Interrupted restore recovery
 
-Before replacing live state, restore syncs its staging files and a private
-database safety snapshot, then writes `runtime/restore-recovery.json` under the
-data directory. The record identifies the pending filesystem operation and the
-safety snapshot. Filesystem swaps persist their directory renames before
-discarding displaced files.
+If a restore fails, **preserve the data and recovery files**. Do not delete them
+to make startup continue. Restart normally once and read the recovery result.
+If startup still refuses, stop and preserve the complete directory for diagnosis.
 
-If database rollback or filesystem completion fails, RustChan retains recovery
-evidence and closes live-state admission. Restart attempts the journaled swap
-before starting requests or media workers. If recovery succeeds, startup verifies
-the database before clearing the record. If the record has no matching pending
-restore, or reconciliation fails, startup stops and reports the retained snapshot
-location for manual recovery. Successful startup recovery retains that snapshot
-for inspection.
+Before replacing live data, RustChan syncs staged files and a private database
+safety snapshot, then writes `runtime/restore-recovery.json`. That record points
+to the pending filesystem operation and snapshot. Directory swaps are persisted
+before displaced files are discarded.
 
-For manual recovery, stop RustChan and preserve the complete data directory,
-the recovery record, the indicated database snapshot and any sidecars, and the
-staged/displaced directories named in `pending_fs_ops`. Reconcile the database
-and its matching media together before clearing the recovery record. Removing
-the record alone does not complete a restore.
+If database rollback or filesystem completion fails, live work is blocked.
+Startup attempts the recorded swap before accepting requests or media jobs,
+verifies the database, and then clears the record. It retains a recovered safety
+snapshot for inspection. A missing matching operation or failed reconciliation
+stops startup and reports the snapshot location.
 
-## Focused regression checks
+Manual recovery needs the recovery record, indicated database snapshot and
+sidecars, and the staged/displaced directories recorded in `pending_fs_ops`.
+Restore the database and matching media together before clearing the record;
+removing the record alone does not finish a restore. See the
+[database guide](sqlite-engineering.md#backup-and-recovery) for the underlying model.
 
-`cargo test --test backup_regressions --all-features` checks cancellation-safe
-draining, failed-recovery admission, streaming budgets, retained rollback files,
-retention selection, staging cleanup, and interrupted swap replay using small
-temporary fixtures through a dedicated integration target.
+## Developer checks
+
+`cargo test --locked --test backup_regressions --all-features` covers
+cancellation-safe draining, blocked access after failed recovery, streaming
+budgets, retained rollback files, retention selection, staging cleanup, and
+interrupted swap replay with small temporary fixtures.

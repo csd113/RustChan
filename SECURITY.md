@@ -1,129 +1,118 @@
-# RustChan Security Policy
+# RustChan security
 
-RustChan accepts responsible reports about security defects in this repository.
-This policy does not make the project responsible for independently operated
-RustChan instances.
+Keep administrator credentials, site data, backups, TLS keys, and Tor identity
+keys private. For public hosting, read the [deployment guide](docs/deployment.md).
+If you believe you found a security bug, do not post sensitive details publicly.
 
-## Supported versions
-
-RustChan does not currently publish a fixed security-support window or response
-timeline. Identify the exact release, commit, and deployment configuration you
-tested. Maintainers will assess the current tree and affected releases case by
-case without guaranteeing remediation or release dates.
-
-## What to report
-
-A security report should describe a defect in RustChan code or project-owned
-configuration that can affect confidentiality, integrity, authorization, or
-availability. Examples include:
-
-- authentication, session, CSRF, authorization, or admin-boundary bypasses;
-- unsafe upload, media-processing, path, archive, backup, restore, or database
-  behavior;
-- disclosure or replacement of credentials, database contents, private media,
-  backup material, or Tor/onion-service identity keys;
-- request parsing, reverse-proxy, TLS, or Tor defects with a concrete
-  security impact;
-- remote code execution, injection, traversal, cross-site scripting, or
-  meaningful denial of service; and
-- dependency vulnerabilities that are reachable through RustChan's supported
-  build or runtime behavior.
-
-The following are generally not RustChan vulnerability reports:
-
-- operator misconfiguration, exposed admin credentials, insecure proxy rules,
-  missing backups, unsafe file permissions, or unsupported modifications;
-- illegal content, harassment, moderation decisions, or abuse occurring only
-  on an independently operated site;
-- claims that rely on a malicious operator controlling their own server; or
-- general hardening suggestions without a demonstrated RustChan defect.
-
-Operators remain responsible for their instances, applicable law, moderation,
-content, secrets, backups, Tor identity, network boundaries, and infrastructure.
-RustChan does not promise anonymity, perfect security, uninterrupted
-availability, legal compliance, or protection from a malicious operator.
-
-## Operational security
-
-Run RustChan as an unprivileged account and keep configuration, databases,
-backups, TLS keys, and Tor identity private. Administrator accounts have full
-administrative privilege; the project has no separate limited moderator role.
-Passwords use Argon2id, client identities are hashed, and administrator actions
-require authenticated sessions with scoped signed CSRF and origin checks. These
-controls do not prevent an operator from observing or modifying their own site.
-
-Public deployments need HTTPS and a protected backend. Trust forwarded client
-headers only from configured proxy CIDRs. The application rejects
-`Transfer-Encoding`; proxies must dechunk bodies and forward `Content-Length`.
-Keep detailed readiness and metrics behind a trusted scrape/network boundary.
-See [deployment guidance](SETUP.md#reverse-proxy-notes).
-
-Upload/backup paths, media content, archive inventories, and restored database
-structures are validated before publication. Preserve recovery journals and
-snapshots after a failed restore/update. Use complete stopped data backups and
-matching executables for rollback; see [software updates](docs/software-updates.md).
-Application backups do not include every runtime or external persistent path.
-
-Request, socket, identity-table, search, and media-work bounds reduce resource
-abuse but do not guarantee availability against distributed traffic. Per-client
-fixed windows reset on process restart; shared NAT and Tor identities affect
-fairness. Search deadlines are cooperative and can be exceeded between SQLite
-checkpoints. Native media libraries run in-process with no process sandbox or
-universal forcible cancellation. There is no universal disk quota or hard log
-byte-retention ceiling: monitor storage, job queues, and retention policies.
-Catalog/preference collections cap at 1,000 threads; oversized legacy boards
-still have direct thread and index navigation. Current preview limits are in
-[media capabilities](docs/media-capabilities.md).
-
-Cargo dependency advisory exceptions are maintained in
-[deny.toml](deny.toml) and [.cargo/audit.toml](.cargo/audit.toml). Re-review the
-Arti-related RSA vulnerability and `paste` maintenance exceptions on Arti
-upgrades; do not treat an ignored advisory as permanently resolved. FFmpeg and
-the host/container environment need independent patch maintenance. Version checks
-provide official release links; operators verify downloads and perform upgrades
-with complete stopped backups. See [software updates](docs/software-updates.md).
+[All guides](README.md#documentation) · [Support](SUPPORT.md) · [Backups](docs/backups.md)
 
 ## Private reporting status
 
-GitHub private vulnerability reporting is currently disabled for this
-repository, and the project publishes no security email address or other
-verified private inbound channel. Consequently, there is currently no safe
-project-controlled way for an outside reporter to transmit sensitive
-vulnerability details.
+As checked on 2026-11-05, GitHub private vulnerability reporting is disabled for
+this repository. The project publishes no verified security email or other
+private inbound channel. There is currently no project-controlled private route
+for an outside reporter to send sensitive vulnerability details.
 
-Do not open a public issue, discussion, pull request, or commit containing a
-vulnerability, exploit, credentials, private keys, database contents, private
-media, onion private keys, IP addresses, or identifying instance data. Preserve
-the report privately and check this file and the repository Security page for a
-future private channel.
+Keep your report private and check this policy and the
+[repository Security page](https://github.com/csd113/RustChan/security) for a
+future private channel. Do not put a vulnerability, exploit, credentials, keys,
+database contents, private media, IP addresses, or identifying site data in a
+public issue, discussion, PR, or commit.
 
-**Maintainer action item:** enable GitHub private vulnerability reporting or
-publish a verified private security contact, then replace this section with the
-exact reporting instructions.
+Maintainers need to enable GitHub private reporting or publish a verified private
+contact, then update these instructions. This policy does not promise a fixed
+security-support window, response time, remediation date, or release date.
+Reports are assessed against the current tree and affected releases case by case.
 
-Once a private channel is available, include:
+## What to report
 
-- the affected RustChan version or commit;
-- operating system, architecture, installation method, enabled Cargo features,
-  and relevant reverse-proxy, TLS, Tor, database, or media-toolchain
-  configuration;
-- minimal, deterministic reproduction steps;
-- expected behavior, actual behavior, and security impact;
-- whether public posting, admin access, moderation, media, backups/restores,
-  storage, or Tor identity is involved; and
-- sanitized logs, requests, stack traces, or a minimal proof of concept.
+Report a defect in RustChan code or project-owned configuration with a concrete
+security impact. Examples include:
 
-Before transmission, remove or replace all credentials, tokens, cookies,
-passwords, API keys, TLS keys, onion private keys, IP addresses, database
-contents, private posts or media, hostnames, and identifying information. Use a
-disposable local instance and synthetic data whenever possible. Do not probe a
-site you do not own or lack permission to test.
+- Authentication, session, CSRF, authorization, or admin-boundary bypasses.
+- Unsafe uploads, media processing, paths, archives, backups, restores, or database operations.
+- Exposure or replacement of credentials, private content, backups, or Tor identity keys.
+- Request parsing, proxy, HTTPS, or Tor defects affecting confidentiality, integrity, or availability.
+- Injection, traversal, cross-site scripting, remote code execution, or meaningful denial of service.
+- Dependency vulnerabilities reachable through a supported RustChan build or runtime path.
+
+Operator misconfiguration, exposed credentials, unsafe proxy rules/permissions,
+missing backups, unsupported changes, and a malicious operator controlling their
+own server are generally outside that scope. So are content or moderation disputes
+on independent sites and hardening suggestions without a demonstrated defect.
+
+### Prepare a private report
+
+Once a verified private channel exists, include the affected version/commit,
+platform, installation method, relevant features/configuration, reproducible
+steps, expected and actual results, and security impact. Explain which part of
+the system is affected and include a minimal proof of concept or sanitized logs
+when useful.
+
+Use a disposable local installation and synthetic data. Remove credentials,
+tokens, cookies, passwords, API keys, TLS/Tor keys, IP addresses, database contents,
+private posts/media, hostnames, and other identifying information before sending.
+Do not probe a site without the owner's permission.
+
+## Operational security
+
+The following is a reference for operators. RustChan's protections do not promise
+anonymity, perfect security, uninterrupted availability, legal compliance, or
+protection from an operator who controls the server. Operators remain responsible
+for their instances, moderation, content, infrastructure, backups, and secrets.
+
+### Accounts and network access
+
+Run as an unprivileged account. Administrators have full privilege; there is no
+limited moderator role. Passwords use Argon2id, client identities are hashed,
+and admin actions require authenticated sessions with scoped signed CSRF and
+origin checks. These controls do not prevent operators from observing or changing
+their own site. Keep the generated cookie secret stable and private.
+
+Public web deployments need HTTPS and a protected backend. Trust forwarded client
+headers only from configured proxy CIDRs. Proxies must remove chunked transfer
+encoding and forward `Content-Length`; the app rejects `Transfer-Encoding`.
+Keep detailed readiness and metrics behind a trusted monitoring boundary.
+See [proxy guidance](docs/deployment.md#reverse-proxy).
+
+### Files and recovery
+
+RustChan validates upload/backup paths, media, archive inventories, and restored
+database structures before publication. That does not mean every original upload
+has had metadata removed; see [media limits](docs/media-capabilities.md#image-and-metadata-limits).
+
+Keep recovery journals and snapshots after failed restores or older update
+transactions. For rollback, restore a complete stopped backup with its matching
+executable. Application backups omit some runtime/external persistent paths;
+see [backups](docs/backups.md) and [updates](docs/software-updates.md).
+
+### Resource limits
+
+Request, socket, client-identity-table, search, and media-work bounds reduce abuse;
+they do not guarantee availability under distributed traffic. Per-client fixed
+windows reset on restart. Shared NAT and Tor identities affect fairness.
+Search deadlines are cooperative and can be exceeded between SQLite checkpoints.
+
+Native media libraries run in-process without a process sandbox or universal
+forced cancellation. There is no universal disk quota or hard log-byte retention
+ceiling. Monitor disk space, queues, and retention. Catalog/preference collections
+cap at 1,000 threads; oversized legacy boards still have direct thread and index
+navigation. See [media resource boundaries](docs/media-capabilities.md#resource-boundaries).
+
+### Dependencies and updates
+
+Advisory exceptions live in [deny.toml](deny.toml) and [.cargo/audit.toml](.cargo/audit.toml).
+Recheck the Arti-related RSA vulnerability and `paste` maintenance exceptions
+when upgrading Arti. An ignored advisory is not a permanent resolution. Patch
+FFmpeg and the host/container environment independently.
+
+The admin update checker supplies official release links. Operators verify the
+download and perform upgrades with complete stopped backups. It does not install
+or restart the app.
 
 ## Public follow-up
 
-After a report is resolved or disclosure is coordinated, a sanitized public
-issue or pull request may be appropriate. Public material must not expose a
-working exploit against unfixed deployments or reveal operator or user data.
-Maintainers may credit reporters, publish an advisory, or request additional
-validation, but this policy does not promise a particular disclosure process or
-timeline.
+After resolution or coordinated disclosure, a sanitized public issue or PR may
+be appropriate. Do not expose a working exploit against unfixed deployments or
+operator/user data. Maintainers may credit reporters, publish an advisory, or
+request more validation; no particular disclosure process or timeline is promised.

@@ -1,39 +1,22 @@
-## Summary
+## What changed?
 
-<!-- What problem does this solve, and why is this approach appropriate? -->
-
-## Impact
-
-<!--
-List affected surfaces: public UI, admin UI, storage/schema, media, moderation,
-backup/restore, TLS/proxy, Tor, deployment, or documentation.
-State "None" where appropriate.
--->
+<!-- Explain the problem and resulting behavior. Link the issue if there is one. -->
 
 ## Validation
 
-<!-- List exact validation commands run and results. -->
+<!-- List the checks you ran and their results. Mention any that remain blocked. -->
+
+## Operator impact
+
+<!-- Note migrations, compatibility concerns, configuration changes, or deployment steps. Write "None" if there are none. -->
 
 ## Checklist
 
-- [ ] This change is narrowly scoped and preserves unrelated behavior.
-- [ ] I have not included credentials, private keys, databases, backups, logs,
-      private media, personal information, sensitive instance data, runtime
-      data, or large generated artifacts.
-- [ ] Any new test protects essential behavior or a confirmed regression; its
-      failure, need, maintenance cost, execution cost, and subsystem discovery
-      wiring are explained.
-- [ ] Formatting, Clippy, builds, and applicable disposable runtime smoke checks
-      were run.
-- [ ] Documentation and the top `CHANGELOG.md` section were updated when
-      behavior, configuration, deployment, or operator expectations changed.
-- [ ] Schema changes use a forward migration and cover fresh, upgrade, failure,
-      and backup/restore behavior where applicable.
-- [ ] UI changes preserve route names, IDs, form fields, JS/CSS hooks, and no-JS
-      fallbacks unless the change intentionally updates them.
-- [ ] Security-sensitive details have been coordinated under `SECURITY.md` and
-      are safe to publish.
-
-## Related issue
-
-<!-- Use "Closes #123" when appropriate. -->
+- [ ] The change is focused and preserves unrelated work and behavior.
+- [ ] No secrets, private content, runtime data, or generated evidence are included.
+- [ ] I ran the applicable checks in CONTRIBUTING.md (documentation checks for docs-only work).
+- [ ] I updated the relevant guide and Unreleased changelog when needed.
+- [ ] Any new test meets the essential-value policy in CONTRIBUTING.md, with its need and cost explained.
+- [ ] Any schema change has a forward migration and appropriate recovery validation.
+- [ ] UI changes preserve routes, form/element IDs, JS/CSS hooks, and no-JS behavior unless intentionally changed.
+- [ ] Any security-sensitive details have been coordinated under SECURITY.md and are safe to publish.
