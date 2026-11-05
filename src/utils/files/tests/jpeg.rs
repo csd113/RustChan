@@ -81,6 +81,11 @@ fn jpeg_pixels_orientation_and_private_metadata() -> Result<()> {
             dir.path(),
             250,
         )?;
+        ensure!(
+            processed.was_converted && processed.mime_type == "image/webp",
+            "JPEG conversion fell back for orientation {orientation}: {}",
+            processed.mime_type
+        );
         let output = image::open(processed.file_path)?.into_rgba8();
         ensure!(
             output.pixels().copied().eq(expected.iter().copied()),

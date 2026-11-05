@@ -124,8 +124,10 @@ fn convert_to_webp(
     budget: &ImageBudget,
 ) -> Result<ConversionResult> {
     let output = output_dir.join(format!("{file_stem}.webp"));
-    let temporary = tempfile::NamedTempFile::new_in(output_dir)?;
-    let tmp_out = temporary.path();
+    // The encoder replaces this path atomically. Keep path cleanup without an
+    // open destination handle: tempfile's Windows replacement rejects it.
+    let temporary = tempfile::NamedTempFile::new_in(output_dir)?.into_temp_path();
+    let tmp_out = temporary.as_ref();
 
     let conversion = images::image_to_webp_with_budget(input, tmp_out, None, budget);
     match conversion {
@@ -171,8 +173,9 @@ fn convert_png_if_smaller(
     budget: &ImageBudget,
 ) -> Result<ConversionResult> {
     let webp_path = output_dir.join(format!("{file_stem}.webp"));
-    let temporary = tempfile::NamedTempFile::new_in(output_dir)?;
-    let tmp_webp = temporary.path();
+    // Close the reservation handle before the encoder atomically replaces it.
+    let temporary = tempfile::NamedTempFile::new_in(output_dir)?.into_temp_path();
+    let tmp_webp = temporary.as_ref();
 
     // Try conversion first
     let conversion = images::image_to_webp_with_budget(input, tmp_webp, None, budget);
@@ -289,3 +292,7 @@ fn file_size(path: &Path) -> Result<u64> {
         .map(|m| m.len())
         .with_context(|| format!("failed to stat {}", path.display()))
 }
+
+#[cfg(test)]
+#[path = "tests/convert.rs"]
+mod tests;
