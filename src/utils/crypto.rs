@@ -201,6 +201,26 @@ pub fn make_scoped_csrf_form_token(raw_token: &str, secret: &str, scope: &str) -
     )
 }
 
+/// Separate action and public form tokens for pages with shared preferences controls.
+#[derive(Debug)]
+pub struct ActionPageCsrf {
+    /// Token restricted to the page's login or setup action.
+    pub action: String,
+    /// Public token for the shared layout's preferences forms.
+    pub preferences: String,
+}
+
+impl ActionPageCsrf {
+    /// Sign both form tokens from the same browser cookie without mixing their scopes.
+    #[must_use]
+    pub fn new(raw_token: &str, secret: &str, scope: &str) -> Self {
+        Self {
+            action: make_scoped_csrf_form_token(raw_token, secret, scope),
+            preferences: make_csrf_form_token(raw_token, secret),
+        }
+    }
+}
+
 /// Hash an IP address with a secret salt. Output is a 64-char hex string.
 ///
 /// The salt prevents rainbow-table attacks if the DB is leaked.

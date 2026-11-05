@@ -12,7 +12,7 @@ use super::{
 /// Renders the administrator login form and an optional authentication error.
 pub fn admin_login_page(
     error: Option<&str>,
-    csrf_token: &str,
+    csrf: &crate::utils::crypto::ActionPageCsrf,
     boards: &[Board],
     current_theme: Option<&str>,
 ) -> String {
@@ -46,13 +46,13 @@ pub fn admin_login_page(
 </form>
 </div>"#,
         err = err_html,
-        csrf = escape_html(csrf_token),
+        csrf = escape_html(&csrf.action),
     );
     base_layout(
         "admin login",
         None,
         &body,
-        csrf_token,
+        &csrf.preferences,
         boards,
         current_theme,
         None,

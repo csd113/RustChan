@@ -564,7 +564,7 @@ fn ensure_setup_csrf(
     jar: CookieJar,
     headers: &HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
-) -> (CookieJar, String) {
+) -> (CookieJar, crypto::ActionPageCsrf) {
     let token = jar
         .get("csrf_token")
         .map(|cookie| cookie.value().to_owned())
@@ -580,7 +580,7 @@ fn ensure_setup_csrf(
     ));
     (
         jar.add(cookie),
-        crypto::make_scoped_csrf_form_token(&token, &CONFIG.cookie_secret, SETUP_CSRF_SCOPE),
+        crypto::ActionPageCsrf::new(&token, &CONFIG.cookie_secret, SETUP_CSRF_SCOPE),
     )
 }
 
@@ -660,7 +660,7 @@ pub(in crate::server) async fn setup_get(
         &form,
         &[],
         request_transport_warning(&headers, secure_context).as_deref(),
-        &state,
+        state.ffmpeg_available,
         current_theme.as_deref(),
     );
     Ok((jar, Html(body)).into_response())
@@ -695,7 +695,7 @@ pub(in crate::server) async fn setup_review(
                         &form,
                         &errors,
                         request_transport_warning(&headers, secure_context).as_deref(),
-                        &state,
+                        state.ffmpeg_available,
                         current_theme.as_deref(),
                     )),
                 ),
@@ -1129,12 +1129,12 @@ fn request_transport_warning(
     reason = "the function renders one ordered wizard form whose field names and fallback values are coupled"
 )]
 fn setup_form_page(
-    csrf: &str,
+    csrf: &crypto::ActionPageCsrf,
     state: db::SetupState,
     form: &SetupWizardForm,
     errors: &[String],
     transport_warning: Option<&str>,
-    app_state: &AppState,
+    ffmpeg_available: bool,
     current_theme: Option<&str>,
 ) -> String {
     let mut alerts = String::new();
@@ -1173,7 +1173,7 @@ fn setup_form_page(
     } else {
         r#"<section class="setup-section" aria-labelledby="setup-step-3"><div class="setup-section-head"><span class="setup-step">Step 3</span><h2 id="setup-step-3">Admin account</h2><p>Existing administrator credentials stay unchanged.</p></div><p class="admin-copy">Continue as the currently authenticated administrator; this wizard will not replace credentials.</p></section>"#.to_owned()
     };
-    let ffmpeg = if app_state.ffmpeg_available {
+    let ffmpeg = if ffmpeg_available {
         "detected"
     } else {
         "missing"
@@ -1266,7 +1266,7 @@ fn setup_form_page(
 </form>
 </main>"#,
         alerts = alerts,
-        csrf = escape_html(csrf),
+        csrf = escape_html(&csrf.action),
         preset_options = preset_options(&form.preset),
         site_name = escape_html(&form.site_name),
         site_subtitle = escape_html(form.site_subtitle.as_deref().unwrap_or_default()),
@@ -1321,7 +1321,7 @@ fn setup_form_page(
         "setup",
         None,
         &body,
-        csrf,
+        &csrf.preferences,
         boards.as_ref(),
         current_theme,
         form.default_theme.as_deref(),
@@ -1331,13 +1331,13 @@ fn setup_form_page(
 }
 
 fn setup_review_page(
-    csrf: &str,
+    csrf: &crypto::ActionPageCsrf,
     state: db::SetupState,
     form: &SetupWizardForm,
     parsed: &ParsedSetup,
     current_theme: Option<&str>,
 ) -> String {
-    let hidden = hidden_form_fields(csrf, form);
+    let hidden = hidden_form_fields(&csrf.action, form);
     let admin_line = if state.admin_count == 0 {
         format!(
             "Create initial admin account: {}",
@@ -1406,7 +1406,7 @@ fn setup_review_page(
         "review setup",
         None,
         &body,
-        csrf,
+        &csrf.preferences,
         boards.as_ref(),
         current_theme,
         Some(&parsed.default_theme),

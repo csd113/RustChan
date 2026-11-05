@@ -17,7 +17,7 @@ use crate::{
     error::{AppError, Result},
     middleware::AppState,
     templates,
-    utils::crypto::{make_scoped_csrf_form_token, new_csrf_token, new_session_id, verify_password},
+    utils::crypto::{new_csrf_token, new_session_id, verify_password, ActionPageCsrf},
 };
 use axum::{
     extract::{Form, State},
@@ -129,7 +129,7 @@ fn ensure_admin_login_csrf(
     jar: CookieJar,
     headers: &HeaderMap,
     secure_context: crate::middleware::SecureCookieContext,
-) -> (CookieJar, String) {
+) -> (CookieJar, ActionPageCsrf) {
     let token = jar
         .get("csrf_token")
         .map(|cookie| cookie.value().to_owned())
@@ -146,7 +146,7 @@ fn ensure_admin_login_csrf(
 
     (
         jar.add(cookie),
-        make_scoped_csrf_form_token(&token, &CONFIG.cookie_secret, ADMIN_LOGIN_CSRF_SCOPE),
+        ActionPageCsrf::new(&token, &CONFIG.cookie_secret, ADMIN_LOGIN_CSRF_SCOPE),
     )
 }
 
@@ -426,3 +426,7 @@ pub(in crate::server) async fn admin_logout(
         crate::utils::redirect::strict_safe_internal_path_or(form.return_to.as_deref(), "/admin");
     Ok((jar, Redirect::to(destination)).into_response())
 }
+
+#[cfg(test)]
+#[path = "tests/login_page_csrf.rs"]
+mod tests;
