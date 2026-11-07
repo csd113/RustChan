@@ -315,6 +315,7 @@ pub(in crate::server) fn database_file_sizes() -> std::io::Result<[i64; 3]> {
 }
 
 /// Read the process resident-set size in kibibytes when supported.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn process_rss_kb() -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -343,5 +344,11 @@ fn process_rss_kb() -> u64 {
             }
         }
     }
+    0
+}
+
+/// Report an unavailable resident-set sample on other platforms.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const fn process_rss_kb() -> u64 {
     0
 }

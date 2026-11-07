@@ -161,7 +161,7 @@ pub(super) fn create_live_restore_snapshot(
         .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {error}")))?;
     restrict_restore_temp_file(db_snapshot)?;
-    std::fs::File::open(db_snapshot)?.sync_all()?;
+    super::recovery_files::sync_staged_file(db_snapshot)?;
     Ok(())
 }
 
@@ -508,6 +508,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 "This backup does not contain a complete Tor hidden service identity.".into(),
             ));
         }
+        #[cfg(unix)]
         if let Some(staged_tor_hidden_service_keys_dir) =
             staged_tor_hidden_service_keys_dir.as_ref()
         {
@@ -670,36 +671,30 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     session_result
 }
 
+#[cfg(unix)]
 fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
-        let metadata = std::fs::metadata(path).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
-        })?;
-        let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "Set permissions on {}: {error}",
-                path.display()
-            ))
-        })?;
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
+    })?;
+    let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set permissions on {}: {error}",
+            path.display()
+        ))
+    })?;
 
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(path).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Read {}: {error}", path.display()))
-            })? {
-                let entry = entry.map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Read dir entry: {error}"))
-                })?;
-                restrict_private_key_material_permissions(&entry.path())?;
-            }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Read {}: {error}", path.display()))
+        })? {
+            let entry = entry
+                .map_err(|error| AppError::Internal(anyhow::anyhow!("Read dir entry: {error}")))?;
+            restrict_private_key_material_permissions(&entry.path())?;
         }
     }
-
-    #[cfg(not(unix))]
-    let _ = path;
 
     Ok(())
 }

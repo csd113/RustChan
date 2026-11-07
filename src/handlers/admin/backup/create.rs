@@ -284,10 +284,12 @@ pub(in crate::server) fn create_full_backup_to_server(
         parts: Vec::new(),
         maintenance: None,
     };
+    // Split ZIP packaging removes the standalone snapshot after archiving it.
+    // Windows requires SQLite to release its handle first.
+    drop(export_conn);
     if storage_mode == BackupStorageMode::SplitZip {
         materialize_split_zip_parts(&root_dir, &mut manifest, split_zip_part_size)?;
     }
-    drop(export_conn);
 
     let backup_ref = finalize_saved_backup(&root_dir, manifest)?;
     incomplete.publish();

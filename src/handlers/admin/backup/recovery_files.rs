@@ -2,6 +2,19 @@
 
 use std::path::{Path, PathBuf};
 
+/// Flush an existing, closed staging file without modifying its contents.
+pub(super) fn sync_staged_file(path: &Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    // Windows FlushFileBuffers needs a handle with write access.
+    std::fs::File::options()
+        .read(true)
+        .write(cfg!(windows))
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("Flush staged backup or restore file {}", path.display()))
+}
+
 /// Create a secret-bearing file exclusively, with private permissions from its first byte.
 ///
 /// # Errors

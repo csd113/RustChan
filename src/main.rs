@@ -116,15 +116,19 @@ fn relaunch_in_terminal_if_needed() -> anyhow::Result<bool> {
 
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt as _;
+
         let exe = std::env::current_exe()?;
-        // `start` creates a console; the empty argument is its required
-        // window-title slot when the executable path is quoted.
+        // Pass the path through one expansion so cmd does not expand percent
+        // expressions in the path itself. Disable AutoRun and delayed expansion.
+        // The empty argument is start's window title.
         if std::process::Command::new("cmd.exe")
-            .args(["/C", "start", ""])
-            .arg(exe)
+            .args(["/D", "/V:OFF", "/C"])
+            .raw_arg(r#"start "" "%RUSTCHAN_TERMINAL_EXE%""#)
+            .env("RUSTCHAN_TERMINAL_EXE", exe)
             .env("RUSTCHAN_SPAWNED", "1")
-            .spawn()
-            .is_ok()
+            .status()
+            .is_ok_and(|status| status.success())
         {
             return Ok(true);
         }

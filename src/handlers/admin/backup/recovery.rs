@@ -88,7 +88,8 @@ fn journal_path() -> PathBuf {
 
 /// Persist recovery evidence before any live database mutation.
 pub(super) fn begin_restore(pending_id: &str, snapshot: &Path) -> Result<()> {
-    std::fs::File::open(snapshot)?.sync_all()?;
+    super::recovery_files::sync_staged_file(snapshot)?;
+    #[cfg(unix)]
     sync_parent(snapshot)?;
     let path = journal_path();
     if path.try_exists().map_err(anyhow::Error::from)? {
@@ -107,49 +108,55 @@ pub(super) fn begin_restore(pending_id: &str, snapshot: &Path) -> Result<()> {
     let mut file = super::recovery_files::open_private_file_new(&path)?;
     std::io::Write::write_all(&mut file, &bytes)?;
     file.sync_all()?;
-    sync_parent(&path)
+    #[cfg(unix)]
+    sync_parent(&path)?;
+    Ok(())
 }
 
 /// Remove the recovery marker only after database and filesystem agree.
 pub(super) fn finish_restore() -> Result<()> {
     let path = journal_path();
     std::fs::remove_file(&path).map_err(anyhow::Error::from)?;
-    sync_parent(&path)
+    #[cfg(unix)]
+    sync_parent(&path)?;
+    Ok(())
 }
 
+#[cfg(unix)]
 fn sync_parent(path: &Path) -> Result<()> {
-    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         std::fs::File::open(parent)
             .and_then(|file| file.sync_all())
             .map_err(anyhow::Error::from)?;
     }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
 /// Make staged payloads durable before committing their database journal.
 pub(super) fn sync_staged_tree(root: &Path) -> Result<()> {
     let mut pending = vec![root.to_path_buf()];
+    #[cfg(unix)]
     let mut directories = Vec::new();
     while let Some(path) = pending.pop() {
         let metadata = std::fs::symlink_metadata(&path)?;
         if metadata.is_dir() {
+            #[cfg(unix)]
             directories.push(path.clone());
             for entry in std::fs::read_dir(&path)? {
                 pending.push(entry?.path());
             }
         } else {
             crate::utils::fs_security::assert_regular_file_no_symlink(&path)?;
-            std::fs::File::open(&path)?.sync_all()?;
+            super::recovery_files::sync_staged_file(&path)?;
         }
     }
     #[cfg(unix)]
     for directory in directories.into_iter().rev() {
         std::fs::File::open(directory)?.sync_all()?;
     }
-    sync_parent(root)
+    #[cfg(unix)]
+    sync_parent(root)?;
+    Ok(())
 }
 
 /// Reconcile interrupted restores before startup admits requests or workers.

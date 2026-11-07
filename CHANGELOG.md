@@ -7,6 +7,13 @@ working branch and are not part of the latest published download.
 
 ## Unreleased
 
+- Fixed optional terminal relaunch on Windows for executable paths containing
+  percent signs or shell metacharacters. If the relaunch fails, the original
+  process continues startup.
+- Fixed Windows backup and restore failures when flushing staged files or
+  packaging the database snapshot into a split ZIP.
+- Fixed FFmpeg video thumbnails falling back to placeholders on Windows.
+- Fixed Windows-specific diagnostics in the strict Clippy checks.
 - Added opt-in per-board strict metadata-safe uploads. Supported images are
   rebuilt as metadata-free WebP; unsupported formats and failed sanitization
   are rejected without retaining originals. Covers posting slots, historical

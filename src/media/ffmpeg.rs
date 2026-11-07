@@ -217,9 +217,6 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
     let frame = tempfile::Builder::new()
         .suffix(".png")
         .tempfile_in(parent)?;
-    let thumbnail = tempfile::Builder::new()
-        .suffix(".webp")
-        .tempfile_in(parent)?;
     let scale = format!("scale='if(gt(iw,ih),{max_dim},-2)':'if(gt(iw,ih),-2,{max_dim})'");
     run_ffmpeg(&[
         "-loglevel",
@@ -242,13 +239,7 @@ pub fn ffmpeg_thumbnail(input: &Path, output: &Path, max_dim: u32) -> Result<()>
         path_to_str(frame.path())?,
     ])
     .context("video frame extraction failed")?;
-    super::thumbnail::image_crate_thumbnail(frame.path(), "image/png", thumbnail.path(), max_dim)?;
-    drop(
-        thumbnail
-            .persist(output)
-            .context("persist Rust-encoded video thumbnail")?,
-    );
-    Ok(())
+    super::thumbnail::image_crate_thumbnail(frame.path(), output, max_dim)
 }
 
 #[must_use]

@@ -139,7 +139,8 @@ are newer than the published v1.7.5 ZIPs.** Check `--help` for your executable:
 
 Redirected streams, `TERM=dumb`, and terminal initialization failures use plain
 logging without raw input. `NO_COLOR=1` disables colors. Linux/Windows terminal
-relaunch is opt-in with `CHAN_LAUNCH_TERMINAL=1`.
+relaunch is opt-in with `CHAN_LAUNCH_TERMINAL=1`. On Windows, if the launcher
+cannot start the new console, startup continues with the original streams.
 
 ### Reading the numbers
 

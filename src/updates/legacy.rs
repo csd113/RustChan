@@ -103,7 +103,7 @@ fn private_path(path: &Path, data: &Path) -> anyhow::Result<()> {
         );
     }
     #[cfg(not(unix))]
-    let _data = data;
+    let _: &Path = data;
     ensure!(
         metadata.is_file() || metadata.is_dir(),
         "legacy recovery state has an invalid type"

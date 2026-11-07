@@ -503,17 +503,19 @@ impl<'a> InventoryWalker<'a> {
         }
     }
 
+    #[cfg(unix)]
     fn crosses_filesystem(&self, metadata: &std::fs::Metadata) -> bool {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            metadata.dev() != self.root_device
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = metadata;
-            false
-        }
+        use std::os::unix::fs::MetadataExt as _;
+        metadata.dev() != self.root_device
+    }
+
+    #[cfg(not(unix))]
+    #[expect(
+        clippy::unused_self,
+        reason = "shared inventory callers use the filesystem identity stored by the Unix implementation"
+    )]
+    const fn crosses_filesystem(&self, _metadata: &std::fs::Metadata) -> bool {
+        false
     }
 
     fn push_path(

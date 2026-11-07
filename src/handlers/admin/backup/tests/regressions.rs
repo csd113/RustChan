@@ -224,6 +224,17 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn closed_staged_file_can_be_flushed_without_changing_its_contents(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("staged.db");
+        std::fs::write(&path, b"snapshot fixture")?;
+        recovery_files::sync_staged_file(&path)?;
+        ensure_eq!(std::fs::read(&path)?, b"snapshot fixture");
+        Ok(())
+    }
+
     fn backup(id: &str, scope: &str, verified: bool) -> BackupInfo {
         BackupInfo {
             backup_ref: id.into(),
