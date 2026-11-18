@@ -1140,8 +1140,7 @@ fn render_post_with_context(
     let tripcode_html = post
         .tripcode
         .as_ref()
-        .map(|t| format!(r#"<span class="tripcode">!{}</span>"#, escape_html(t)))
-        .unwrap_or_default();
+        .map_or_default(|t| format!(r#"<span class="tripcode">!{}</span>"#, escape_html(t)));
 
     let op_class = if post.is_op { " op" } else { " reply" };
     let poster_attr = poster_id.as_ref().map_or_else(String::new, |poster_id| {
@@ -1155,11 +1154,9 @@ fn render_post_with_context(
         )
     });
     let post_state_badges = if post.is_op {
-        thread_state
-            .map(|(sticky, locked, archived)| {
-                render_thread_state_badges_full(sticky, locked, archived)
-            })
-            .unwrap_or_default()
+        thread_state.map_or_default(|(sticky, locked, archived)| {
+            render_thread_state_badges_full(sticky, locked, archived)
+        })
     } else {
         String::new()
     };
@@ -1184,11 +1181,12 @@ fn render_post_with_context(
         }
         _ => String::new(),
     };
-    let media_processing_state_attr = post
-        .media_processing_state
-        .as_deref()
-        .map(|state| format!(r#" data-media-processing-state="{}""#, escape_html(state)))
-        .unwrap_or_default();
+    let media_processing_state_attr =
+        post.media_processing_state
+            .as_deref()
+            .map_or_default(|state| {
+                format!(r#" data-media-processing-state="{}""#, escape_html(state))
+            });
 
     let post_link = match link_context {
         PostLinkContext::Inline => format!(
@@ -1234,7 +1232,7 @@ fn render_post_with_context(
     if show_media {
         if original_pruned {
             let name_str = post.file_name.as_deref().unwrap_or("file");
-            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let size_str = post.file_size.map_or_default(format_file_size);
             let thumb_html = post
                 .thumb_path
                 .as_deref()
@@ -1268,7 +1266,7 @@ fn render_post_with_context(
                 ),
             );
         } else if let (Some(file), Some(thumb)) = (&post.file_path, &post.thumb_path) {
-            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let size_str = post.file_size.map_or_default(format_file_size);
             let name_str = post.file_name.as_deref().unwrap_or("file");
             let file_link = render_file_link(file, name_str);
             let mime = post
@@ -1285,9 +1283,7 @@ fn render_post_with_context(
                         aud_file.as_str(),
                         aud_mime.as_str(),
                         post.audio_file_name.as_deref().unwrap_or("audio"),
-                        post.audio_file_size
-                            .map(format_file_size)
-                            .unwrap_or_default(),
+                        post.audio_file_size.map_or_default(format_file_size),
                     )),
                     _ => None,
                 }
@@ -1448,7 +1444,7 @@ fn render_post_with_context(
                 ));
             }
         } else if let Some(file) = &post.file_path {
-            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let size_str = post.file_size.map_or_default(format_file_size);
             let name_str = post.file_name.as_deref().unwrap_or("file");
             let file_link = render_file_link(file, name_str);
             let status_note = match post.media_processing_state.as_deref() {
@@ -1478,7 +1474,7 @@ fn render_post_with_context(
         && matches!(&post.media_type, Some(crate::models::MediaType::Other))
     {
         if let Some(file) = &post.file_path {
-            let size_str = post.file_size.map(format_file_size).unwrap_or_default();
+            let size_str = post.file_size.map_or_default(format_file_size);
             let name_str = post.file_name.as_deref().unwrap_or("download");
             let file_link = render_file_link(file, name_str);
             crate::templates::append_html(
@@ -1503,10 +1499,7 @@ fn render_post_with_context(
     {
         if let (Some(aud_file), Some(aud_mime)) = (&post.audio_file_path, &post.audio_mime_type) {
             let aud_name = post.audio_file_name.as_deref().unwrap_or("audio");
-            let aud_size = post
-                .audio_file_size
-                .map(format_file_size)
-                .unwrap_or_default();
+            let aud_size = post.audio_file_size.map_or_default(format_file_size);
             let audio_link = render_file_link(aud_file, aud_name);
             crate::templates::append_html(
                 &mut html,
@@ -1695,13 +1688,12 @@ fn render_edit_overlay(
             state
                 .error
                 .as_deref()
-                .map(|msg| {
+                .map_or_default(|msg| {
                     format!(
                         r#"<div class="post-error-banner edit-modal-error" data-role="edit-modal-error">&#9888; {}</div>"#,
                         escape_html(msg)
                     )
-                })
-                .unwrap_or_default(),
+                }),
             "edit-modal is-open",
             )
         },

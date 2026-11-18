@@ -154,8 +154,7 @@ pub(in crate::server::handlers) fn owned_post_grants_from_jar(
 ) -> Vec<OwnedPostGrant> {
     jar.get(OWNED_POSTS_COOKIE)
         .map(Cookie::value)
-        .map(parse_owned_posts_cookie)
-        .unwrap_or_default()
+        .map_or_default(parse_owned_posts_cookie)
 }
 
 pub(in crate::server::handlers) fn owned_post_grant_from_jar(
@@ -379,8 +378,7 @@ pub(super) fn board_activity_markers_from_jar(
 ) -> HashMap<i64, BoardActivityMarker> {
     jar.get(BOARD_ACTIVITY_COOKIE)
         .map(Cookie::value)
-        .map(parse_board_activity_cookie)
-        .unwrap_or_default()
+        .map_or_default(parse_board_activity_cookie)
 }
 
 pub(super) fn thread_activity_markers_from_jar(
@@ -388,8 +386,7 @@ pub(super) fn thread_activity_markers_from_jar(
 ) -> HashMap<i64, ThreadActivityMarker> {
     jar.get(THREAD_ACTIVITY_COOKIE)
         .map(Cookie::value)
-        .map(parse_thread_activity_cookie)
-        .unwrap_or_default()
+        .map_or_default(parse_thread_activity_cookie)
 }
 
 pub(in crate::server::handlers) fn remember_board_activity(

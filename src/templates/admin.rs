@@ -16,14 +16,12 @@ pub fn admin_login_page(
     boards: &[Board],
     current_theme: Option<&str>,
 ) -> String {
-    let err_html = error
-        .map(|e| {
-            format!(
-                r#"<div class="error admin-login-error" role="alert">{}</div>"#,
-                escape_html(e)
-            )
-        })
-        .unwrap_or_default();
+    let err_html = error.map_or_default(|e| {
+        format!(
+            r#"<div class="error admin-login-error" role="alert">{}</div>"#,
+            escape_html(e)
+        )
+    });
 
     let body = format!(
         r#"<div class="page-box admin-login">

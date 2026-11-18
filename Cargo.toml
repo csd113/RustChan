@@ -2,7 +2,7 @@
 name = "rustchan"
 version = "1.7.5"
 edition = "2021"
-# Rust 1.99.1 is the supported minimum for the package and build tooling.
+# Rust 1.100.0 is the supported minimum for the package and build tooling.
 rust-version.workspace = true
 license = "MIT"
 description = "Self-contained imageboard — single binary, zero runtime dependencies"
@@ -12,14 +12,14 @@ categories = ["web-programming", "multimedia::images"]
 
 # Keep `cargo-msrv` metadata aligned with `rust-version`.
 [package.metadata]
-msrv = "1.99.1"
+msrv = "1.100.0"
 
 [workspace]
 resolver = "2"
 exclude = ["vendor/symphonia-codec-aac"]
 
 [workspace.package]
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 
 [profile.release]
 opt-level      = 3
@@ -55,8 +55,8 @@ tokio-util = "0.7.20"
 captcha    = { version = "1.0.0", default-features = false }
 
 # Arti 0.48 requires rusqlite >=0.36,<0.41, and r2d2_sqlite 0.35 requires 0.40.
-# rusqlite 0.41 uses a different libsqlite3-sys; Cargo cannot link both SQLite
-# libraries. Keep 0.40.2 until both upstream dependencies support 0.41.
+# Newer rusqlite releases use a different libsqlite3-sys. Keep this pair until
+# Arti can share a newer SQLite linkage with the connection pool.
 rusqlite    = { version = "0.40.2", features = ["bundled", "backup", "hooks", "blob"] }
 r2d2        = "0.8.10"
 r2d2_sqlite = "0.35.0"
@@ -65,13 +65,13 @@ time        = "0.3.55"
 serde      = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # toml 1.0: serde parsing is built-in, no feature flag needed.
-toml  = "1.1.8"
+toml  = "1.2.1"
 
 argon2  = "0.6.0"
 sha2    = "0.11.1"
 # Semantic versions also protect database compatibility; compression is used by PDF processing.
 semver = "1.0.28"
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 
 subtle  = "2.6.1"
@@ -86,36 +86,31 @@ gif = { version = "0.14.2", default-features = false, features = ["std", "color_
 # Container inspection only for video; no video decoders are enabled.
 symphonia = { version = "0.6.1", default-features = false, features = ["aac", "adpcm", "alac", "flac", "mp1", "mp2", "mp3", "pcm", "vorbis", "isomp4", "mkv", "ogg", "wav", "exp-video-codecs"] }
 # Symphonia supplies Opus packets; this decoder avoids native libopus.
-opus-pure = "0.2.2"
+opus-pure = "0.2.3"
 # HEVC intra still pictures only; no native library or video framework.
 heic-rs = { version = "0.1.4", default-features = false, features = ["std"] }
 
 # Pure-Rust first-page PDF previews, with embedded standard fonts.
-hayro = { version = "0.8.0", default-features = false, features = ["embed-fonts"] }
+hayro = { version = "0.9.0", default-features = false, features = ["embed-fonts"] }
 
 # Apply JPEG Orientation tags before thumbnailing so phone photos display upright.
-kamadak-exif = "0.6.1"
+kamadak-exif = "0.6.2"
 
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.8", features = ["derive"] }
 
-uuid      = { version = "1.29.0", features = ["v4", "serde"] }
+uuid      = { version = "1.29.3", features = ["v4", "serde"] }
 chrono    = { version = "0.4.45", features = ["serde"] }
 dashmap      = "6.2.1"
 parking_lot  = "0.13.0"
 anyhow       = "1.0.104"
-regex     = "1.13.1"
+regex     = "1.13.2"
 ipnet     = "2.12.2"
 
 # Backup preflight scans use `file_names()` without decompressing entries.
-zip = { version = "9.2.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # URL validation for admin-supplied external banner links.
 url = "2.5.8"
-
-# Keep a direct lower bound on the RUSTSEC-2026-0049 CRL
-# distribution-point fix. The crate is consumed transitively through rustls;
-# this declaration intentionally constrains future lockfile regeneration.
-rustls-webpki = { version = "0.103.16", default-features = false }
 
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
@@ -154,7 +149,7 @@ data-encoding = "2.11.1"
 
 # TLS
 # rustls-pki-types provides the certificate and key types used by src/tls/mod.rs.
-rustls-pki-types = "1.15.1"
+rustls-pki-types = "1.16.0"
 # RustChan installs rustls's ring provider explicitly at startup. Keep every
 # TLS consumer on that provider instead of also compiling the unused aws-lc-rs
 # defaults; logging, TLS 1.2, and the system-independent root set stay enabled.
@@ -168,7 +163,7 @@ pem-rfc7468    = { version = "1.0.0", optional = true, features = ["std"] }
 x509-cert      = { version = "0.3.0", optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
-axum-server    = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
+axum-server    = { version = "0.9.2", features = ["tls-rustls-no-provider"] }
 hyper          = { version = "1.12.0", features = ["http1", "http2", "server"], optional = true }
 hyper-util     = { version = "0.1.21", features = ["tokio", "server"] }
 
@@ -186,6 +181,10 @@ crossterm_winapi = "0.9.1"
 [target.'cfg(unix)'.dependencies]
 # Safe in-process filesystem-capacity queries for upload disk-space preflights.
 rustix = { version = "1.1.6", features = ["fs"] }
+
+[target.'cfg(false)'.dependencies]
+# Keep the RUSTSEC-2026-0049 fix in the resolver for rustls's transitive dependency.
+rustls-webpki = { version = "0.103.17", default-features = false }
 
 
 [features]
@@ -212,7 +211,6 @@ missing_docs = "deny"
 missing_debug_implementations = "deny"
 non_ascii_idents = "deny"
 unreachable_pub = "deny"
-unused_crate_dependencies = "deny"
 unused_results = "deny"
 macro_use_extern_crate = "deny"
 redundant_imports = "deny"
@@ -225,6 +223,9 @@ unused_import_braces = "deny"
 unused_lifetimes = "deny"
 unused_qualifications = "deny"
 let_underscore_drop = "deny"
+
+[workspace.lints.cargo]
+unused_dependencies = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -3 }

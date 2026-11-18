@@ -52,8 +52,7 @@ pub(in crate::server) async fn file_report(
     let board_raw_closure = board_raw.clone();
     let csrf_cookie = jar
         .get("csrf_token")
-        .map(|cookie| cookie.value().to_owned())
-        .unwrap_or_default();
+        .map_or_default(|cookie| cookie.value().to_owned());
     let outcome = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<Option<(i64, db::ReportSubmission)>> {

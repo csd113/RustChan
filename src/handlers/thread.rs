@@ -1240,8 +1240,7 @@ pub(in crate::server) async fn vote_handler(
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let ban_csrf_token = jar
         .get("csrf_token")
-        .map(|cookie| cookie.value().to_owned())
-        .unwrap_or_default();
+        .map_or_default(|cookie| cookie.value().to_owned());
     let redirect_url = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {

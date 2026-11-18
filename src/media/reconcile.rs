@@ -750,9 +750,9 @@ fn collect_boards(
             continue;
         }
         let folded = board.to_ascii_lowercase();
-        if let Some(other) = casefold.insert(folded.clone(), board.clone()) {
+        if let Some(other) = casefold.insert(folded, board.clone()) {
             if other != board {
-                let _other_conflict_inserted = model.case_conflict_boards.insert(other.clone());
+                let _other_conflict_inserted = model.case_conflict_boards.insert(other);
                 let _board_conflict_inserted = model.case_conflict_boards.insert(board.clone());
                 model.global_ambiguity = true;
             }
@@ -943,7 +943,7 @@ fn collect_hashes(
                     board: Some(thumb.board),
                     category: MediaCategory::Thumbnail,
                     role: ReferenceRole::Metadata,
-                    owner: owner.clone(),
+                    owner,
                     expected_digest: None,
                     recoverable_source: None,
                 });
@@ -952,7 +952,7 @@ fn collect_hashes(
                     model,
                     &thumb_path,
                     Some(&file.board),
-                    owner.clone(),
+                    owner,
                     MediaCategory::Thumbnail,
                 );
             }

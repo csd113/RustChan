@@ -1,7 +1,3 @@
-#![expect(
-    unused_crate_dependencies,
-    reason = "Cargo exposes the companion chan library and the transitive rustls-webpki security floor to this standalone binary target"
-)]
 #![cfg_attr(
     not(test),
     expect(

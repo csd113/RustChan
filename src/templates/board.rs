@@ -140,24 +140,20 @@ fn render_board_card(
         String::new()
     };
     let access_badge = board_access_badge(board);
-    let thread_activity_badge = unread_thread_count
-        .map(|count| {
-            render_new_activity_badge(
-                count,
-                "new-activity-badge board-card-activity-badge board-card-new-thread-badge",
-                "New Threads",
-            )
-        })
-        .unwrap_or_default();
-    let reply_activity_badge = unread_reply_count
-        .map(|count| {
-            render_new_activity_badge(
-                count,
-                "new-activity-badge board-card-activity-badge board-card-new-reply-badge",
-                "New Replies",
-            )
-        })
-        .unwrap_or_default();
+    let thread_activity_badge = unread_thread_count.map_or_default(|count| {
+        render_new_activity_badge(
+            count,
+            "new-activity-badge board-card-activity-badge board-card-new-thread-badge",
+            "New Threads",
+        )
+    });
+    let reply_activity_badge = unread_reply_count.map_or_default(|count| {
+        render_new_activity_badge(
+            count,
+            "new-activity-badge board-card-activity-badge board-card-new-reply-badge",
+            "New Replies",
+        )
+    });
     let activity_badges = if thread_activity_badge.is_empty() && reply_activity_badge.is_empty() {
         String::new()
     } else {
@@ -562,11 +558,9 @@ fn render_catalog_card(
         hide_label,
         return_to,
     );
-    let activity_badge = unread_reply_count
-        .map(|count| {
-            render_new_activity_badge(count, "new-activity-badge catalog-activity-badge", "New")
-        })
-        .unwrap_or_default();
+    let activity_badge = unread_reply_count.map_or_default(|count| {
+        render_new_activity_badge(count, "new-activity-badge catalog-activity-badge", "New")
+    });
     let activity_row = if activity_badge.is_empty() {
         String::new()
     } else {
@@ -834,18 +828,15 @@ pub fn index_page<S: std::hash::BuildHasher>(
         } else {
             r#" hidden inert aria-hidden="true""#
         };
-        let board_label = nsfw_prompt_board
-            .map(|b| format!("/{}/", escape_html(&b.short_name)))
-            .unwrap_or_default();
-        let return_to = nsfw_prompt_board
-            .map(|b| {
-                if b.access_mode.requires_view_password() {
-                    format!("/{}/unlock", escape_html(&b.short_name))
-                } else {
-                    format!("/{}/catalog", escape_html(&b.short_name))
-                }
-            })
-            .unwrap_or_default();
+        let board_label =
+            nsfw_prompt_board.map_or_default(|b| format!("/{}/", escape_html(&b.short_name)));
+        let return_to = nsfw_prompt_board.map_or_default(|b| {
+            if b.access_mode.requires_view_password() {
+                format!("/{}/unlock", escape_html(&b.short_name))
+            } else {
+                format!("/{}/catalog", escape_html(&b.short_name))
+            }
+        });
         format!(
             r#"<div id="nsfw-disclaimer-overlay" class="compress-modal nsfw-disclaimer-overlay{open_class}" role="dialog" aria-modal="true" aria-labelledby="nsfw-disclaimer-title" aria-describedby="nsfw-disclaimer-info"{hidden_attr}>
   <div class="compress-modal-box nsfw-disclaimer-box">
@@ -1220,15 +1211,13 @@ fn render_thread_summary(
         );
     }
 
-    let activity_badge = unread_reply_count
-        .map(|count| {
-            render_new_activity_badge(
-                count,
-                "new-activity-badge thread-summary-activity-badge",
-                "New",
-            )
-        })
-        .unwrap_or_default();
+    let activity_badge = unread_reply_count.map_or_default(|count| {
+        render_new_activity_badge(
+            count,
+            "new-activity-badge thread-summary-activity-badge",
+            "New",
+        )
+    });
     if !activity_badge.is_empty() {
         crate::templates::append_html(
             &mut html,

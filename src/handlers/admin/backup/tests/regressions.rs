@@ -1,7 +1,3 @@
-#![expect(
-    unused_crate_dependencies,
-    reason = "focused integration harness exercises only backup safety dependencies"
-)]
 //! Regression checks for coordination, recovery evidence, and backup resource limits.
 
 use chan::models;
