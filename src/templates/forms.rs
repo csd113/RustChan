@@ -61,7 +61,7 @@ pub fn post_error_recovery_body(message: &str, prefill: Option<&PostFormState>) 
             sage = if state.sage { "yes" } else { "no" })
     });
     format!(
-        r#"<div class="page-box error-page"><h1>Post could not be completed</h1><p>{message}</p>
+        r#"<div class="page-box error-page"><h1 tabindex="-1" autofocus>Post could not be completed</h1><p>{message}</p>
 <p>Copy the saved draft below before leaving. Your browser’s Back button may restore the original form, but some browsers clear it. Open a fresh posting form and paste your saved text if needed. Choose attachments again; browsers cannot restore file selections on a new page.</p>
 <p>If the result is uncertain, check the thread or board for your post before submitting again.</p>{draft}<p><a href="/">return home</a></p></div>"#,
         message = escape_html(message)
@@ -358,7 +358,10 @@ fn render_poll_creator(poll: Option<&PollFormState>) -> String {
               {poll_option_rows}
               <noscript><details><summary>More poll options</summary>{extra_poll_option_rows}</details></noscript>
             </div>
-            <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
+            <div class="poll-option-actions">
+              <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
+              <span class="poll-option-status" role="status" data-role="poll-option-status"></span>
+            </div>
             <div class="poll-creator-row poll-duration-row">
               <label>Duration
                 <input type="number" name="poll_duration_value" value="{duration_value}" min="1" max="720" class="poll-duration-input">
@@ -429,18 +432,19 @@ pub(super) fn new_thread_form(
     let subject_value = prefill.map_or("", |state| state.subject.as_str());
     let body_value = prefill.map_or("", |state| state.body.as_str());
 
+    // A disabled default button prevents implicit submission without JavaScript.
     format!(
         r#"<div class="post-form-container">
 <div class="post-form-title">[ new thread ]</div>
 <form class="post-form" method="POST" action="/{board}" enctype="multipart/form-data">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="submission_token" value="{submission_token}">
+  <noscript><button type="submit" disabled hidden></button></noscript>
   <table>
     <tr><td><label for="thread-name">name</label></td>
         <td><label class="post-form-mobile-label" for="thread-name">Name</label><input type="text" id="thread-name" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td><label for="thread-subject">subject</label></td>
-        <td><label class="post-form-mobile-label" for="thread-subject">Subject</label><input type="text" id="thread-subject" name="subject" value="{subject_value}" maxlength="128">
-            <button type="submit">post thread</button></td></tr>
+        <td><label class="post-form-mobile-label" for="thread-subject">Subject</label><input type="text" id="thread-subject" name="subject" value="{subject_value}" maxlength="128"></td></tr>
     <tr><td><label for="thread-body">body</label></td>
         <td><label class="post-form-mobile-label" for="thread-body">Body</label><textarea id="thread-body" name="body" rows="5" maxlength="4096">{body_value}</textarea>
             <div class="markup-hint">
@@ -459,6 +463,7 @@ pub(super) fn new_thread_form(
     {upload_progress_row}
     {captcha_row}
     {poll_creator}
+    <tr><td></td><td><button type="submit">post thread</button></td></tr>
   </table>
 </form>
 </div>
@@ -535,8 +540,7 @@ pub(super) fn reply_form(
     <tr><td><label for="reply-name">name</label></td>
         <td><label class="post-form-mobile-label" for="reply-name">Name</label><input type="text" id="reply-name" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td><label for="reply-body">body</label></td>
-        <td><label class="post-form-mobile-label" for="reply-body">Body</label><textarea id="reply-body" name="body" rows="4" maxlength="4096">{body_value}</textarea>
-            <button type="submit">post reply</button></td></tr>
+        <td><label class="post-form-mobile-label" for="reply-body">Body</label><textarea id="reply-body" name="body" rows="4" maxlength="4096">{body_value}</textarea></td></tr>
     {uploads_disabled_row}
     {upload_row}
     {attachment_recovery}
@@ -544,6 +548,7 @@ pub(super) fn reply_form(
     <tr><td>options</td>
         <td><span class="post-form-mobile-label">Options</span><label class="sage-label"><input type="checkbox" name="sage" value="1"{sage_checked}> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {captcha_row}
+    <tr><td></td><td><button type="submit">post reply</button></td></tr>
   </table>
 </form>
 </div>"#,

@@ -127,9 +127,11 @@ pub(in crate::server) async fn file_report(
         db::ReportSubmission::AlreadyFiled => "duplicate",
     };
     // Target and board were checked together under the write lock.
-    Ok(Redirect::to(&format!(
-        "/{board_raw}/thread/{db_thread_id}?reported={reported}#p{}",
-        form.post_id
+    Ok(Redirect::to(&crate::utils::redirect::thread_post_url(
+        &board_raw,
+        db_thread_id,
+        form.post_id,
+        Some(reported),
     ))
     .into_response())
 }

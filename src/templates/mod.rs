@@ -362,7 +362,7 @@ fn board_nav_group_html(
         .iter()
         .map(|board| {
             format!(
-                r#"<a href="{href}">{short}</a>"#,
+                r#"<a href="{href}" data-board-preference="{short}">{short}</a>"#,
                 href = board_href(&board.short_name, preferences),
                 short = escape_html(&board.short_name),
             )
@@ -395,7 +395,9 @@ fn mobile_board_group_html(
         let href = board_href(&board.short_name, preferences);
         append_html(
             &mut items,
-            format_args!(r#"<a class="mobile-board-link" href="{href}">/{short}/</a>"#),
+            format_args!(
+                r#"<a class="mobile-board-link" href="{href}" data-board-preference="{short}">/{short}/</a>"#
+            ),
         );
     }
     format!(

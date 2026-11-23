@@ -1,5 +1,19 @@
 // Shared helpers for internal redirects and query-string construction.
 
+/// Link to the reply window containing a specific post on a validated board.
+#[must_use]
+pub(crate) fn thread_post_url(
+    board: &str,
+    thread_id: i64,
+    post_id: i64,
+    reported: Option<&str>,
+) -> String {
+    let report_query = reported.map_or_else(String::new, |status| {
+        format!("&reported={}", encode_query_component(status))
+    });
+    format!("/{board}/thread/{thread_id}?post={post_id}{report_query}#p{post_id}")
+}
+
 #[must_use]
 /// Percent-encode a value for use as a URI query component.
 pub fn encode_query_component(input: &str) -> String {

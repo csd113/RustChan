@@ -17,6 +17,12 @@ use super::{
 pub(crate) struct ThreadWindow {
     /// Exclusive upper post ID for the next older page.
     pub(crate) older_before: Option<i64>,
+    /// Exclusive lower post ID for the next newer page.
+    pub(crate) newer_after: Option<i64>,
+    /// One-based position of the first displayed reply, or zero for an empty window.
+    pub(crate) first_reply: i64,
+    /// One-based position of the last displayed reply, or zero for an empty window.
+    pub(crate) last_reply: i64,
     /// Historical pages retain their selected range rather than polling forward.
     pub(crate) historical: bool,
 }
@@ -25,11 +31,29 @@ pub(crate) struct ThreadWindow {
 fn render_window_nav(board: &Board, thread: &Thread, window: ThreadWindow) -> String {
     let mut nav = String::new();
     let short = escape_html(&board.short_name);
+    if window.first_reply > 0 {
+        super::append_html(
+            &mut nav,
+            format_args!(
+                r#"<span class="thread-window-range">Showing replies {}–<span data-role="thread-window-end">{}</span></span> "#,
+                window.first_reply, window.last_reply,
+            ),
+        );
+    }
     if let Some(before) = window.older_before {
         super::append_html(
             &mut nav,
             format_args!(
                 r#"<a href="/{short}/thread/{}?before={before}">[ Older replies ]</a> "#,
+                thread.id
+            ),
+        );
+    }
+    if let Some(after) = window.newer_after {
+        super::append_html(
+            &mut nav,
+            format_args!(
+                r#"<a href="/{short}/thread/{}?after={after}">[ Newer replies ]</a> "#,
                 thread.id
             ),
         );
@@ -237,13 +261,19 @@ pub fn delete_post_page(
 }
 
 /// Renders the top or bottom thread navigation controls.
-fn render_thread_nav(board: &Board, thread: &Thread, is_bottom: bool) -> String {
+fn render_thread_nav(
+    board: &Board,
+    thread: &Thread,
+    is_bottom: bool,
+    window: ThreadWindow,
+) -> String {
     let board_short = escape_html(&board.short_name);
     let position = if is_bottom { "bottom" } else { "top" };
     let jump_link = if is_bottom { "#top" } else { "#bottom" };
     let jump_label = if is_bottom { "Top" } else { "Bottom" };
     let return_suffix = if thread.archived { "/archive" } else { "" };
-    let refresh_controls = if thread.archived {
+    let hide_refresh = thread.archived || window.historical;
+    let refresh_controls = if hide_refresh {
         String::new()
     } else {
         format!(
@@ -259,7 +289,7 @@ fn render_thread_nav(board: &Board, thread: &Thread, is_bottom: bool) -> String 
             thread_id = thread.id,
         )
     };
-    let update_status = if thread.archived {
+    let update_status = if hide_refresh {
         ""
     } else if is_bottom {
         r#"<span class="autoupdate-status" data-role="autoupdate-status"></span>"#
@@ -382,7 +412,7 @@ pub fn thread_page(
         admin_csrf_token,
         poll,
         error,
-        success,
+        success.map(|message| (message, None)),
         reply_prefill,
         edit_overlay_state,
         current_theme,
@@ -415,7 +445,7 @@ pub(crate) fn thread_page_window(
     admin_csrf_token: Option<&str>,
     poll: Option<&crate::models::PollData>,
     error: Option<&str>,
-    success: Option<&str>,
+    success: Option<(&str, Option<i64>)>,
     reply_prefill: Option<&super::forms::PostFormState>,
     edit_overlay_state: Option<&EditOverlayState>,
     current_theme: Option<&str>,
@@ -506,14 +536,18 @@ pub(crate) fn thread_page_window(
         String::new()
     };
 
-    if let Some(msg) = success {
-        crate::templates::append_html(
-            &mut body,
-            format_args!(
-                r#"<div class="post-success-banner">{}</div>"#,
-                escape_html(msg)
-            ),
+    let success = success.map(|(message, target)| {
+        let banner = format!(
+            r#"<div class="post-success-banner" role="status">{}</div>"#,
+            escape_html(message)
         );
+        (
+            banner,
+            target.filter(|id| posts.iter().any(|post| post.id == *id)),
+        )
+    });
+    if let Some((banner, None)) = &success {
+        body.push_str(banner);
     }
 
     if let Some(msg) = error {
@@ -544,7 +578,7 @@ pub(crate) fn thread_page_window(
             bn = escape_html(&board.name),
             access_badge = super::board::board_access_badge(board),
             admin_toolbar = admin_toolbar,
-            top_nav = render_thread_nav(board, thread, false)
+            top_nav = render_thread_nav(board, thread, false, window)
         ),
     );
     {
@@ -584,6 +618,11 @@ pub(crate) fn thread_page_window(
         ),
     );
     for post in posts {
+        if let Some((banner, Some(id))) = &success {
+            if *id == post.id {
+                body.push_str(banner);
+            }
+        }
         let post_html = render_post(
             post,
             &board.short_name,
@@ -667,7 +706,7 @@ pub(crate) fn thread_page_window(
             "unlock posting",
         ));
     }
-    body.push_str(&render_thread_nav(board, thread, true));
+    body.push_str(&render_thread_nav(board, thread, true, window));
 
     body.push_str(&compress_modal_script(
         board.max_image_size_bytes(),
@@ -749,8 +788,8 @@ fn render_poll(
     let mut html = format!(
         r#"<div class="poll-container" id="poll">
 <div class="poll-header">
-  <span class="poll-icon">📊</span>
-  <span class="poll-question">{q}</span>
+  <span class="poll-icon" aria-hidden="true">📊</span>
+  <span class="poll-question" id="poll-question" dir="auto">{q}</span>
   <span class="poll-status {status_class}">[{expires}]</span>
 </div>"#,
         q = escape_html(&pd.poll.question),
@@ -782,7 +821,7 @@ fn render_poll(
                 format_args!(
                     r#"<div class="poll-option-result{voted}">
   <div class="poll-option-label">
-    {check}<span class="poll-opt-text">{text}</span>
+    {check}<span class="poll-opt-text" dir="auto">{text}</span>
     <span class="poll-opt-count">{votes} ({pct}%)</span>
   </div>
   <div class="poll-bar-track"><div class="poll-bar-fill" style="width:{pct}%"></div></div>
@@ -810,7 +849,8 @@ fn render_poll(
                 r#"<form class="poll-vote-form" method="POST" action="/vote">
 <input type="hidden" name="_csrf"     value="{csrf}">
 <input type="hidden" name="thread_id" value="{tid}">
-<input type="hidden" name="board"     value="{board}">"#,
+<input type="hidden" name="board"     value="{board}">
+<fieldset class="poll-vote-options" aria-labelledby="poll-question">"#,
                 csrf = escape_html(csrf_token),
                 tid = thread.id,
                 board = escape_html(board_short)
@@ -822,7 +862,7 @@ fn render_poll(
                 format_args!(
                     r#"<label class="poll-vote-option">
   <input type="radio" name="option_id" value="{id}" required>
-  <span class="poll-opt-text">{text}</span>
+  <span class="poll-opt-text" dir="auto">{text}</span>
 </label>"#,
                     id = opt.id,
                     text = escape_html(&opt.text)
@@ -830,7 +870,7 @@ fn render_poll(
             );
         }
         html.push_str(
-            r#"<button type="submit" class="poll-vote-btn">[ Cast Vote ]</button></form>"#,
+            r#"</fieldset><button type="submit" class="poll-vote-btn">[ Cast Vote ]</button></form>"#,
         );
     }
 

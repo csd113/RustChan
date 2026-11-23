@@ -1,6 +1,6 @@
 use super::access::{board_access_cookie_from_jar, load_board_access_context};
 use super::{
-    check_csrf_jar, current_theme_from_jar, db, header, new_csrf_token, safe_return_to, sha256_hex,
+    check_csrf_jar, db, header, new_csrf_token, safe_return_to, sha256_hex,
     should_set_public_secure_cookie, templates, user_preferences_from_jar, viewer_preference_key,
     AppError, AppState, Cookie, CookieJar, Duration, Form, HeaderMap, HeaderValue, Path, Query,
     Redirect, Response, Result, SameSite, SecureCookieContext, State, StatusCode,
@@ -609,7 +609,6 @@ pub(in crate::server) async fn set_user_preferences(
     let secure_cookie = should_set_public_secure_cookie(&headers, secure_context);
 
     let existing_preferences = user_preferences_from_jar(&jar);
-    let existing_theme = current_theme_from_jar(&jar);
     let submitted_full_form = form.preferences_form.as_deref() == Some("1")
         || (form.theme.is_some()
             && form.video_audio.is_some()
@@ -618,8 +617,7 @@ pub(in crate::server) async fn set_user_preferences(
     let theme = form
         .theme
         .as_deref()
-        .and_then(templates::normalize_theme_slug)
-        .or(existing_theme);
+        .and_then(templates::normalize_theme_slug);
     let video_audio = match form.video_audio.as_deref() {
         Some("mute") => "mute",
         Some("on") => "on",
@@ -664,7 +662,7 @@ pub(in crate::server) async fn set_user_preferences(
             secure_cookie,
         ))
     } else {
-        jar.remove(Cookie::from(USER_THEME_COOKIE))
+        jar
     };
     let jar = jar
         .add(public_preference_cookie(

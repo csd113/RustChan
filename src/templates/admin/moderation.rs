@@ -105,7 +105,7 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
     let mut report_rows = String::new();
     if view.moderation.reports.is_empty() {
         report_rows.push_str(
-            r#"<tr><td colspan="6" style="color:var(--text-dim);text-align:center">no open reports</td></tr>"#,
+            r#"<tr role="row"><td role="cell" colspan="6" style="color:var(--text-dim);text-align:center">no open reports</td></tr>"#,
         );
     }
     for rc in view.moderation.reports {
@@ -114,7 +114,7 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
         let reason = if rc.report.reason.chars().nth(160).is_some() {
             let summary: String = rc.report.reason.chars().take(80).collect();
             format!(
-                r#"<div class="admin-report-summary">{summary}…</div><details class="admin-report-detail"><summary>Full report</summary><p>{reason}</p></details>"#,
+                r#"<div class="admin-report-desktop"><div class="admin-report-summary">{summary}…</div><details class="admin-report-detail"><summary>Full report</summary><p>{reason}</p></details></div><div class="admin-report-mobile">{reason}</div>"#,
                 summary = escape_html(&summary),
             )
         } else {
@@ -132,16 +132,22 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
                 )
             },
         );
+        let post_url = crate::utils::redirect::thread_post_url(
+            &rc.board_short,
+            rc.report.thread_id,
+            rc.report.post_id,
+            None,
+        );
         crate::templates::append_html(
             &mut report_rows,
             format_args!(
-                r#"<tr>
-<td><a href="/{board}/thread/{tid}#p{pid}" title="view post">/{board}/ No.{pid}</a></td>
-<td>{user_info}</td>
-<td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{preview}">{preview}</td>
-<td>{reason}</td>
-<td style="white-space:nowrap;font-size:0.78rem">{age}</td>
-<td style="white-space:nowrap">
+                r#"<tr role="row">
+<td role="cell"><a href="{post_url}" title="view post">/{board}/ No.{pid}</a></td>
+<td role="cell">{user_info}</td>
+<td role="cell" class="admin-report-preview" title="{preview}">{preview}</td>
+<td role="cell" class="admin-report-reason"><span class="admin-report-mobile admin-report-label">Reason</span>{reason}</td>
+<td role="cell" style="font-size:0.78rem">{age}</td>
+<td role="cell">
   <form method="POST" action="/admin/report/resolve" style="display:inline">
     <input type="hidden" name="_csrf"      value="{csrf}">
     <input type="hidden" name="report_id"  value="{rid}">
@@ -150,7 +156,7 @@ fn render_report_rows(view: &AdminPanelViewModel<'_>) -> String {
 </td>
 </tr>"#,
                 board = escape_html(&rc.board_short),
-                tid = rc.report.thread_id,
+                post_url = escape_html(&post_url),
                 pid = rc.report.post_id,
                 user_info = user_info,
                 preview = preview,
@@ -255,10 +261,10 @@ fn render_admin_moderation_section(
     </div>
     <div class="admin-subsection admin-subsection-tight">
       <h4>// report inbox{report_badge}</h4>
-      <div class="admin-table-wrap" tabindex="0" role="region" aria-label="Report inbox">
-      <table class="admin-table admin-report-table">
-        <thead><tr><th>post</th><th>user</th><th>content preview</th><th>reason</th><th>filed</th><th>action</th></tr></thead>
-        <tbody>{report_rows}</tbody>
+      <div class="admin-table-wrap admin-report-table-wrap" tabindex="0" role="region" aria-label="Report inbox">
+      <table class="admin-table admin-report-table" role="table">
+        <thead><tr><th scope="col">post</th><th scope="col">user</th><th scope="col">content preview</th><th scope="col">reason</th><th scope="col">filed</th><th scope="col">action</th></tr></thead>
+        <tbody role="rowgroup">{report_rows}</tbody>
       </table>
       </div>
     </div>

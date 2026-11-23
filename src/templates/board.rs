@@ -98,30 +98,29 @@ fn render_board_card(
     } else {
         format!("/{}", escape_html(&board.short_name))
     };
-    let href = if board.nsfw && !nsfw_consent {
-        format!("/?nsfw={}", urlencoding_simple(&board.short_name))
-    } else {
-        board_href
-    };
-    let action_attr = if board.nsfw && !nsfw_consent {
+    let gate_href = (board.nsfw && !nsfw_consent)
+        .then(|| format!("/?nsfw={}", urlencoding_simple(&board.short_name)));
+    let href = gate_href.as_deref().unwrap_or(&board_href);
+    let action_attr = if gate_href.is_some() {
         " data-action=\"open-nsfw-disclaimer\""
     } else {
         ""
     };
     let return_to_attr = if board.nsfw {
         format!(
-            r#" data-return-to="/{}" data-board-label="/{}/""#,
-            if board.access_mode.requires_view_password() {
-                format!("{}/unlock", escape_html(&board.short_name))
-            } else if user_preferences.preferred_board_view.is_catalog() {
-                format!("{}/catalog", escape_html(&board.short_name))
-            } else {
-                escape_html(&board.short_name)
-            },
+            r#" data-return-to="{board_href}" data-board-label="/{}/""#,
             escape_html(&board.short_name)
         )
     } else {
         String::new()
+    };
+    let preference_attr = if board.access_mode.requires_view_password() {
+        String::new()
+    } else {
+        format!(
+            r#" data-board-preference="{}""#,
+            escape_html(&board.short_name)
+        )
     };
     let thread_word = if stats.thread_count == 1 {
         "thread"
@@ -171,7 +170,7 @@ fn render_board_card(
     format!(
         r#"<div class="board-card"{nsfw_attr}>
   {reorder_controls}
-  <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}>
+  <a class="board-card-link" href="{href}"{action_attr}{return_to_attr}{preference_attr}>
     <div class="board-card-short"><span class="board-card-slug">/{sh}/</span><span class="board-card-badges">{nsfw}{access_badge}</span></div>
     <div class="board-card-name">{name}</div>
     <div class="board-card-desc">{description}</div>
@@ -938,7 +937,7 @@ pub fn board_page<S: std::hash::BuildHasher, P: std::hash::BuildHasher>(
         crate::templates::append_html(
             &mut body,
             format_args!(
-                r#"<div class="post-error-banner">&#9888; {}</div>"#,
+                r#"<div class="post-error-banner" id="thread-composer-error" role="alert" tabindex="-1" autofocus>&#9888; {}</div>"#,
                 escape_html(msg)
             ),
         );
@@ -1587,33 +1586,51 @@ pub fn search_page(
     } else {
         format!("{} results", pagination.total)
     };
+    let board_short = escape_html(&board.short_name);
+    let board_url = super::board_href(&board.short_name, user_preferences);
+    let query_text = escape_html(query);
+    let query_url = format!(
+        "/{}/search?q={}",
+        board.short_name,
+        urlencoding_simple(query)
+    );
     let mut body = format!(
         r#"<div class="page-box">
 <div class="board-search-header">
-  <h2 class="board-search-title">Search /{}/</h2>
-  <p class="board-search-summary">Showing results for "{}".</p>
+  <h1 class="board-search-title">Search /{board_short}/</h1>
+  <a class="board-search-back" href="{board_url}">Browse /{board_short}/</a>
 </div>
-<form method="GET" action="/{}/search" class="search-form board-search-form">
-  <label class="catalog-sort-label board-search-label" for="board-search-input">Query:</label>
-  <input id="board-search-input" type="text" name="q" value="{}" maxlength="{}">
-  <button type="submit">search</button>
-</form>"#,
-        escape_html(&board.short_name),
-        escape_html(query),
-        escape_html(&board.short_name),
-        escape_html(query),
-        SEARCH_QUERY_MAX_CHARS,
+<form method="GET" action="/{board_short}/search" class="search-form board-search-form" role="search" aria-label="Board search">
+  <label class="board-search-label" for="board-search-input">Search terms</label>
+  <input id="board-search-input" type="search" name="q" value="{query_text}" maxlength="{SEARCH_QUERY_MAX_CHARS}" enterkeyhint="search" required>
+  <button type="submit">Search</button>
+</form>"#
     );
 
-    if posts.is_empty() {
+    if query.is_empty() {
         body.push_str(
-            r#"<p class="catalog-empty-state board-search-empty">no results found. try a different query.</p>"#,
+            r#"<p class="catalog-empty-state board-search-empty">Enter one or more words to search posts on this board.</p>"#,
+        );
+    } else if pagination.total == 0 {
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<p class="catalog-empty-state board-search-empty">No posts match <bdi>{query_text}</bdi>. Try a shorter search or different words.</p>"#,
+            ),
+        );
+    } else if posts.is_empty() {
+        crate::templates::append_html(
+            &mut body,
+            format_args!(
+                r#"<p class="catalog-empty-state board-search-empty">There are no results on this page. <a href="{}">Return to the first page of results</a>.</p>"#,
+                escape_html(&query_url),
+            ),
         );
     } else {
         crate::templates::append_html(
             &mut body,
             format_args!(
-                r#"<p class="board-search-summary board-search-summary-results">{}</p>"#,
+                r#"<p class="board-search-summary">Results for <bdi>{query_text}</bdi> · {}</p>"#,
                 escape_html(&result_label)
             ),
         );
@@ -1638,17 +1655,15 @@ pub fn search_page(
                 },
             ));
         }
-        body.push_str(&render_pagination(
-            pagination,
-            &format!(
-                "/{}/search?q={}",
-                escape_html(&board.short_name),
-                urlencoding_simple(query)
-            ),
-        ));
+        body.push_str(&render_pagination(pagination, &query_url));
     }
 
     body.push_str("</div>");
+    let current_path = if pagination.page > 1 {
+        format!("{query_url}&page={}", pagination.page)
+    } else {
+        query_url
+    };
     base_layout_with_preferences(
         &format!("search — /{}/", board.short_name),
         Some(&board.short_name),
@@ -1658,11 +1673,7 @@ pub fn search_page(
         current_theme,
         Some(&board.default_theme),
         collapse_greentext,
-        &format!(
-            "/{}/search?q={}",
-            board.short_name,
-            urlencoding_simple(query)
-        ),
+        &current_path,
         user_preferences,
     )
 }

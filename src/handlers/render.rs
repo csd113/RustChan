@@ -61,6 +61,9 @@ pub(super) fn thread_page_etag_signature(data: &ThreadPageData) -> String {
     update_thread_signature(&mut hasher, &data.thread);
     hasher.update([u8::from(data.window.historical)]);
     update_sig_i64(&mut hasher, data.window.older_before.unwrap_or(0));
+    update_sig_i64(&mut hasher, data.window.newer_after.unwrap_or(0));
+    update_sig_i64(&mut hasher, data.window.first_reply);
+    update_sig_i64(&mut hasher, data.window.last_reply);
     hasher.update([
         u8::from(data.thread_preference.pinned),
         u8::from(data.thread_preference.hidden),
@@ -232,7 +235,7 @@ pub(super) fn load_thread_page_data(
     cookie_secret: &str,
     is_admin: bool,
 ) -> Result<ThreadPageData> {
-    load_thread_page_data_before(
+    load_thread_page_data_window(
         conn,
         board,
         thread_id,
@@ -244,14 +247,14 @@ pub(super) fn load_thread_page_data(
 }
 
 /// Load a bounded historical or current thread window.
-pub(super) fn load_thread_page_data_before(
+pub(super) fn load_thread_page_data_window(
     conn: &rusqlite::Connection,
     board: Board,
     thread_id: i64,
     client_ip: &str,
     cookie_secret: &str,
     is_admin: bool,
-    before: Option<i64>,
+    cursor: Option<db::ReplyWindowCursor>,
 ) -> Result<ThreadPageData> {
     let tx = conn.unchecked_transaction()?;
     let board_id = board.id;
@@ -260,17 +263,34 @@ pub(super) fn load_thread_page_data_before(
     if thread.board_id != board_id {
         return Err(AppError::NotFound("Thread not found in this board.".into()));
     }
-    let (posts, older_before) = db::get_thread_post_window(&tx, thread_id, before)?;
+    let posts = db::get_thread_post_window_with_cursor(&tx, thread_id, cursor)?;
+    let historical = cursor.is_some();
+    let mut window = templates::thread::ThreadWindow {
+        historical,
+        ..Default::default()
+    };
+    if let Some(first) = posts.iter().find(|post| !post.is_op) {
+        let reply_count = i64::try_from(posts.iter().filter(|post| !post.is_op).count())
+            .map_err(|error| AppError::Internal(error.into()))?;
+        let preceding = if historical {
+            db::count_replies_before(&tx, thread_id, first.id)?
+        } else {
+            thread.reply_count.saturating_sub(reply_count).max(0)
+        };
+        window.first_reply = preceding.saturating_add(1);
+        window.last_reply = preceding.saturating_add(reply_count);
+        window.older_before = (preceding > 0).then_some(first.id);
+        if window.last_reply < thread.reply_count {
+            window.newer_after = posts.last().map(|post| post.id);
+        }
+    }
     let ip_hash = hash_ip(client_ip, cookie_secret);
     let poll = db::get_poll_for_thread(&tx, thread_id, &ip_hash)?;
     let thread_preference =
         db::get_thread_preference(&tx, &ip_hash, thread_id)?.unwrap_or_default();
     tx.commit()?;
     Ok(ThreadPageData {
-        window: templates::thread::ThreadWindow {
-            older_before,
-            historical: before.is_some(),
-        },
+        window,
         board,
         thread,
         posts,
@@ -290,7 +310,7 @@ pub(super) fn render_thread_page(
     csrf_token: &str,
     admin_csrf_token: Option<&str>,
     error: Option<&str>,
-    success: Option<&str>,
+    success: Option<(&str, Option<i64>)>,
     reply_prefill: Option<&templates::forms::PostFormState>,
     edit_overlay_state: Option<&templates::thread::EditOverlayState>,
     current_theme: Option<&str>,
