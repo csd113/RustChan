@@ -65,10 +65,10 @@ time        = "0.3.55"
 serde      = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # toml 1.0: serde parsing is built-in, no feature flag needed.
-toml  = "1.2.1"
+toml  = "1.2.3"
 
 argon2  = "0.6.0"
-sha2    = "0.11.1"
+sha2    = "0.11.2"
 # Semantic versions also protect database compatibility; compression is used by PDF processing.
 semver = "1.0.28"
 flate2 = "1.1.11"
@@ -86,9 +86,9 @@ gif = { version = "0.14.2", default-features = false, features = ["std", "color_
 # Container inspection only for video; no video decoders are enabled.
 symphonia = { version = "0.6.1", default-features = false, features = ["aac", "adpcm", "alac", "flac", "mp1", "mp2", "mp3", "pcm", "vorbis", "isomp4", "mkv", "ogg", "wav", "exp-video-codecs"] }
 # Symphonia supplies Opus packets; this decoder avoids native libopus.
-opus-pure = "0.2.3"
+opus-pure = "0.2.5"
 # HEVC intra still pictures only; no native library or video framework.
-heic-rs = { version = "0.1.4", default-features = false, features = ["std"] }
+heic-rs = { version = "0.1.5", default-features = false, features = ["std"] }
 
 # Pure-Rust first-page PDF previews, with embedded standard fonts.
 hayro = { version = "0.9.0", default-features = false, features = ["embed-fonts"] }
@@ -96,21 +96,21 @@ hayro = { version = "0.9.0", default-features = false, features = ["embed-fonts"
 # Apply JPEG Orientation tags before thumbnailing so phone photos display upright.
 kamadak-exif = "0.6.2"
 
-clap = { version = "4.6.8", features = ["derive"] }
+clap = { version = "4.6.10", features = ["derive"] }
 
 uuid      = { version = "1.29.3", features = ["v4", "serde"] }
 chrono    = { version = "0.4.45", features = ["serde"] }
 dashmap      = "6.2.1"
 parking_lot  = "0.13.0"
-anyhow       = "1.0.104"
+anyhow       = "1.0.105"
 regex     = "1.13.2"
 ipnet     = "2.12.2"
 
 # Backup preflight scans use `file_names()` without decompressing entries.
-zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # URL validation for admin-supplied external banner links.
-url = "2.5.8"
+url = "2.5.9"
 
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
@@ -160,11 +160,11 @@ rustls         = { version = "0.23.46", default-features = false, features = ["l
 rustls-acme    = { version = "0.15.4", default-features = false, features = ["ring", "tls12", "tokio", "webpki-roots"], optional = true }
 rcgen          = { version = "0.14.10", optional = true }
 pem-rfc7468    = { version = "1.0.0", optional = true, features = ["std"] }
-x509-cert      = { version = "0.3.0", optional = true }
+x509-cert      = { version = "0.3.1", optional = true }
 
 # HTTPS listen integration for Axum (handles Static cert path)
 axum-server    = { version = "0.9.2", features = ["tls-rustls-no-provider"] }
-hyper          = { version = "1.12.0", features = ["http1", "http2", "server"], optional = true }
+hyper          = { version = "1.13.0", features = ["http1", "http2", "server"], optional = true }
 hyper-util     = { version = "0.1.21", features = ["tokio", "server"] }
 
 # Terminal UI

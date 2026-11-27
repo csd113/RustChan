@@ -380,7 +380,7 @@ pub fn get_all_boards_with_stats(
     let out = stmt
         .query_map([], |row| {
             let board = map_board(row)?;
-            let thread_count: i64 = row.get(33)?;
+            let thread_count: i64 = row.get("thread_count")?;
             Ok(crate::models::BoardStats {
                 board,
                 thread_count,

@@ -7,6 +7,19 @@ working branch and are not part of the latest published download.
 
 ## Unreleased
 
+- Long threads show which replies you’re reading and let you move to older or
+  newer replies without jumping straight back to the latest posts.
+- Board search shows what you searched for and how many posts matched. If
+  nothing matches, it suggests what to try and gives you a way back to the board.
+- Poll choices are easier to add and remove with a keyboard, and the form tells
+  you when you’ve reached the limit.
+- Moderators can read full report reasons on phones without scrolling sideways,
+  and report links take them straight to the right post.
+- Fixed the thread counts shown on home-page board cards.
+- Updated the README screenshots to show the current desktop and phone layouts.
+- Updated compatible dependencies, including fixes for cookie handling and URL
+  parsing.
+
 - Fixed optional terminal relaunch on Windows for executable paths containing
   percent signs or shell metacharacters. If the relaunch fails, the original
   process continues startup.

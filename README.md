@@ -98,7 +98,8 @@ Prefer another installation method? Use [Docker](docs/containers.md) or
 
 ## Screenshots
 
-Captured from the published v1.5.0 Docker image, these views show a demonstration site with sample conversations and original sample artwork, using the default Forest theme.
+These views were captured from the current development build of RustChan with
+the default Forest theme, fictional conversations, and original sample artwork.
 
 **Home page — choose a board and see what is happening.**
 
