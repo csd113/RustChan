@@ -19,6 +19,7 @@ working branch and are not part of the latest published download.
 - Updated the README screenshots to show the current desktop and phone layouts.
 - Updated compatible dependencies, including fixes for cookie handling and URL
   parsing.
+- Updated the Rust toolchain used for CI and native releases to 1.100.1.
 
 - Fixed optional terminal relaunch on Windows for executable paths containing
   percent signs or shell metacharacters. If the relaunch fails, the original
