@@ -28,17 +28,18 @@ Open the [official releases page](https://github.com/csd113/RustChan/releases/la
 and expand **Assets**. Download the ZIP for your computer, then extract it to a
 folder you can write to. Choose an app ZIP, not GitHub's **Source code** archive.
 
-The published v1.7.5 downloads are:
+The v1.8.0 ZIP filenames are listed below. If you download a different release,
+use the filenames under that release’s Assets.
 
 | Your computer | ZIP filename |
 | --- | --- |
-| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-windows-x86_64.zip` |
-| Mac with an Apple chip, such as M1 or later | `rustchan-cli-v1.7.5-macos-apple-silicon.zip` |
-| Mac with an Intel processor | `rustchan-cli-v1.7.5-macos-intel.zip` |
-| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.7.5-linux-x86_64.zip` |
-| Linux, ARM64 | `rustchan-cli-v1.7.5-linux-arm64.zip` |
+| Windows, Intel or AMD 64-bit | `rustchan-cli-v1.8.0-windows-x86_64.zip` |
+| Mac with an Apple chip, such as M1 or later | `rustchan-cli-v1.8.0-macos-apple-silicon.zip` |
+| Mac with an Intel processor | `rustchan-cli-v1.8.0-macos-intel.zip` |
+| Linux, Intel or AMD 64-bit | `rustchan-cli-v1.8.0-linux-x86_64.zip` |
+| Linux, ARM64 | `rustchan-cli-v1.8.0-linux-arm64.zip` |
 
-Linux v1.7.5 binaries require **glibc 2.39 or newer**, as provided by Ubuntu
+The official Linux binaries require **glibc 2.39 or newer**, as provided by Ubuntu
 24.04. For another environment, see [requirements and alternatives](SETUP.md#requirements).
 The [setup guide](SETUP.md#check-the-download) also explains how to verify the ZIP.
 
@@ -173,4 +174,4 @@ If you are reading the README included in a ZIP, open the
 
 These guides describe this checkout. The [changelog](CHANGELOG.md) separates
 unreleased work from published releases; a download may not include every feature
-shown here. The package version is currently 1.7.5.
+shown here. This checkout builds RustChan 1.8.0.

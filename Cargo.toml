@@ -1,6 +1,6 @@
 [package]
 name = "rustchan"
-version = "1.7.5"
+version = "1.8.0"
 edition = "2021"
 # Rust 1.100.0 is the supported minimum for the package and build tooling.
 rust-version.workspace = true

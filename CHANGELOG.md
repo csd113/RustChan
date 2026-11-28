@@ -5,65 +5,58 @@ upgrade, use [setup](SETUP.md), [backups](docs/backups.md), and
 [software updates](docs/software-updates.md). Unreleased entries describe the
 working branch and are not part of the latest published download.
 
-## Unreleased
+## RustChan 1.8.0
 
-- Long threads show which replies you’re reading and let you move to older or
-  newer replies without jumping straight back to the latest posts.
-- Board search shows what you searched for and how many posts matched. If
-  nothing matches, it suggests what to try and gives you a way back to the board.
-- Poll choices are easier to add and remove with a keyboard, and the form tells
-  you when you’ve reached the limit.
-- Moderators can read full report reasons on phones without scrolling sideways,
-  and report links take them straight to the right post.
-- Fixed the thread counts shown on home-page board cards.
-- Updated the README screenshots to show the current desktop and phone layouts.
-- Updated compatible dependencies, including fixes for cookie handling and URL
-  parsing.
-- Updated the Rust toolchain used for CI and native releases to 1.100.1.
-- Setup keeps your draft when you return from review to edit settings. Passwords
-  must be entered again. Rejected uploads now point to the board’s allowed
-  file types.
-- Updated bundled SQLite to 3.54.1 and replaced Chrono with maintained
-  date and time libraries, including for ACME certificate renewal.
-- Fixed HTTP/2 requests on the automatic ACME HTTPS listener.
+### Browsing and posting
 
-- Fixed optional terminal relaunch on Windows for executable paths containing
-  percent signs or shell metacharacters. If the relaunch fails, the original
-  process continues startup.
-- Fixed Windows backup and restore failures when flushing staged files or
-  packaging the database snapshot into a split ZIP.
-- Fixed FFmpeg video thumbnails falling back to placeholders on Windows.
-- Fixed Windows-specific diagnostics in the strict Clippy checks.
-- Added opt-in per-board strict metadata-safe uploads. Supported images are
-  rebuilt as metadata-free WebP; unsupported formats and failed sanitization
-  are rejected without retaining originals. Covers posting slots, historical
-  deduplication and policy changes during posting, with transactional schema
-  upgrades and board-backup compatibility. Existing media is unchanged; see
-  the media guide for supported formats and privacy/rendering limits.
+- Long threads show which replies you’re reading. Move to older or newer replies
+  without losing your place, and use Top and Bottom with a keyboard.
+- Board search keeps your search terms on the results page and shows how many
+  posts matched. If nothing matches, it suggests what to try next.
+- Poll choices are easier to add or remove with a keyboard. The form tells you
+  when you’ve reached the limit. Home-page board cards show corrected thread
+  counts.
+- File pickers now let you choose the advertised BMP and TIFF formats. When
+  an upload is rejected, the message points to the board’s accepted types
+  without clearing your draft. If a post was saved but its attachment could
+  not be made available, RustChan says so instead of reporting full success.
 
-- Reworked the documentation around downloading, running, and setting up a first
-  site. Added separate administration and deployment guides, kept the README
-  artwork, and clarified platform requirements and manual updates.
-- Updated Tor Arti to 2.8.0 (0.48.0 crates).
-- Hardened the live terminal console: rejected operations recover with feedback,
-  media failures remain reachable at standard sizes, Tor/listener states reflect
-  observed startup/publication, and disk/query freshness is independent of health.
-  Added explicit console/ASCII modes, bounded sampling, stronger log redaction,
-  and ownership of console operations during graceful shutdown.
-- Removed the optional binary-upgrade job from CI.
-- Enabled HTTPS protocol negotiation for HTTP/2 with HTTP/1.1 fallback on
-  manual, development and ACME certificate paths.
-- Check final media destinations before committing posts. Late publication
-  failures now identify the saved post instead of falsely confirming upload success;
-  retries do not confirm success while required media is missing.
+### Setup and moderation
 
-- Fixed private setup by collecting a separate board password and keeping its
-  reviewed hash out of the HTML. Invalid upload limits now fail before review
-  instead of causing an internal error when setup finishes. Removed the
-  nonfunctional read-only setup toggle; password-required posting remains available.
-- Fixed setup silently disabling video, audio, and PDF uploads when image
-  uploads were unchecked. Each media setting now applies independently.
-- Made advertised BMP and TIFF uploads selectable in posting file pickers.
+- Returning from setup review keeps your settings and asks you to re-enter
+  passwords. Private boards can have their own password, separate from the
+  administrator password. Setup checks upload limits before review and lets
+  you set image, video, audio, and PDF permissions independently.
+- Theme and other visitor preferences can be saved from login and setup.
+- Moderators can read the full reason for a report on a phone without scrolling
+  sideways. Report links go straight to the reported post.
+- Boards can opt in to metadata-safe image uploads. RustChan rebuilds supported
+  images as WebP without their original metadata and rejects files it cannot
+  safely convert. This does not remove identifying details visible in the
+  image and does not change existing uploads.
+- Improved image orientation handling for JPEGs and edge quality when
+  resizing transparent images.
+
+### Running RustChan
+
+- The terminal console makes it easier to inspect tasks, logs, media failures,
+  and listener status. It offers plain logging and an ASCII mode.
+- Fixed Windows backup and restore issues, FFmpeg thumbnail fallbacks, and
+  optional terminal relaunch for executable paths with special characters.
+- HTTPS negotiates HTTP/2 with HTTP/1.1 fallback, including when RustChan manages
+  certificates through ACME.
+- Updated bundled SQLite to 3.54.1, replaced the unmaintained date and time
+  dependency in application and ACME code, and updated the bundled Tor client.
+- Updated the setup, administration, and deployment guides and the desktop
+  and phone screenshots.
+
+### Before you upgrade
+
+Stop RustChan, save a complete copy of the data directory and the old
+executable, and replace only the executable. Keep the data path unchanged.
+Startup checks the database before recording the new version. See the
+[upgrade guide](https://github.com/csd113/RustChan/blob/main/docs/software-updates.md)
+and [backup guide](https://github.com/csd113/RustChan/blob/main/docs/backups.md).
 
 ## RustChan 1.7.5 — 2026-11-03
 

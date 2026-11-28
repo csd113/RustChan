@@ -126,8 +126,8 @@ Configuration is read-only here; edit settings in the web admin or settings file
 | C / A | Start board / administrator creation |
 | D / X | Start thread deletion with confirmation |
 
-The console needs at least 44 columns by 14 rows. **The following mode options
-are newer than the published v1.7.5 ZIPs.** Check `--help` for your executable:
+The console needs at least 44 columns by 14 rows. RustChan 1.8.0 supports the
+following options. For an older executable, run `--help` to check availability:
 
 | Option | Behavior |
 | --- | --- |
