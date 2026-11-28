@@ -47,6 +47,8 @@ working branch and are not part of the latest published download.
   certificates through ACME.
 - Updated bundled SQLite to 3.54.1, replaced the unmaintained date and time
   dependency in application and ACME code, and updated the bundled Tor client.
+  The audit has a temporary exception for the Tor client’s Humantime
+  maintenance notice.
 - Updated the setup, administration, and deployment guides and the desktop
   and phone screenshots.
 
