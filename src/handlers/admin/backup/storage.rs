@@ -306,7 +306,9 @@ pub(super) fn backups_root_dir() -> PathBuf {
 
 #[must_use]
 pub(super) fn build_backup_id(_scope: BackupScope, scope_label: &str) -> String {
-    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M").to_string();
+    let timestamp = jiff::ZonedDateTime::now()
+        .strftime("%Y-%m-%d_%H%M")
+        .to_string();
     let short = uuid::Uuid::new_v4().simple().to_string();
     let short = short.get(..6).unwrap_or(&short);
     let scope_label = scope_label.replace([' ', '/'], "-");

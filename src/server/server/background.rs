@@ -564,7 +564,7 @@ pub(super) async fn run_poll_vote_cleanup(
                 let task_result = tokio::task::spawn_blocking(move || {
                     let access_guard = access;
                     if let Ok(conn) = bg2.get() {
-                        let cutoff = chrono::Utc::now().timestamp().saturating_sub(poll_retention_cutoff_secs);
+                        let cutoff = jiff::Timestamp::now().as_second().saturating_sub(poll_retention_cutoff_secs);
                         match crate::db::cleanup_expired_poll_votes(&conn, cutoff) {
                             Ok(n) if n > 0 => {
                                 tracing::info!(target: "polls", removed = n, "Expired poll vote rows purged");

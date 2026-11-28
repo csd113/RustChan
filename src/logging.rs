@@ -355,11 +355,11 @@ fn format_terminal_event(
     let ansi = ANSI_ENABLED.load(Ordering::Relaxed);
     let meta = event.metadata();
 
-    let now = chrono::Local::now();
+    let now = jiff::ZonedDateTime::now();
     if tty {
-        write!(writer, "{} ", now.format("%H:%M:%S%.3f"))?;
+        write!(writer, "{} ", now.strftime("%H:%M:%S%.3f"))?;
     } else {
-        write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
+        write!(writer, "{} ", now.strftime("%Y-%m-%d %H:%M:%S%.3f"))?;
     }
 
     let level = *meta.level();
@@ -393,8 +393,8 @@ fn format_file_event(
 ) -> fmt::Result {
     let meta = event.metadata();
 
-    let now = chrono::Local::now();
-    write!(writer, "{} ", now.format("%Y-%m-%d %H:%M:%S%.3f"))?;
+    let now = jiff::ZonedDateTime::now();
+    write!(writer, "{} ", now.strftime("%Y-%m-%d %H:%M:%S%.3f"))?;
 
     let level = *event.metadata().level();
     write_level_tag(&mut writer, level, false)?;

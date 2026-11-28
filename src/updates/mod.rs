@@ -67,7 +67,11 @@ impl CheckState {
         let discovery = discover_official(VERSION).await;
         *self.status.write() = Status {
             discovery: Some(discovery),
-            checked_at: Some(chrono::Utc::now().to_rfc3339()),
+            checked_at: Some(
+                jiff::Timestamp::now()
+                    .strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
+                    .to_string(),
+            ),
         };
         *last_attempt = Some(Instant::now());
         drop(last_attempt);

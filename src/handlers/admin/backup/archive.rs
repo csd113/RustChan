@@ -11,7 +11,6 @@ use super::{
 };
 use crate::banner;
 use crate::error::{AppError, Result};
-use chrono::Utc;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 
@@ -357,7 +356,7 @@ pub(super) fn convert_transfer_zip_to_full_restore_archive<R: std::io::Read + Se
         .compression_method(zip::CompressionMethod::Deflated);
     let manifest = serde_json::json!({
         "version": 3_i32,
-        "generated_at": Utc::now().timestamp(),
+        "generated_at": jiff::Timestamp::now().as_second(),
         "rustchan_version": env!("CARGO_PKG_VERSION"),
         "db_bytes": db_bytes,
         "upload_file_count": upload_file_count,

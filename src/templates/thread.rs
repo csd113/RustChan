@@ -754,7 +754,7 @@ pub(crate) fn thread_page_window(
 // Poll renderer
 /// Formats the remaining voting window for a poll's status label.
 fn poll_expiry_label(pd: &crate::models::PollData) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let time_left = pd.poll.expires_at.saturating_sub(now);
     if pd.is_expired {
         "closed".to_owned()
@@ -1594,7 +1594,7 @@ fn render_post_with_context(
 
     // Edit link + report button (only on thread pages where show_delete=true)
     if show_delete {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let self_action_controls = owned_post_controls
             .as_ref()
             .filter(|controls| controls.expires_at > now)

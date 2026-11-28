@@ -103,7 +103,7 @@ fn parse_owned_posts_cookie(value: &str) -> Vec<OwnedPostGrant> {
     let Ok(payload) = serde_json::from_slice::<OwnedPostsCookiePayload>(&payload_bytes) else {
         return Vec::new();
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     payload
         .grants
         .into_iter()
@@ -176,7 +176,7 @@ pub(in crate::server::handlers) fn remember_owned_post_until_with_secure(
     expires_at: i64,
     secure: bool,
 ) -> CookieJar {
-    if expires_at <= chrono::Utc::now().timestamp() {
+    if expires_at <= jiff::Timestamp::now().as_second() {
         return forget_owned_post_with_secure(jar, board_short, post_id, secure);
     }
 
@@ -218,7 +218,7 @@ pub(in crate::server::handlers) fn forget_owned_post_with_secure(
 }
 
 fn now_ts() -> i64 {
-    chrono::Utc::now().timestamp()
+    jiff::Timestamp::now().as_second()
 }
 
 fn parse_activity_cookie_entries(raw: &str) -> impl Iterator<Item = &str> {

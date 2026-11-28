@@ -2612,7 +2612,7 @@ pub fn reconcile_managed_media(
     limits: ReconcileLimits,
 ) -> Result<AuditReport> {
     let limits = limits.bounded();
-    let started_at = chrono::Utc::now().timestamp();
+    let started_at = jiff::Timestamp::now().as_second();
     let scan_id = uuid::Uuid::new_v4().simple().to_string();
     tracing::info!(
         target: "media_reconcile",
@@ -2697,7 +2697,7 @@ pub fn reconcile_managed_media(
             &mut report,
         );
     }
-    report.completed_at = chrono::Utc::now().timestamp();
+    report.completed_at = jiff::Timestamp::now().as_second();
     update_metrics(&report);
     log_completion(&report, mode);
     Ok(report)

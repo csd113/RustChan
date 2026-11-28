@@ -744,7 +744,7 @@ pub(crate) fn self_delete_post_with_validation(
                 return Ok((SelfDeleteOutcome::WrongToken, None));
             }
 
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             if now.saturating_sub(created_at) > delete_window_secs {
                 return Ok((SelfDeleteOutcome::WindowClosed, None));
             }
@@ -866,7 +866,7 @@ pub(crate) fn edit_post_with_validation(
             return Ok(false);
         }
 
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         if now.saturating_sub(created_at) > window {
             return Ok(false);
         }
@@ -965,7 +965,7 @@ fn to_fts_query(query: &str) -> Option<String> {
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn search_posts(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     board_id: i64,
     query: &str,
     limit: i64,
@@ -990,7 +990,7 @@ pub fn search_posts(
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
          ORDER BY posts.created_at DESC, posts.id DESC
          LIMIT ?3 OFFSET ?4";
-    super::search_budget::with_search_budget(conn, || {
+    super::search_budget::with_search_budget(conn, |conn| {
         let mut stmt = conn.prepare_cached(sql)?;
         let posts = stmt
             .query_map(params![board_id, fts_query, limit, offset], map_post)?
@@ -1003,7 +1003,7 @@ pub fn search_posts(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn count_search_results(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     board_id: i64,
     query: &str,
 ) -> Result<i64> {
@@ -1011,7 +1011,7 @@ pub fn count_search_results(
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(0);
     };
-    super::search_budget::with_search_budget(conn, || {
+    super::search_budget::with_search_budget(conn, |conn| {
         Ok(conn
             .prepare_cached(
                 "SELECT COUNT(*) FROM (
@@ -1098,7 +1098,7 @@ pub fn record_file_hash(
 // Poll queries
 /// Fetch the full poll for a thread including vote counts and the user's choice.
 ///
-/// Note: poll expiry is checked against the application clock (`chrono::Utc::now`)
+/// Note: poll expiry is checked against the application clock (`jiff::Timestamp::now`)
 /// while `poll_votes` are pruned using the `SQLite` clock (`unixepoch()`). A skew
 /// between the two clocks (e.g. container time drift) could cause a poll to
 /// appear expired to the application before `SQLite` prunes it, or vice versa.
@@ -1111,7 +1111,7 @@ pub fn get_poll_for_thread(
     thread_id: i64,
     ip_hash: &str,
 ) -> Result<Option<crate::models::PollData>> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     let poll_row = conn
         .query_row(

@@ -199,7 +199,7 @@ fn render_task_table(
         );
     } else {
         let compact = table_area.width < 68;
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let rows = tasks.iter().map(|task| {
             let age = task.changed_at.map_or_else(
                 || "—".to_owned(),

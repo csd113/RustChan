@@ -107,7 +107,7 @@ pub fn reopen_setup(conn: &rusqlite::Connection, admin_id: i64) -> Result<()> {
     conn.execute_batch("SAVEPOINT reopen_setup")
         .context("begin reopen setup savepoint")?;
     let result = (|| {
-        let now = chrono::Utc::now().timestamp().to_string();
+        let now = jiff::Timestamp::now().as_second().to_string();
         super::set_site_setting(conn, SETUP_REOPENED_AT_KEY, &now)?;
         super::set_site_setting(conn, SETUP_REOPENED_BY_KEY, &admin_id.to_string())?;
         Ok(())
@@ -139,7 +139,7 @@ pub fn mark_setup_complete(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch("SAVEPOINT mark_setup_complete")
         .context("begin setup completion savepoint")?;
     let result = (|| {
-        let now = chrono::Utc::now().timestamp().to_string();
+        let now = jiff::Timestamp::now().as_second().to_string();
         conn.execute(
             "INSERT INTO site_settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",

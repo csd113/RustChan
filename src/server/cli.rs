@@ -209,7 +209,6 @@ fn write_db_status_output<W: std::io::Write>(
 /// input, or output fails.
 pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
     use crate::{db, utils::crypto};
-    use chrono::TimeZone as _;
     use std::io::Write as _;
 
     let db_path = std::path::Path::new(&crate::config::CONFIG.database_path);
@@ -260,10 +259,10 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                 )?;
                 writeln!(std::io::stdout().lock(), "{}", "-".repeat(45))?;
                 for (id, user, ts) in &rows {
-                    let date = chrono::Local
-                        .timestamp_opt(*ts, 0)
-                        .single()
-                        .map_or_else(|| "?".to_owned(), |d| d.format("%Y-%m-%d").to_string());
+                    let date = jiff::Timestamp::from_second(*ts)
+                        .ok()
+                        .map(|ts| ts.to_zoned_datetime(jiff::tz::TimeZone::system()))
+                        .map_or_else(|| "?".to_owned(), |d| d.strftime("%Y-%m-%d").to_string());
                     writeln!(std::io::stdout().lock(), "{id:<6} {user:<24} {date}")?;
                 }
             }
@@ -366,16 +365,20 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
             hours,
         } => {
             let expires = hours.filter(|&h| h > 0).map(|h| {
-                chrono::Utc::now()
-                    .timestamp()
+                jiff::Timestamp::now()
+                    .as_second()
                     .saturating_add(h.min(87_600).saturating_mul(3600))
             });
             let id = db::add_ban(&conn, &ip_hash, &reason, expires)?;
             let exp_str = expires
-                .and_then(|ts| chrono::Local.timestamp_opt(ts, 0).single())
+                .and_then(|ts| {
+                    jiff::Timestamp::from_second(ts)
+                        .ok()
+                        .map(|ts| ts.to_zoned_datetime(jiff::tz::TimeZone::system()))
+                })
                 .map_or_else(
                     || "permanent".to_owned(),
-                    |d| d.format("%Y-%m-%d %H:%M").to_string(),
+                    |d| d.strftime("%Y-%m-%d %H:%M").to_string(),
                 );
             writeln!(
                 std::io::stdout().lock(),
@@ -405,10 +408,14 @@ pub fn run_admin(action: AdminAction) -> anyhow::Result<()> {
                     let partial = b.ip_hash.get(..16).unwrap_or(b.ip_hash.as_str());
                     let expires = b
                         .expires_at
-                        .and_then(|ts| chrono::Local.timestamp_opt(ts, 0).single())
+                        .and_then(|ts| {
+                            jiff::Timestamp::from_second(ts)
+                                .ok()
+                                .map(|ts| ts.to_zoned_datetime(jiff::tz::TimeZone::system()))
+                        })
                         .map_or_else(
                             || "Permanent".to_owned(),
-                            |d| d.format("%Y-%m-%d %H:%M").to_string(),
+                            |d| d.strftime("%Y-%m-%d %H:%M").to_string(),
                         );
                     let ban_id = b.id;
                     let reason = b.reason.as_deref().unwrap_or("");

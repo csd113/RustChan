@@ -575,7 +575,7 @@ pub(super) fn submit_post(
                     ));
                 };
                 let secs = secs.clamp(60, 30 * 24 * 3600);
-                let expires_at = chrono::Utc::now().timestamp().saturating_add(secs);
+                let expires_at = jiff::Timestamp::now().as_second().saturating_add(secs);
                 Some(db::threads::PollInsert {
                     question: &q,
                     options: &valid_opts,

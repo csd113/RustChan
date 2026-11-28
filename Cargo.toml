@@ -16,7 +16,7 @@ msrv = "1.100.0"
 
 [workspace]
 resolver = "2"
-exclude = ["vendor/symphonia-codec-aac"]
+exclude = ["vendor/symphonia-codec-aac", "vendor/tor-dirmgr", "vendor/rustls-acme"]
 
 [workspace.package]
 rust-version = "1.100.0"
@@ -54,12 +54,10 @@ tokio      = { version = "1.54.1", features = ["full"] }
 tokio-util = "0.7.20"
 captcha    = { version = "1.0.0", default-features = false }
 
-# Arti 0.48 requires rusqlite >=0.36,<0.41, and r2d2_sqlite 0.35 requires 0.40.
-# Newer rusqlite releases use a different libsqlite3-sys. Keep this pair until
-# Arti can share a newer SQLite linkage with the connection pool.
-rusqlite    = { version = "0.40.2", features = ["bundled", "backup", "hooks", "blob"] }
+# Keep Rusqlite and its pool on the same bundled SQLite linkage as Arti.
+rusqlite    = { version = "0.41.1", features = ["bundled", "backup", "hooks", "blob"] }
 r2d2        = "0.8.10"
-r2d2_sqlite = "0.35.0"
+r2d2_sqlite = "0.36.0"
 time        = "0.3.55"
 
 serde      = { version = "1.0.229", features = ["derive"] }
@@ -99,7 +97,7 @@ kamadak-exif = "0.6.2"
 clap = { version = "4.6.10", features = ["derive"] }
 
 uuid      = { version = "1.29.3", features = ["v4", "serde"] }
-chrono    = { version = "0.4.45", features = ["serde"] }
+jiff      = "1.0.3"
 dashmap      = "6.2.1"
 parking_lot  = "0.13.0"
 anyhow       = "1.0.105"
@@ -315,3 +313,10 @@ host_endian_bytes = "deny"
 # Reject detected in-band SBR instead of publishing AAC-LC-only HE-AAC audio.
 [patch.crates-io]
 symphonia-codec-aac = { path = "vendor/symphonia-codec-aac" }
+
+# Backport Arti's Rusqlite 0.41 compatibility until it ships on crates.io.
+# This permits the bundled SQLite update for RUSTSEC-2026-0459.
+tor-dirmgr = { path = "vendor/tor-dirmgr" }
+
+# Keep ACME available without the unmaintained Chrono dependency.
+rustls-acme = { path = "vendor/rustls-acme" }

@@ -253,7 +253,7 @@ fn read_database_stats(connection: &rusqlite::Connection) -> anyhow::Result<Chan
 
 /// Open a bounded, read-only telemetry connection, never creating a database.
 fn telemetry_connection() -> anyhow::Result<rusqlite::Connection> {
-    let connection = rusqlite::Connection::open_with_flags(
+    let mut connection = rusqlite::Connection::open_with_flags(
         &crate::config::CONFIG.database_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;

@@ -136,7 +136,7 @@ async fn readyz_response(state: AppState, include_details: bool) -> Response {
             let latest_full_backup_age_hours = latest_backup.and_then(|backup| {
                 backup
                     .modified_epoch
-                    .map(|ts| chrono::Utc::now().timestamp().saturating_sub(ts).max(0) / 3600)
+                    .map(|ts| jiff::Timestamp::now().as_second().saturating_sub(ts).max(0) / 3600)
             });
             pool.get().map_or(
                 (
@@ -240,7 +240,7 @@ async fn metrics_response(state: AppState) -> Response {
                 .first()
                 .and_then(|backup_file| backup_file.modified_epoch)
                 .map_or(-1, |ts| {
-                    chrono::Utc::now().timestamp().saturating_sub(ts).max(0)
+                    jiff::Timestamp::now().as_second().saturating_sub(ts).max(0)
                 });
             pool.get().map_or(
                 (

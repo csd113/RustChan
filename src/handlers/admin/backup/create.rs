@@ -21,7 +21,6 @@ use axum::http::{header, HeaderMap};
 use axum::response::IntoResponse as _;
 use axum::response::{Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
 use rusqlite::params;
 use serde::Deserialize;
 use std::io::Write;
@@ -258,7 +257,7 @@ pub(in crate::server) fn create_full_backup_to_server(
         format: storage::BACKUP_V4_FORMAT.to_owned(),
         archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
         backup_id,
-        created_at: Utc::now().timestamp(),
+        created_at: jiff::Timestamp::now().as_second(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         scope: storage::BackupScope::FullSite,
@@ -409,7 +408,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     let repair_request = serde_json::json!({
         "operation": operation,
         "job_id": job_id,
-        "requested_at": Utc::now().timestamp(),
+        "requested_at": jiff::Timestamp::now().as_second(),
         "reason": reason,
         "backup_id": backup_id,
     });
@@ -515,7 +514,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         format: storage::BACKUP_V4_FORMAT.to_owned(),
         archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
         backup_id,
-        created_at: Utc::now().timestamp(),
+        created_at: jiff::Timestamp::now().as_second(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         scope: storage::BackupScope::PreMaintenance,
@@ -542,7 +541,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         maintenance: Some(storage::MaintenanceMetadata {
             operation: Some(operation.to_owned()),
             job_id: Some(job_id),
-            requested_at: Some(Utc::now().timestamp()),
+            requested_at: Some(jiff::Timestamp::now().as_second()),
             risk_class: Some("db_mutating".to_owned()),
             includes_uploads: false,
             includes_file_inventory: false,
@@ -999,7 +998,7 @@ pub(in crate::server) async fn create_board_backup(
                 format: storage::BACKUP_V4_FORMAT.to_owned(),
                 archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
                 backup_id,
-                created_at: Utc::now().timestamp(),
+                created_at: jiff::Timestamp::now().as_second(),
                 completed_at: None,
                 rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
                 scope: storage::BackupScope::Board,
@@ -1106,7 +1105,7 @@ pub(super) fn build_full_backup_manifest(
     )?;
     Ok(safety::FullBackupManifest {
         version: 3,
-        generated_at: Utc::now().timestamp(),
+        generated_at: jiff::Timestamp::now().as_second(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         db_bytes,
         upload_file_count,
@@ -1837,7 +1836,7 @@ fn write_board_exports(
 }
 
 fn finalize_saved_backup(root_dir: &Path, mut manifest: storage::BackupManifest) -> Result<String> {
-    manifest.completed_at = Some(Utc::now().timestamp());
+    manifest.completed_at = Some(jiff::Timestamp::now().as_second());
 
     let mut metadata = storage::BackupMetadata {
         format: storage::BACKUP_V4_FORMAT.to_owned(),

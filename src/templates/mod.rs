@@ -3,7 +3,6 @@
 use crate::config::CONFIG;
 use crate::models::{Board, Pagination, Theme, SEARCH_QUERY_MAX_CHARS};
 use crate::utils::sanitize::escape_html;
-use chrono::{Local, TimeZone as _};
 use parking_lot::RwLock;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -608,19 +607,27 @@ pub const fn thread_autoupdate_script() -> &'static str {
 #[must_use]
 /// Formats a Unix timestamp in the server's local time.
 pub fn fmt_ts(ts: i64) -> String {
-    match Local.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        chrono::LocalResult::None | chrono::LocalResult::Ambiguous(_, _) => "unknown".to_owned(),
-    }
+    jiff::Timestamp::from_second(ts).map_or_else(
+        |_| "unknown".to_owned(),
+        |ts| {
+            ts.to_zoned_datetime(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        },
+    )
 }
 
 #[must_use]
 /// Formats a Unix timestamp compactly in the server's local time.
 pub fn fmt_ts_short(ts: i64) -> String {
-    match Local.timestamp_opt(ts, 0) {
-        chrono::LocalResult::Single(dt) => dt.format("%m/%d/%y(%a)%H:%M:%S").to_string(),
-        chrono::LocalResult::None | chrono::LocalResult::Ambiguous(_, _) => "?".to_owned(),
-    }
+    jiff::Timestamp::from_second(ts).map_or_else(
+        |_| "?".to_owned(),
+        |ts| {
+            ts.to_zoned_datetime(jiff::tz::TimeZone::system())
+                .strftime("%m/%d/%y(%a)%H:%M:%S")
+                .to_string()
+        },
+    )
 }
 
 #[must_use]

@@ -2,8 +2,6 @@ use super::storage::BackupStorageMode;
 use super::{board_backup_dir, full_backup_dir, safety, storage};
 use crate::error::{AppError, Result};
 use crate::models::BackupInfo;
-use chrono::Local;
-use chrono::TimeZone as _;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -70,10 +68,11 @@ pub(super) fn invalidate_backup_list_cache(dir: &Path, kind: BackupListKind) {
 fn modified_string_from_epoch(epoch: Option<i64>) -> String {
     epoch
         .and_then(|secs| {
-            Local
-                .timestamp_opt(secs, 0)
-                .single()
-                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+            jiff::Timestamp::from_second(secs).ok().map(|ts| {
+                ts.to_zoned_datetime(jiff::tz::TimeZone::system())
+                    .strftime("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
         })
         .unwrap_or_default()
 }

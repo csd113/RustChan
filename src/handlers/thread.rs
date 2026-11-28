@@ -698,7 +698,7 @@ pub(in crate::server) async fn edit_post_get(
         ));
     }
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     if now > crate::handlers::board::self_action_expiry(context.post.created_at)? {
         return Err(AppError::Forbidden(
             "The 60-second edit window for this post has closed.".into(),
@@ -834,7 +834,7 @@ pub(in crate::server) async fn edit_post_post(
                 ));
             }
 
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             if now.saturating_sub(post.created_at) > crate::handlers::board::self_action_window_secs()
             {
                 return Err(AppError::Forbidden(
@@ -984,7 +984,7 @@ pub(in crate::server) async fn delete_post_get(
         ));
     }
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     if now > crate::handlers::board::self_action_expiry(context.post.created_at)? {
         return Err(AppError::Forbidden(
             "The 60-second self-delete window for this post has closed.".into(),

@@ -133,7 +133,7 @@ pub fn generate_captcha_image(
         return Err(CaptchaImageError::InvalidRequest);
     }
 
-    let _reservation = reserve_challenge(&CAPTCHA_CHALLENGES, chrono::Utc::now().timestamp())?;
+    let _reservation = reserve_challenge(&CAPTCHA_CHALLENGES, jiff::Timestamp::now().as_second())?;
 
     let mut captcha = Captcha::new();
     let _configured = captcha
@@ -152,7 +152,7 @@ pub fn generate_captcha_image(
         board_short,
         captcha_id,
         &answer,
-        chrono::Utc::now().timestamp(),
+        jiff::Timestamp::now().as_second(),
     );
     Ok(png)
 }
@@ -178,7 +178,7 @@ pub fn verify_captcha(
         return Err(CaptchaValidationError::Missing);
     }
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     prune_expired(now);
 
     let Some(challenge) = CAPTCHA_CHALLENGES.lock().challenges.remove(captcha_id) else {

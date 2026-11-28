@@ -20,6 +20,12 @@ working branch and are not part of the latest published download.
 - Updated compatible dependencies, including fixes for cookie handling and URL
   parsing.
 - Updated the Rust toolchain used for CI and native releases to 1.100.1.
+- Setup keeps your draft when you return from review to edit settings. Passwords
+  must be entered again. Rejected uploads now point to the board’s allowed
+  file types.
+- Updated bundled SQLite to 3.54.1 and replaced Chrono with maintained
+  date and time libraries, including for ACME certificate renewal.
+- Fixed HTTP/2 requests on the automatic ACME HTTPS listener.
 
 - Fixed optional terminal relaunch on Windows for executable paths containing
   percent signs or shell metacharacters. If the relaunch fails, the original
