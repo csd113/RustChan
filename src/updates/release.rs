@@ -82,7 +82,7 @@ fn select_release(bytes: &[u8], current: &str) -> anyhow::Result<Discovery> {
             release
                 .published_at
                 .as_deref()
-                .is_some_and(|date| chrono::DateTime::parse_from_rfc3339(date).is_ok())
+                .is_some_and(|date| date.parse::<jiff::Timestamp>().is_ok())
         })
         .filter_map(|release| {
             if release.tag_name.len() > 64 {

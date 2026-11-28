@@ -446,7 +446,7 @@ where
                  allow_tripcodes=?12, edit_window_secs=?13, allow_editing=?14, allow_self_delete=?15,
                  allow_archive=?16, allow_video_embeds=?17, allow_captcha=?18,
                  show_poster_ids=?19, collapse_greentext=?20, post_cooldown_secs=?21,
-                 banner_mode=?22, access_mode=?23, access_password_hash=?24
+                 banner_mode=?22, access_mode=?23, access_password_hash=?24, strict_metadata_uploads=?26
                  WHERE id=?25",
                 params![
                     manifest.board.name,
@@ -474,6 +474,7 @@ where
                     manifest.board.access_mode,
                     manifest.board.access_password_hash,
                     existing_id,
+                    i64::from(manifest.board.strict_metadata_uploads),
                 ],
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Update board: {error}"))).map(|_completed_value| ())?;
@@ -491,8 +492,8 @@ where
                  max_archived_threads, bump_limit, allow_images, allow_video, allow_audio, allow_pdf, allow_any_files,
                  allow_tripcodes, edit_window_secs, allow_editing, allow_self_delete, allow_archive,
                  allow_video_embeds, allow_captcha, show_poster_ids, collapse_greentext,
-                 post_cooldown_secs, banner_mode, access_mode, access_password_hash, created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
+                 post_cooldown_secs, banner_mode, access_mode, access_password_hash, created_at, strict_metadata_uploads)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
                  RETURNING id",
                 params![
                     manifest.board.short_name,
@@ -521,6 +522,7 @@ where
                     manifest.board.access_mode,
                     manifest.board.access_password_hash,
                     manifest.board.created_at,
+                    i64::from(manifest.board.strict_metadata_uploads),
                 ],
             )
             .map_err(|error| AppError::Internal(anyhow::anyhow!("Insert board: {error}")))?

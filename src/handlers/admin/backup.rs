@@ -19,7 +19,6 @@ use axum::{
     response::{IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Local;
 use rusqlite::params;
 use serde::Deserialize;
 use std::io::{Seek, Write};
@@ -471,7 +470,9 @@ pub(super) fn board_backup_dir() -> PathBuf {
 }
 
 pub(super) fn local_backup_timestamp_label() -> String {
-    Local::now().format("%Y%m%d_%H%M%S").to_string()
+    jiff::ZonedDateTime::now()
+        .strftime("%Y%m%d_%H%M%S")
+        .to_string()
 }
 
 fn unique_backup_filename(dir: &Path, base_name: &str) -> String {

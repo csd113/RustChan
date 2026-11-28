@@ -550,7 +550,10 @@ pub fn choose_active_banner(
             .rotation_interval_minutes
             .saturating_mul(60)
             .max(60);
-        let Some(bucket) = chrono::Utc::now().timestamp().checked_div(interval_seconds) else {
+        let Some(bucket) = jiff::Timestamp::now()
+            .as_second()
+            .checked_div(interval_seconds)
+        else {
             // The positive interval rules out both division by zero and the
             // signed MIN / -1 overflow; retain an explicit fail-closed guard.
             tracing::error!(interval_seconds, "Invalid banner rotation interval");

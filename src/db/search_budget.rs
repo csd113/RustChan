@@ -14,7 +14,7 @@ const SEARCH_DEADLINE: Duration = Duration::from_millis(500);
 /// Removes the callback before a pooled connection can serve other requests.
 struct SearchBudget<'a> {
     /// Connection whose callback belongs exclusively to the scoped search.
-    conn: &'a Connection,
+    conn: &'a mut Connection,
 }
 
 impl Drop for SearchBudget<'_> {
@@ -27,8 +27,8 @@ impl Drop for SearchBudget<'_> {
 
 /// Run bounded search work and translate budget exhaustion into a useful client error.
 pub(super) fn with_search_budget<T>(
-    conn: &Connection,
-    work: impl FnOnce() -> Result<T>,
+    conn: &mut Connection,
+    work: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<T> {
     let started = Instant::now();
     let mut checks = 0usize;
@@ -40,7 +40,7 @@ pub(super) fn with_search_budget<T>(
         }),
     )?;
     let guard = SearchBudget { conn };
-    let result = work();
+    let result = work(guard.conn);
     drop(guard);
     match result {
         Err(AppError::Internal(error)) if error.chain().any(|cause| matches!(

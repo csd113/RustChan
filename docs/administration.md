@@ -25,6 +25,16 @@ upload switch. Board settings control whether people can edit or delete their
 own posts; the global signed self-action window defaults to 60 seconds and can
 be set from 1 to 3,600 seconds.
 
+For an optional per-board privacy policy, enable **Strict metadata-safe uploads**
+in the board's upload settings. New attachments must be successfully rebuilt as
+WebP; unsupported formats and failed sanitization are rejected. The supported
+set is JPEG, static PNG, BMP, GIF and WebP. Video, audio, documents, APNG,
+TIFF and HEIC/HEIF are rejected while it is enabled, even if their upload
+permissions are checked. Existing media is unchanged. It does not remove
+identifying image content or guarantee anonymity. Read the
+[precise scope and tradeoffs](media-capabilities.md#strict-metadata-safe-uploads-optional)
+before enabling it.
+
 ## Banners and appearance
 
 Upload a supported bitmap such as PNG, JPEG, GIF, or WebP. Banners must have
@@ -116,8 +126,8 @@ Configuration is read-only here; edit settings in the web admin or settings file
 | C / A | Start board / administrator creation |
 | D / X | Start thread deletion with confirmation |
 
-The console needs at least 44 columns by 14 rows. **The following mode options
-are newer than the published v1.7.5 ZIPs.** Check `--help` for your executable:
+The console needs at least 44 columns by 14 rows. RustChan 1.8.0 supports the
+following options. For an older executable, run `--help` to check availability:
 
 | Option | Behavior |
 | --- | --- |
@@ -129,7 +139,8 @@ are newer than the published v1.7.5 ZIPs.** Check `--help` for your executable:
 
 Redirected streams, `TERM=dumb`, and terminal initialization failures use plain
 logging without raw input. `NO_COLOR=1` disables colors. Linux/Windows terminal
-relaunch is opt-in with `CHAN_LAUNCH_TERMINAL=1`.
+relaunch is opt-in with `CHAN_LAUNCH_TERMINAL=1`. On Windows, if the launcher
+cannot start the new console, startup continues with the original streams.
 
 ### Reading the numbers
 

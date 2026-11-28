@@ -103,8 +103,16 @@ pub fn get_posts_for_thread(conn: &rusqlite::Connection, thread_id: i64) -> Resu
     Ok(posts)
 }
 
-/// Load at most 200 replies and the opening post, with a cursor for older replies.
-/// Numeric cursors use the thread/id index, without deep OFFSET scans.
+/// Boundary for a reply page. Both directions exclude the boundary reply.
+#[derive(Clone, Copy, Debug)]
+pub enum ReplyWindowCursor {
+    /// Load the replies immediately before this ID.
+    Before(i64),
+    /// Load the replies immediately after this ID.
+    After(i64),
+}
+
+/// Load the latest replies or those before a cursor, with a cursor for older replies.
 ///
 /// # Errors
 /// Returns an error if the database query fails.
@@ -113,25 +121,52 @@ pub fn get_thread_post_window(
     thread_id: i64,
     before: Option<i64>,
 ) -> Result<(Vec<Post>, Option<i64>)> {
+    read_thread_post_window(conn, thread_id, before.map(ReplyWindowCursor::Before))
+}
+
+/// Load at most 200 replies and the opening post in ascending ID order.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn get_thread_post_window_with_cursor(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    cursor: Option<ReplyWindowCursor>,
+) -> Result<Vec<Post>> {
+    read_thread_post_window(conn, thread_id, cursor).map(|(posts, _)| posts)
+}
+
+/// Read a bounded page and retain the older-page cursor for existing callers.
+fn read_thread_post_window(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    cursor: Option<ReplyWindowCursor>,
+) -> Result<(Vec<Post>, Option<i64>)> {
+    const REPLY_LIMIT: u16 = 200;
+    let (comparison, order, bound, limit) = match cursor {
+        Some(ReplyWindowCursor::After(id)) => (">", "ASC", id, REPLY_LIMIT),
+        Some(ReplyWindowCursor::Before(id)) => {
+            ("<=", "DESC", id.saturating_sub(1), REPLY_LIMIT + 1)
+        }
+        None => ("<=", "DESC", i64::MAX, REPLY_LIMIT + 1),
+    };
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {POST_SELECT_COLUMNS} FROM posts
-         WHERE thread_id = ?1 AND is_op = 0 AND id <= ?2
-         ORDER BY id DESC LIMIT 201"
+         WHERE thread_id = ?1 AND is_op = 0 AND id {comparison} ?2
+         ORDER BY id {order} LIMIT ?3"
     ))?;
     let mut posts = stmt
-        .query_map(
-            params![
-                thread_id,
-                before.map_or(i64::MAX, |id| id.saturating_sub(1))
-            ],
-            map_post,
-        )?
+        .query_map(params![thread_id, bound, limit], map_post)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let has_older = posts.len() > 200;
-    posts.truncate(200);
-    let older_before = has_older
-        .then(|| posts.last().map(|post| post.id))
-        .flatten();
+    let older_before = if posts.len() > usize::from(REPLY_LIMIT) {
+        posts.truncate(usize::from(REPLY_LIMIT));
+        posts.last().map(|post| post.id)
+    } else {
+        None
+    };
+    if !matches!(cursor, Some(ReplyWindowCursor::After(_))) {
+        posts.reverse();
+    }
     let op = conn
         .prepare_cached(&format!(
             "SELECT {POST_SELECT_COLUMNS} FROM posts WHERE thread_id = ?1 AND is_op = 1 LIMIT 1"
@@ -139,10 +174,25 @@ pub fn get_thread_post_window(
         .query_row(params![thread_id], map_post)
         .optional()?;
     if let Some(op) = op {
-        posts.push(op);
+        posts.insert(0, op);
     }
-    posts.reverse();
     Ok((posts, older_before))
+}
+
+/// Count the replies before the first visible reply, excluding the opening post.
+///
+/// # Errors
+/// Returns an error if the database query fails.
+pub fn count_replies_before(
+    conn: &rusqlite::Connection,
+    thread_id: i64,
+    first_id: i64,
+) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM posts WHERE thread_id = ?1 AND is_op = 0 AND id < ?2",
+        params![thread_id, first_id],
+        |row| row.get(0),
+    )?)
 }
 
 /// Fetch posts in `thread_id` whose id is strictly greater than `since_id`.
@@ -694,7 +744,7 @@ pub(crate) fn self_delete_post_with_validation(
                 return Ok((SelfDeleteOutcome::WrongToken, None));
             }
 
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             if now.saturating_sub(created_at) > delete_window_secs {
                 return Ok((SelfDeleteOutcome::WindowClosed, None));
             }
@@ -816,7 +866,7 @@ pub(crate) fn edit_post_with_validation(
             return Ok(false);
         }
 
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         if now.saturating_sub(created_at) > window {
             return Ok(false);
         }
@@ -915,7 +965,7 @@ fn to_fts_query(query: &str) -> Option<String> {
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn search_posts(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     board_id: i64,
     query: &str,
     limit: i64,
@@ -940,7 +990,7 @@ pub fn search_posts(
          WHERE posts.board_id = ?1 AND posts_fts MATCH ?2
          ORDER BY posts.created_at DESC, posts.id DESC
          LIMIT ?3 OFFSET ?4";
-    super::search_budget::with_search_budget(conn, || {
+    super::search_budget::with_search_budget(conn, |conn| {
         let mut stmt = conn.prepare_cached(sql)?;
         let posts = stmt
             .query_map(params![board_id, fts_query, limit, offset], map_post)?
@@ -953,7 +1003,7 @@ pub fn search_posts(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn count_search_results(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     board_id: i64,
     query: &str,
 ) -> Result<i64> {
@@ -961,7 +1011,7 @@ pub fn count_search_results(
     let Some(fts_query) = to_fts_query(query) else {
         return Ok(0);
     };
-    super::search_budget::with_search_budget(conn, || {
+    super::search_budget::with_search_budget(conn, |conn| {
         Ok(conn
             .prepare_cached(
                 "SELECT COUNT(*) FROM (
@@ -1048,7 +1098,7 @@ pub fn record_file_hash(
 // Poll queries
 /// Fetch the full poll for a thread including vote counts and the user's choice.
 ///
-/// Note: poll expiry is checked against the application clock (`chrono::Utc::now`)
+/// Note: poll expiry is checked against the application clock (`jiff::Timestamp::now`)
 /// while `poll_votes` are pruned using the `SQLite` clock (`unixepoch()`). A skew
 /// between the two clocks (e.g. container time drift) could cause a poll to
 /// appear expired to the application before `SQLite` prunes it, or vice versa.
@@ -1061,7 +1111,7 @@ pub fn get_poll_for_thread(
     thread_id: i64,
     ip_hash: &str,
 ) -> Result<Option<crate::models::PollData>> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     let poll_row = conn
         .query_row(

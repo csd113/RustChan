@@ -1050,6 +1050,7 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
         );
         std::fs::rename(live, previous)
             .with_context(|| format!("Move live path {} aside", live.display()))?;
+        #[cfg(unix)]
         sync_restore_parent(live)?;
         ensure_parent_dir(live)?;
         if let Err(error) = std::fs::rename(staged, live) {
@@ -1064,6 +1065,7 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
                         previous.display()
                     )
                 })?;
+                #[cfg(unix)]
                 sync_restore_parent(live)?;
             }
             return Err(move_error);
@@ -1076,9 +1078,12 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
 
     // Persist installation before deleting the displaced tree. Recovery may
     // repeat this branch after interruption without losing its only good copy.
-    sync_restore_parent(live)?;
-    if staged_exists && staged.parent() != live.parent() {
-        sync_restore_parent(staged)?;
+    #[cfg(unix)]
+    {
+        sync_restore_parent(live)?;
+        if staged_exists && staged.parent() != live.parent() {
+            sync_restore_parent(staged)?;
+        }
     }
     if previous.exists() {
         if let Err(error) = cleanup_path_if_exists(previous) {
@@ -1096,41 +1101,34 @@ fn finalize_swap(staged: &Path, live: &Path, previous: &Path) -> Result<()> {
 }
 
 /// Persist restore renames and deletions on filesystems with directory fsync.
+#[cfg(unix)]
 fn sync_restore_parent(path: &Path) -> Result<()> {
-    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         std::fs::File::open(parent)?.sync_all()?;
     }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
 /// Apply private permissions recursively to a file or directory tree.
+#[cfg(unix)]
 fn restrict_private_path_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
-        let metadata = std::fs::metadata(path)
-            .with_context(|| format!("Inspect private path {}", path.display()))?;
-        let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .with_context(|| format!("Set private permissions on {}", path.display()))?;
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("Inspect private path {}", path.display()))?;
+    let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("Set private permissions on {}", path.display()))?;
 
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(path)
-                .with_context(|| format!("Read private path {}", path.display()))?
-            {
-                let entry = entry
-                    .with_context(|| format!("Read private path entry under {}", path.display()))?;
-                restrict_private_path_permissions(&entry.path())?;
-            }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path)
+            .with_context(|| format!("Read private path {}", path.display()))?
+        {
+            let entry = entry
+                .with_context(|| format!("Read private path entry under {}", path.display()))?;
+            restrict_private_path_permissions(&entry.path())?;
         }
     }
-
-    #[cfg(not(unix))]
-    let _ = path;
 
     Ok(())
 }
@@ -1336,6 +1334,7 @@ pub fn finalize_full_restore_payload(
             Path::new(&swap.live),
             Path::new(&swap.previous),
         )?;
+        #[cfg(unix)]
         if swap.restrict_private_permissions {
             restrict_private_path_permissions(Path::new(&swap.live))?;
         }

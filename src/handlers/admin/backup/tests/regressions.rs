@@ -1,7 +1,3 @@
-#![expect(
-    unused_crate_dependencies,
-    reason = "focused integration harness exercises only backup safety dependencies"
-)]
 //! Regression checks for coordination, recovery evidence, and backup resource limits.
 
 use chan::models;
@@ -221,6 +217,17 @@ mod tests {
         }
         ensure!(recovery_files::open_private_file_new(&path).is_err());
         ensure_eq!(std::fs::read(&path)?, b"preserve recovery evidence");
+        Ok(())
+    }
+
+    #[test]
+    fn closed_staged_file_can_be_flushed_without_changing_its_contents(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("staged.db");
+        std::fs::write(&path, b"snapshot fixture")?;
+        recovery_files::sync_staged_file(&path)?;
+        ensure_eq!(std::fs::read(&path)?, b"snapshot fixture");
         Ok(())
     }
 

@@ -313,7 +313,7 @@ async fn upload_banner_for_scope(
             target_value: target_value.clone(),
             show_on_index: parsed.show_on_index,
             show_on_catalog: parsed.show_on_catalog,
-            created_at: chrono::Utc::now().timestamp(),
+            created_at: jiff::Timestamp::now().as_second(),
         };
         let (width, height, file_size) =
             banner::write_banner_asset(&draft_asset, &parsed.banner_bytes)?;

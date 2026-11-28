@@ -270,7 +270,7 @@ impl DbMaintenanceJobs {
         let job_id = self.next_job_id.fetch_add(1, Ordering::Relaxed);
         *self.status.write() = DbMaintenanceJobStatus::Running {
             job_id,
-            started_at: chrono::Utc::now().timestamp(),
+            started_at: jiff::Timestamp::now().as_second(),
             phase: DbMaintenanceJobPhase::Starting,
         };
         job_id
@@ -357,7 +357,7 @@ impl DbMaintenanceJobs {
             } if *current_job_id == job_id => {
                 *status = DbMaintenanceJobStatus::Failed {
                     job_id,
-                    finished_at: chrono::Utc::now().timestamp(),
+                    finished_at: jiff::Timestamp::now().as_second(),
                     message,
                 };
                 true

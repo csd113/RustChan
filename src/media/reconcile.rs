@@ -750,9 +750,9 @@ fn collect_boards(
             continue;
         }
         let folded = board.to_ascii_lowercase();
-        if let Some(other) = casefold.insert(folded.clone(), board.clone()) {
+        if let Some(other) = casefold.insert(folded, board.clone()) {
             if other != board {
-                let _other_conflict_inserted = model.case_conflict_boards.insert(other.clone());
+                let _other_conflict_inserted = model.case_conflict_boards.insert(other);
                 let _board_conflict_inserted = model.case_conflict_boards.insert(board.clone());
                 model.global_ambiguity = true;
             }
@@ -943,7 +943,7 @@ fn collect_hashes(
                     board: Some(thumb.board),
                     category: MediaCategory::Thumbnail,
                     role: ReferenceRole::Metadata,
-                    owner: owner.clone(),
+                    owner,
                     expected_digest: None,
                     recoverable_source: None,
                 });
@@ -952,7 +952,7 @@ fn collect_hashes(
                     model,
                     &thumb_path,
                     Some(&file.board),
-                    owner.clone(),
+                    owner,
                     MediaCategory::Thumbnail,
                 );
             }
@@ -2612,7 +2612,7 @@ pub fn reconcile_managed_media(
     limits: ReconcileLimits,
 ) -> Result<AuditReport> {
     let limits = limits.bounded();
-    let started_at = chrono::Utc::now().timestamp();
+    let started_at = jiff::Timestamp::now().as_second();
     let scan_id = uuid::Uuid::new_v4().simple().to_string();
     tracing::info!(
         target: "media_reconcile",
@@ -2697,7 +2697,7 @@ pub fn reconcile_managed_media(
             &mut report,
         );
     }
-    report.completed_at = chrono::Utc::now().timestamp();
+    report.completed_at = jiff::Timestamp::now().as_second();
     update_metrics(&report);
     log_completion(&report, mode);
     Ok(report)

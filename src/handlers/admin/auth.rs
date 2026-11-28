@@ -25,7 +25,6 @@ use axum::{
     response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar};
-use chrono::Utc;
 use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -335,8 +334,8 @@ pub(in crate::server) async fn admin_login(
             clear_login_fails(&ip_key);
             let session_id = new_session_id();
             let bootstrap_session_id = session_id.clone();
-            let expires_at = Utc::now()
-                .timestamp()
+            let expires_at = jiff::Timestamp::now()
+                .as_second()
                 .checked_add(CONFIG.session_duration)
                 .ok_or_else(|| {
                     AppError::Internal(anyhow::anyhow!("administrator session expiry overflows"))

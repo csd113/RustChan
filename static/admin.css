@@ -5087,23 +5087,20 @@ body:has(.admin-panel) .compress-cancel-btn {
 }
 
 @media (max-width: 420px) {
-  .admin-panel .admin-moderation-card .admin-table-wrap { overflow-x: auto; }
-  .admin-panel .admin-moderation-card .admin-table {
+  .admin-panel .admin-moderation-card .admin-table-wrap:not(.admin-report-table-wrap) { overflow-x: auto; }
+  .admin-panel .admin-moderation-card .admin-table:not(.admin-report-table) {
     display: table;
     min-width: 36rem !important;
   }
-  .admin-panel .admin-moderation-card .admin-report-table {
-    min-width: 52rem !important;
-  }
-  .admin-panel .admin-moderation-card .admin-table thead { display: table-header-group; }
-  .admin-panel .admin-moderation-card .admin-table tbody { display: table-row-group; }
-  .admin-panel .admin-moderation-card .admin-table tr {
+  .admin-panel .admin-moderation-card .admin-table:not(.admin-report-table) thead { display: table-header-group; }
+  .admin-panel .admin-moderation-card .admin-table:not(.admin-report-table) tbody { display: table-row-group; }
+  .admin-panel .admin-moderation-card .admin-table:not(.admin-report-table) tr {
     display: table-row;
     margin: 0;
     border: 0;
     background: transparent;
   }
-  .admin-panel .admin-moderation-card .admin-table td {
+  .admin-panel .admin-moderation-card .admin-table:not(.admin-report-table) td {
     display: table-cell;
     width: auto;
     border-bottom: 1px solid var(--border);
@@ -5120,6 +5117,13 @@ body:has(.admin-panel) .compress-cancel-btn {
   cursor: pointer;
 }
 .admin-report-detail p { margin-top: var(--admin-space-sm); }
+.admin-report-preview {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-report-mobile { display: none; }
 .admin-panel #full-backup-restore .admin-site-settings-form > label {
   display: grid;
   gap: var(--admin-space-xs);
@@ -5140,13 +5144,20 @@ html[data-theme] .admin-flash.flash-error {
   border-inline-start: 3px solid var(--red);
 }
 
-/* Preserve the compact content preview when report tables scroll on small screens. */
 @media (max-width: 420px) {
-  .admin-report-table td:nth-child(3) {
-    white-space: nowrap !important;
-    text-overflow: ellipsis;
-    overflow: hidden;
+  .admin-report-table { display: block; }
+  .admin-moderation-card .admin-report-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
+  .admin-report-table td:is(:nth-child(3), :nth-child(4), [colspan]) { grid-column: 1 / -1; }
+  .admin-report-table td:nth-child(5) { border-bottom: 0; }
+  .admin-report-table td:nth-child(6) { text-align: end; }
+  .admin-report-table .admin-report-preview { max-width: none; }
+  .admin-report-desktop { display: none; }
+  .admin-report-mobile { display: block; }
+  .admin-report-label { color: var(--text-dim); font-weight: bold; }
+  .admin-report-reason { white-space: pre-wrap; }
 }
 
 /* The update indicator stays inside the existing navigation cell at narrow widths. */

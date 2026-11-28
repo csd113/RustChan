@@ -25,6 +25,7 @@ pub(in crate::server) struct BoardSettingsForm {
     max_pdf_size_mb: Option<String>,
     allow_pdf: Option<String>,
     allow_any_files: Option<String>,
+    strict_metadata_uploads: Option<String>,
     allow_tripcodes: Option<String>,
     allow_editing: Option<String>,
     allow_self_delete: Option<String>,
@@ -257,6 +258,7 @@ pub(in crate::server) async fn update_board_settings(
                 banner_mode,
                 access_mode,
                 &access_password_hash,
+                form.strict_metadata_uploads.as_deref() == Some("1"),
             )?;
             tracing::info!(
                 target: "admin",

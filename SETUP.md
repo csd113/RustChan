@@ -66,10 +66,9 @@ Its presets choose site and board options; they do not configure your firewall
 or make a public deployment private. If terminal setup is waiting for input,
 finish those prompts before opening the browser.
 
-The current source wizard supports a separate board password for private boards.
-Share that password with visitors and keep the administrator password private.
-This private-board setup fix is newer than the published v1.7.5 ZIPs; for those
-ZIPs, use local setup first and configure board access in the admin panel.
+In v1.8.0, the wizard can set a separate password for a private board. Share
+that password with visitors and keep the administrator password private. If you
+are using v1.7.5, use local setup first and set board access in the admin panel.
 Current setup accepts image limits of 1–100 MiB and video, audio, and PDF limits
 of 1–512 MiB; it validates them before review.
 
@@ -129,7 +128,7 @@ to install.
 
 The official release workflow builds Linux x86_64/ARM64, macOS Intel/Apple
 silicon, and Windows x86_64. There is no native Windows ARM64 or 32-bit download.
-The v1.7.5 Linux executables require glibc 2.39 or newer; they do not run directly
+The official Linux executables require glibc 2.39 or newer; they do not run directly
 on musl-based systems such as Alpine. Use [Docker](docs/containers.md) or a
 [local source build](CONTRIBUTING.md#build-and-run) where appropriate.
 
@@ -146,19 +145,19 @@ with your actual download.
 **Windows — PowerShell:**
 
 ```powershell
-Get-FileHash .\rustchan-cli-v1.7.5-windows-x86_64.zip -Algorithm SHA256
+Get-FileHash .\rustchan-cli-v1.8.0-windows-x86_64.zip -Algorithm SHA256
 ```
 
 **macOS:**
 
 ```sh
-shasum -a 256 rustchan-cli-v1.7.5-macos-apple-silicon.zip
+shasum -a 256 rustchan-cli-v1.8.0-macos-apple-silicon.zip
 ```
 
 **Linux:**
 
 ```sh
-sha256sum rustchan-cli-v1.7.5-linux-x86_64.zip
+sha256sum rustchan-cli-v1.8.0-linux-x86_64.zip
 ```
 
 The hash must match exactly, ignoring letter case. This checks the file against

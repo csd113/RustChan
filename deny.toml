@@ -27,6 +27,15 @@ id = "RUSTSEC-2023-0071"
 [[advisories.ignore]]
 id = "RUSTSEC-2024-0436"
 
+# RUSTSEC-2026-0542 is a maintenance notice, not a reported vulnerability.
+# humantime 2.4.0 is only in the Arti 0.48.0 Tor dependency family, including
+# arti-client directly and via humantime-serde 1.1.1. No maintained compatible
+# upstream release is available. Re-review on Arti upgrades and remove this
+# exception once the maintained Arti graph no longer uses humantime.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0542"
+reason = "Temporary Arti-only maintenance exception. Tracked in Tor Project Arti issue #2882."
+
 [licenses]
 confidence-threshold = 0.8
 

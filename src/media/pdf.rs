@@ -6,7 +6,7 @@
 
 use anyhow::{ensure, Context as _, Result};
 use hayro::hayro_interpret::util::TransformExt as _;
-use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::{InterpreterSettings, RenderContent};
 use hayro::hayro_syntax::content::Operator;
 use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Name, Object, ObjectIdentifier};
 use hayro::hayro_syntax::reader::{Reader, ReaderExt as _};
@@ -83,7 +83,7 @@ pub(crate) fn render(input: &Path, output: &Path, max_dim: u32) -> Result<()> {
         warning_sink: Arc::new(move |_| {
             warning_sink.store(true, Ordering::Relaxed);
         }),
-        render_annotations: false,
+        render_content: RenderContent::PAGE,
         ..InterpreterSettings::default()
     };
     let mut context = hayro::vello_cpu::RenderContext::new(pixel_width, pixel_height);

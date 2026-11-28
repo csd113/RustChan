@@ -2626,7 +2626,6 @@ function clampPopupToViewport(anchor, popup) {
     document.querySelectorAll('.user-preferences-form select[name="theme"]').forEach(function (select) {
       select.value = t;
     });
-    try { localStorage.setItem('rustchan_theme', t); } catch (e) {}
   }
 
   // Keep the old stylesheet and theme visible until the replacement is loaded.
@@ -2714,14 +2713,10 @@ function clampPopupToViewport(anchor, popup) {
     document.cookie = cookie;
   }
 
-  function mirrorUserPreferencesToCookies(form) {
+  function mirrorUserPreferencesToCookies(form, theme) {
     if (!form) return;
 
-    var theme = form.querySelector('select[name="theme"]');
-    if (theme && THEMES.indexOf(theme.value) !== -1 &&
-        theme.value === document.documentElement.getAttribute('data-active-theme')) {
-      setPublicPreferenceCookie('rustchan_theme', theme.value);
-    }
+    if (theme) setPublicPreferenceCookie('rustchan_theme', theme);
 
     var hideNsfw = form.querySelector('input[name="hide_nsfw_boards"]');
     if (hideNsfw) {
@@ -2733,31 +2728,36 @@ function clampPopupToViewport(anchor, popup) {
       setPublicPreferenceCookie('rustchan_video_audio', videoAudio.value);
     }
 
-    var boardView = form.querySelector('input[name="preferred_board_view"]:checked');
-    if (boardView && (boardView.value === 'catalog' || boardView.value === 'index')) {
-      setPublicPreferenceCookie('rustchan_preferred_view', boardView.value);
-    }
-
     var showBadges = form.querySelector('input[name="show_activity_badges"]');
     if (showBadges) {
       setPublicPreferenceCookie('rustchan_activity_badges', showBadges.checked ? '1' : '0');
     }
   }
 
-  function persistUserPreferencesForm(form) {
-    if (!form) return Promise.resolve();
-    if (!window.fetch || !window.FormData || !window.URLSearchParams) {
-      form.submit();
-      return { then: function () {} };
+  function updatePreferredBoardLinks(view) {
+    document.querySelectorAll('a[data-board-preference]').forEach(function (link) {
+      var destination = '/' + encodeURIComponent(link.dataset.boardPreference) +
+        (view === 'catalog' ? '/catalog' : '');
+      if (link.hasAttribute('data-return-to')) link.dataset.returnTo = destination;
+      if (link.dataset.action !== 'open-nsfw-disclaimer') link.href = destination;
+    });
+  }
+
+  function persistUserPreferencesForm(form, theme) {
+    if (!form || !window.fetch || !window.FormData || !window.URLSearchParams) {
+      return Promise.resolve(false);
     }
-    return fetch(form.getAttribute('action') || '/preferences', {
+    var body = new URLSearchParams(new FormData(form));
+    if (theme) body.set('theme', theme);
+    else body.delete('theme');
+    return fetchWithTimeout(form.getAttribute('action') || '/preferences', {
       method: (form.getAttribute('method') || 'POST').toUpperCase(),
       credentials: 'same-origin',
       keepalive: true,
       headers: { 'x-rustchan-background': '1' },
-      body: new URLSearchParams(new FormData(form))
+      body: body
     }).then(function (response) {
-      return response.ok;
+      return response.status === 204;
     }).catch(function () {
       return false;
     });
@@ -2880,13 +2880,13 @@ function clampPopupToViewport(anchor, popup) {
   function restoreUserPreferencesSummaryFocus(panel) {
     var summary = panel.querySelector('.user-preferences-summary');
     if (!summary || typeof summary.focus !== 'function') return;
-    summary.focus();
+    summary.focus({ preventScroll: true });
     // WebKit can retain the hidden mobile summary through the first frame
     // after closing or resizing. Restore once its visible layout is painted.
     window.requestAnimationFrame(function () {
       window.requestAnimationFrame(function () {
         if (summary.isConnected && (!panel.open || !isMobileUserPreferencesViewport())) {
-          summary.focus();
+          summary.focus({ preventScroll: true });
         }
       });
     });
@@ -2952,9 +2952,11 @@ function clampPopupToViewport(anchor, popup) {
 
       var themeLoading = false;
       var themeChange = 0;
+      var pendingTheme = null;
       var preferenceSavePending = false;
       var preferenceSaveQueued = false;
       var preferenceReloadNeeded = false;
+      var savedBoardView = form.querySelector('input[name="preferred_board_view"]:checked');
 
       function saveUserPreferences() {
         if (themeLoading || preferenceSavePending) {
@@ -2962,8 +2964,15 @@ function clampPopupToViewport(anchor, popup) {
           return;
         }
         preferenceSavePending = true;
-        persistUserPreferencesForm(form).then(function (saved) {
+        var theme = pendingTheme;
+        var boardView = form.querySelector('input[name="preferred_board_view"]:checked');
+        pendingTheme = null;
+        persistUserPreferencesForm(form, theme).then(function (saved) {
           preferenceSavePending = false;
+          if (saved && boardView && boardView !== savedBoardView) {
+            updatePreferredBoardLinks(boardView.value);
+            savedBoardView = boardView;
+          }
           if (themeLoading) {
             preferenceSaveQueued = true;
             return;
@@ -2972,16 +2981,26 @@ function clampPopupToViewport(anchor, popup) {
             preferenceSaveQueued = false;
             // An older response can set cookies. Reapply the current selection
             // and save it only after that response, so the newest choice wins.
-            mirrorUserPreferencesToCookies(form);
+            mirrorUserPreferencesToCookies(form, pendingTheme);
             saveUserPreferences();
             return;
           }
           if (!saved) {
+            if (savedBoardView) savedBoardView.checked = true;
+            preferenceReloadNeeded = false;
             setPreferenceStatus('Could not save. Try the change again.', 'error');
             return;
           }
           setPreferenceStatus('Saved.', 'saved');
-          if (preferenceReloadNeeded) window.location.reload();
+          if (preferenceReloadNeeded) {
+            preferenceReloadNeeded = false;
+            var composer = document.getElementById('post-form-wrap');
+            if (!composer || !composer.getClientRects().length) {
+              window.location.reload();
+            } else {
+              setPreferenceStatus('Saved. Newly visible boards will appear on the next page.', 'saved');
+            }
+          }
         });
       }
 
@@ -2992,9 +3011,10 @@ function clampPopupToViewport(anchor, popup) {
         var hadNsfwNodes = Boolean(document.querySelector('[data-board-nsfw="1"]'));
         if (control.name === 'theme') {
           var change = ++themeChange;
+          var requestedTheme = control.value;
           themeLoading = true;
           setPreferenceStatus('Loading theme…', 'saving');
-          applyTheme(control.value).then(function (applied) {
+          applyTheme(requestedTheme).then(function (applied) {
             if (change !== themeChange) return;
             themeLoading = false;
             if (!applied) {
@@ -3002,12 +3022,14 @@ function clampPopupToViewport(anchor, popup) {
               setPreferenceStatus('Could not load theme. Try the change again.', 'error');
               if (preferenceSaveQueued) {
                 preferenceSaveQueued = false;
-                mirrorUserPreferencesToCookies(form);
+                mirrorUserPreferencesToCookies(form, pendingTheme);
                 saveUserPreferences();
               }
               return;
             }
-            mirrorUserPreferencesToCookies(form);
+            pendingTheme = requestedTheme;
+            try { localStorage.setItem('rustchan_theme', requestedTheme); } catch (e) {}
+            mirrorUserPreferencesToCookies(form, pendingTheme);
             setPreferenceStatus('Saving…', 'saving');
             saveUserPreferences();
           });
@@ -3023,7 +3045,6 @@ function clampPopupToViewport(anchor, popup) {
         mirrorUserPreferencesToCookies(form);
         setPreferenceStatus('Saving…', 'saving');
         preferenceReloadNeeded = preferenceReloadNeeded ||
-          control.name === 'preferred_board_view' ||
           (control.name === 'hide_nsfw_boards' && !control.checked && !hadNsfwNodes);
         saveUserPreferences();
       });
@@ -3044,10 +3065,15 @@ function clampPopupToViewport(anchor, popup) {
     });
   });
 
-  // Cookie-backed server rendering is authoritative. localStorage is only a
-  // compatibility mirror, never an initialization or persistence source.
+  // Initialize from the server's resolved theme without saving it as a preference.
   syncThemeControls(document.documentElement.getAttribute('data-active-theme'));
 
+  // Catalogs use the same panel in the header. The footer remains the no-JS entry.
+  if (document.querySelector('[data-activity-page="catalog"]')) {
+    var panel = document.querySelector('.user-preferences-panel');
+    var headerSearch = document.querySelector('.site-header .header-search');
+    if (panel && headerSearch) headerSearch.before(panel);
+  }
   initUserPreferencesPanels();
   initUserPreferencesForms();
 })();
@@ -3265,6 +3291,9 @@ function clampPopupToViewport(anchor, popup) {
           frag.innerHTML = data.html;
           while (frag.firstChild) container.appendChild(frag.firstChild);
           lastId = data.last_id;
+          document.querySelectorAll('[data-role="thread-window-end"]').forEach(function (el) {
+            el.textContent = Number(el.textContent) + data.count;
+          });
           showPill(data.count);
         }
         if ((refreshedChanged || data.count > 0) && window._onNewPostsInserted) {
@@ -3503,6 +3532,17 @@ function clampPopupToViewport(anchor, popup) {
     var pid = link && link.getAttribute('data-pid');
     if (!pid) return;
     var target = document.getElementById('p' + pid);
+    var thread = link.closest('#thread-posts');
+    if (thread && link.classList.contains('quotelink')) {
+      if (!target) {
+        if (link.getAttribute('href') === '#p' + pid) {
+          link.href = '/' + encodeURIComponent(thread.dataset.board) + '/post/' + pid;
+        }
+        // A post outside the current reply window is checked by the remote preview.
+        return;
+      }
+      link.href = '#p' + pid;
+    }
     var missing = !target;
     link.classList.toggle('missing-post-ref', missing);
     if (missing) {
@@ -3710,7 +3750,7 @@ function clampPopupToViewport(anchor, popup) {
   };
 })();
 
-// Cross-board quotelink hover preview
+// Remote previews for cross-board and out-of-window quotes.
 (function () {
   var _cbCache = {};
   var _cbInFlight = {};
@@ -3718,13 +3758,23 @@ function clampPopupToViewport(anchor, popup) {
 
   function getCbPopup() { return document.getElementById('ql-popup'); }
 
+  function renderRemotePreview(popup, preview) {
+    popup.innerHTML = preview.html;
+    var post = popup.querySelector('.post[id]');
+    if (post) post.removeAttribute('id');
+  }
+
   function fetchAndShow(link, board, pid) {
     var key = board + ':' + pid;
     var popup = getCbPopup();
     if (!popup) return;
     popup.dataset.previewKey = key;
     if (_cbCache[key]) {
-      popup.innerHTML = _cbCache[key].html;
+      if (!_cbCache[key].thread_id) {
+        link.classList.add('missing-post-ref');
+        link.title = 'post not found';
+      }
+      renderRemotePreview(popup, _cbCache[key]);
       popup.style.display = 'block';
       positionCbPopup(link, popup);
       return;
@@ -3738,6 +3788,8 @@ function clampPopupToViewport(anchor, popup) {
     fetch('/api/post/' + board + '/' + pid, { credentials: 'same-origin' })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (data) {
+        link.classList.remove('missing-post-ref');
+        link.removeAttribute('title');
         _cbCache[key] = { html: data.html || '', thread_id: data.thread_id || 0 };
         delete _cbInFlight[key];
         if (_cbCache[key].thread_id) {
@@ -3746,7 +3798,7 @@ function clampPopupToViewport(anchor, popup) {
             .forEach(function (a) { a.href = directHref; });
         }
         if (popup.style.display !== 'none' && popup.dataset.previewKey === key) {
-          popup.innerHTML = _cbCache[key].html;
+          renderRemotePreview(popup, _cbCache[key]);
           positionCbPopup(link, popup);
         }
       })
@@ -3756,7 +3808,11 @@ function clampPopupToViewport(anchor, popup) {
         var errorHtml = '<div class="missing-post-notice">' +
           (missing ? 'Post not found' : 'Preview unavailable. Click the link to retry.') + '</div>';
         // A failed connection or permission check is not a missing post.
-        if (missing) _cbCache[key] = { html: errorHtml, thread_id: 0 };
+        if (missing) {
+          _cbCache[key] = { html: errorHtml, thread_id: 0 };
+          link.classList.add('missing-post-ref');
+          link.title = 'post not found';
+        }
         if (popup.style.display !== 'none' && popup.dataset.previewKey === key) {
           popup.innerHTML = errorHtml;
           positionCbPopup(link, popup);
@@ -3780,18 +3836,25 @@ function clampPopupToViewport(anchor, popup) {
       });
     }
 
-    root.querySelectorAll('a.crosslink[data-crossboard][data-pid]').forEach(function (link) {
+    root.querySelectorAll('a.quotelink[data-pid]').forEach(function (link) {
       if (link.dataset.crosslinkWired === '1') return;
-      link.dataset.crosslinkWired = '1';
-      var board = link.getAttribute('data-crossboard');
+      var thread = link.closest('#thread-posts');
+      var crossBoard = link.getAttribute('data-crossboard');
+      var board = crossBoard || (thread && thread.dataset.board);
       var pid = link.getAttribute('data-pid');
       if (!board || !pid) return;
-      link.addEventListener('mouseenter', function () { clearTimeout(_cbHideTimer); fetchAndShow(link, board, pid); });
+      link.dataset.crosslinkWired = '1';
+      function isRemote() { return Boolean(crossBoard) || !thread.contains(document.getElementById('p' + pid)); }
+      link.addEventListener('mouseenter', function () {
+        clearTimeout(_cbHideTimer);
+        if (isRemote()) fetchAndShow(link, board, pid);
+      });
       link.addEventListener('mouseleave', function () {
+        if (!isRemote()) return;
         _cbHideTimer = setTimeout(function () { if (popup) popup.style.display = 'none'; }, 120);
       });
       link.addEventListener('click', function (e) {
-        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        if (!isRemote() || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
         e.preventDefault();
         var key = board + ':' + pid;
         function navigate(threadId) {
@@ -3807,7 +3870,7 @@ function clampPopupToViewport(anchor, popup) {
           cbPopup.innerHTML =
             '<div class="missing-post-notice">' +
             '<span class="missing-post-icon">&#x2715;</span> ' +
-            '<strong>&gt;&gt;&gt;/' + board + '/' + pid + '</strong> — ' +
+            '<strong>' + (crossBoard ? '&gt;&gt;&gt;/' + board + '/' : '&gt;&gt;') + pid + '</strong> — ' +
             (missing ? 'post not found<span class="missing-post-sub">it may have been deleted</span>' :
               'could not load post<span class="missing-post-sub">try the link again</span>') +
             '</div>';
@@ -3963,13 +4026,6 @@ function getPollOptionMaxCount(list) {
   return parseInt(list.dataset.pollOptionMaxcount, 10) || 20;
 }
 
-function buildPollOptionRowHtml(count, maxLength) {
-  return (
-    '<input type="text" class="poll-option-input" name="poll_option" placeholder="Option ' + count + '" maxlength="' + maxLength + '">' +
-    '<button type="button" class="poll-remove-btn" data-action="remove-poll-option" aria-label="Remove poll option" hidden>\u2715</button>'
-  );
-}
-
 function addPollOption() {
   var list = document.getElementById('poll-options-list');
   if (!list) return;
@@ -3977,23 +4033,45 @@ function addPollOption() {
   if (count > getPollOptionMaxCount(list)) return;
   var row = document.createElement('div');
   row.className = 'poll-option-row';
-  row.innerHTML = buildPollOptionRowHtml(count, getPollOptionMaxLength(list));
+  row.innerHTML = '<input type="text" class="poll-option-input" name="poll_option" maxlength="' + getPollOptionMaxLength(list) + '">' +
+    '<button type="button" class="poll-remove-btn" data-action="remove-poll-option">\u2715</button>';
   list.appendChild(row);
-  updateRemoveButtons();
+  syncPollOptionControls();
+  row.querySelector('.poll-option-input').focus();
 }
 
 function removePollOption(btn) {
-  btn.closest('.poll-option-row').remove();
-  updateRemoveButtons();
+  var row = btn.closest('.poll-option-row');
+  var rows = Array.from(row.parentElement.querySelectorAll('.poll-option-row'));
+  if (rows.length <= 2) return;
+  var index = rows.indexOf(row);
+  var next = rows[index + 1] || rows[index - 1];
+  row.remove();
+  syncPollOptionControls();
+  next.querySelector('.poll-option-input').focus();
 }
 
-function updateRemoveButtons() {
-  var rows = document.querySelectorAll('#poll-options-list .poll-option-row');
-  rows.forEach(function (r) {
-    var btn = r.querySelector('.poll-remove-btn');
-    if (btn) btn.hidden = rows.length <= 2;
+function syncPollOptionControls() {
+  var list = document.getElementById('poll-options-list');
+  if (!list) return;
+  var rows = list.querySelectorAll('.poll-option-row');
+  rows.forEach(function (row, index) {
+    var position = index + 1;
+    var input = row.querySelector('.poll-option-input');
+    input.placeholder = 'Option ' + position;
+    input.setAttribute('aria-label', 'Poll option ' + position);
+    var remove = row.querySelector('.poll-remove-btn');
+    remove.setAttribute('aria-label', 'Remove poll option ' + position);
+    remove.hidden = rows.length <= 2;
   });
+  var max = getPollOptionMaxCount(list);
+  var atLimit = rows.length >= max;
+  var creator = list.closest('.poll-creator');
+  creator.querySelector('.poll-add-btn').disabled = atLimit;
+  creator.querySelector('[data-role="poll-option-status"]').textContent = atLimit ? 'Maximum of ' + max + ' options reached.' : '';
 }
+
+document.addEventListener('DOMContentLoaded', syncPollOptionControls);
 
 // Catalog sort
 function sortCatalog(mode) {
@@ -4302,6 +4380,10 @@ document.addEventListener('submit', function (e) {
 });
 
 document.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229 && e.target.id === 'thread-subject') {
+    e.preventDefault();
+    document.getElementById('thread-body').focus();
+  }
   if (e.key === 'Tab') {
     var dialogs = Array.prototype.filter.call(
       document.querySelectorAll('[role="dialog"][aria-modal="true"]'),

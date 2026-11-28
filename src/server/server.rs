@@ -1551,8 +1551,10 @@ pub async fn run_https_acme(
     app: axum::Router,
     cancel: tokio_util::sync::CancellationToken,
 ) -> std::io::Result<()> {
-    use hyper::server::conn::http1;
-    use hyper_util::rt::TokioIo;
+    use hyper_util::{
+        rt::{TokioExecutor, TokioIo},
+        server::conn::auto,
+    };
     use tower::Service as _;
 
     let mut connections = tokio::task::JoinSet::new();
@@ -1598,8 +1600,8 @@ pub async fn run_https_acme(
                                         );
                                         svc.clone().call(request)
                                     });
-                                    let mut builder = http1::Builder::new();
-                                    let _configured = builder.max_buf_size(headers::HTTP_MAX_HEADER_BYTES).timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(15));
+                                    let mut builder = auto::Builder::new(TokioExecutor::new());
+                                    configure_http_limits(&mut builder);
                                     let connection_result = builder.serve_connection(io, svc).await;
                                     if let Err(e) = connection_result {
                                         tracing::debug!(

@@ -640,41 +640,65 @@ html:not([data-theme]) .board-nav-link:hover { text-shadow: 0 0 6px var(--green-
 }
 
 .board-search-header {
-  margin-bottom: 10px;
-  text-align: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  max-width: 36rem;
+  margin: 0 auto 12px;
 }
 
 .board-search-title {
-  margin: 0 0 6px;
+  margin: 0;
   color: var(--green-pale);
-  font-size: 0.95rem;
+  font-size: 1.12rem;
+}
+
+.board-search-back,
+.board-search-empty a {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
 }
 
 .board-search-summary {
-  margin: 0;
+  margin: 0 0 10px;
   color: var(--text-dim);
-  font-size: 0.8rem;
+  font-size: 0.85rem;
   overflow-wrap: anywhere;
-}
-
-.board-search-summary-results {
-  margin-top: 8px;
   text-align: center;
 }
 
 .board-search-form {
-  justify-content: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
+  max-width: 36rem;
+  margin: 0 auto 12px;
+}
+
+.board-search-form input {
+  min-width: 0;
+  width: 100%;
 }
 
 .board-search-label {
-  min-width: 0;
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-size: 0.85rem;
 }
 
 .board-search-empty {
-  margin-top: 8px;
+  max-width: 36rem;
+  margin: 0 auto;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  .board-search-form input {
+    min-height: 38px;
+    font-size: max(1rem, 16px);
+  }
 }
 
 /* Buttons (shared) */
@@ -1500,7 +1524,7 @@ html:not([data-theme]) .poster-id-btn {
   color: var(--poster-chip-fg, #ffffff);
 }
 
-.post-time { color: var(--text-dim); font-size: 0.75rem; }
+.post-time { color: var(--text-dim); font-size: 0.82rem; }
 
 .post-num {
   color: var(--green-dim);
@@ -2203,6 +2227,8 @@ html:not([data-theme]) .poster-id-btn {
   box-sizing: border-box;
 }
 
+.post-controls .report-btn { font-size: 0.8rem; }
+
 .report-fallback-form {
   display: none;
   margin: 0;
@@ -2480,10 +2506,6 @@ html.no-js .post-controls .report-fallback-form {
   z-index: 5;
 }
 
-.catalog-item.catalog-menu-open .catalog-card-actions {
-  opacity: 1;
-}
-
 .catalog-item.sticky { border-color: var(--amber); }
 .catalog-item.is-pinned {
   border-color: var(--amber);
@@ -2589,45 +2611,27 @@ html.no-js .post-controls .report-fallback-form {
   position: absolute;
   right: 0;
   top: 50%;
-  opacity: 0;
-  pointer-events: auto;
   z-index: 3;
-  transition: opacity 0.15s ease, transform 0.15s ease;
   transform: translateY(-50%);
   flex-shrink: 0;
-}
-
-.catalog-item:hover .catalog-card-actions,
-.catalog-item:focus-within .catalog-card-actions {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(-50%);
 }
 
 .catalog-thread-menu-toggle {
   border: 1px solid transparent;
   background: color-mix(in srgb, var(--green) 8%, transparent);
-  color: var(--green-dim);
+  color: var(--text-dim);
   cursor: pointer;
   width: 30px;
   min-width: 30px;
   height: 30px;
   min-height: 30px;
   padding: 0;
-  opacity: 0;
-  transition: opacity 0.15s ease, transform 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-  transform: translateX(-2px);
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
   flex: 0 0 auto;
   border-radius: 999px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-
-.catalog-item:hover .catalog-thread-menu-toggle,
-.catalog-item:focus-within .catalog-thread-menu-toggle {
-  opacity: 1;
-  transform: translateX(0);
 }
 
 .catalog-thread-menu-toggle::before {
@@ -2664,16 +2668,13 @@ html.no-js .post-controls .report-fallback-form {
 
 /* Index/thread controls share the catalog menu without changing post/media layout. */
 .thread-list-entry { position: relative; }
-.thread-list-entry > .catalog-card-actions { top: 8px; right: 8px; transform: none; opacity: 1; }
-.thread-list-entry > .catalog-card-actions .catalog-thread-menu-toggle,
-.thread-actions-row .catalog-thread-menu-toggle { opacity: 1; transform: none; }
+.thread-list-entry > .catalog-card-actions { top: 8px; right: 8px; transform: none; }
 .thread-list-entry .op > .post-meta { padding-right: 40px; }
 .thread-actions-row { position: relative; min-height: 38px; margin: 6px 0; padding-right: 44px; }
-.thread-actions-row > .catalog-card-actions { opacity: 1; transform: none; top: 0; }
+.thread-actions-row > .catalog-card-actions { transform: none; top: 0; }
 html.no-js .thread-actions-row,
 html.no-js .thread-list-entry .op > .post-meta { padding-right: 0; }
 .catalog-thread-menu-toggle[aria-expanded="true"] {
-  opacity: 1;
   color: var(--green-bright);
   border-color: var(--border);
   background: color-mix(in srgb, var(--green) 14%, transparent);
@@ -2784,8 +2785,6 @@ html.no-js .catalog-thread-fallback-actions .report-fallback-details[open] {
     min-width: 38px;
     height: 38px;
     min-height: 38px;
-    opacity: 1;
-    transform: none;
   }
 
   .catalog-meta-row {
@@ -2797,11 +2796,6 @@ html.no-js .catalog-thread-fallback-actions .report-fallback-details[open] {
   html.no-js .catalog-meta-row {
     padding-right: 0;
     padding-left: 0;
-  }
-
-  .catalog-card-actions {
-    opacity: 1;
-    pointer-events: auto;
   }
 
   .catalog-thread-menu-item {
@@ -2826,7 +2820,7 @@ html.no-js .catalog-thread-fallback-actions .report-fallback-details[open] {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.7rem;
+  font-size: 0.82rem;
   color: var(--text-dim);
   border: 1px dashed var(--border);
   border-radius: var(--radius-sm);
@@ -2838,14 +2832,14 @@ html.no-js .catalog-thread-fallback-actions .report-fallback-details[open] {
   flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
-  font-size: 0.74rem;
+  font-size: 0.82rem;
   margin-top: 6px;
   overflow-wrap: anywhere;
   overflow: hidden;
 }
 .catalog-replies {
-  color: var(--green-dim);
-  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-size: 0.82rem;
   font-weight: bold;
   letter-spacing: 0.03em;
   white-space: nowrap;
@@ -3239,7 +3233,6 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
     overflow-wrap: anywhere;
   }
 
-  .catalog-info,
   .board-card-desc,
   .board-card-name {
     font-size: 0.8rem;
@@ -3415,6 +3408,10 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   letter-spacing: 0.01em;
 }
 
+#thread-composer-error {
+  scroll-margin-top: calc(var(--header-offset, 58px) + 10px);
+}
+
 .post-success-banner {
   background: color-mix(in srgb, var(--green) 10%, var(--bg-panel));
   border: 1px solid var(--green);
@@ -3425,6 +3422,10 @@ html:not([data-theme]) .index-title { text-shadow: 0 0 18px rgba(0,255,65,0.5); 
   margin: 0 0 14px 0;
   border-radius: var(--radius-md);
   letter-spacing: 0.01em;
+}
+
+.post-success-banner + .post {
+  scroll-margin-top: calc(var(--header-offset, 58px) + 5rem);
 }
 
 html:is([data-theme="chanclassic"], [data-theme="aero"], [data-theme="neoncubicle"], [data-theme="fluorogrid"]) .post-error-banner,
@@ -3904,8 +3905,6 @@ html[data-theme="aero"] .catalog-control-group {
   background: #edf7fb;
   border-color: var(--border);
 }
-html[data-theme="aero"] .catalog-card-actions { opacity: 1; }
-html[data-theme="aero"] .catalog-thread-menu-toggle,
 html[data-theme="aero"] .board-reorder-toggle { opacity: 1; transform: none; }
 
 /* Readable ink, familiar green quotes, and an aquatic link hierarchy. */
@@ -5251,6 +5250,7 @@ html[data-theme="forest"] [aria-disabled="true"] {
                     linear-gradient(90deg, rgba(78,180,180,0.09) 1px, transparent 1px);
   background-size: 28px 28px;
 }
+[data-theme="fluorogrid"] .board-catalog-header h1 { color: #9032af; }
 [data-theme="fluorogrid"] .site-header {
   background: #ede8ff;
   border-bottom: 2px solid #7ecece;
@@ -5316,6 +5316,7 @@ html[data-theme="forest"] [aria-disabled="true"] {
     rgba(74,184,200,0.07) 23px, rgba(74,184,200,0.07) 24px
   );
 }
+[data-theme="neoncubicle"] .board-catalog-header h1 { color: #ac327e; }
 [data-theme="neoncubicle"] .site-header {
   background: #e0d6f4;
   border-bottom: 1px solid #82cece;
@@ -5398,15 +5399,20 @@ html[data-theme="forest"] [aria-disabled="true"] {
 }
 [data-theme="chanclassic"] .site-header .board-list a,
 [data-theme="chanclassic"] .site-header .home-btn,
-[data-theme="chanclassic"] .site-header .mobile-board-menu-btn,
-[data-theme="chanclassic"] .site-header .mobile-board-link {
+[data-theme="chanclassic"] .site-header .mobile-board-menu-btn {
   color: #f3dfcf;
 }
 [data-theme="chanclassic"] .site-header .board-list a:hover,
 [data-theme="chanclassic"] .site-header .home-btn:hover,
-[data-theme="chanclassic"] .site-header .mobile-board-menu-btn:hover,
-[data-theme="chanclassic"] .site-header .mobile-board-link:hover {
+[data-theme="chanclassic"] .site-header .mobile-board-menu-btn:hover {
   color: #fff8ee;
+}
+[data-theme="chanclassic"] .mobile-board-menu-panel .mobile-board-link {
+  color: var(--green);
+}
+[data-theme="chanclassic"] .mobile-board-menu-panel .mobile-board-link:hover,
+[data-theme="chanclassic"] .mobile-board-menu-panel .mobile-board-link:focus-visible {
+  color: var(--green-bright);
 }
 [data-theme="chanclassic"] .site-subtitle {
   color: #f5dede;
@@ -5466,7 +5472,8 @@ html[data-theme="forest"] [aria-disabled="true"] {
   color: #5f5f5f;
 }
 /* Greentext */
-[data-theme="chanclassic"] .greentext { color: #789922; }
+[data-theme="chanclassic"] .greentext,
+[data-theme="chanclassic"] .post-body .quote { color: #4d641c; }
 /* Poster name */
 [data-theme="chanclassic"] .name { color: #117743; font-weight: bold; }
 /* Subject line */
@@ -5552,7 +5559,9 @@ html[data-theme="forest"] [aria-disabled="true"] {
   color: #1b3fa8;
 }
 /* File info */
-[data-theme="chanclassic"] .file-info { color: #707070; font-size: 0.8rem; }
+[data-theme="chanclassic"] .file-info { font-size: 0.8rem; }
+[data-theme="chanclassic"] .file-info,
+[data-theme="chanclassic"] .catalog-no-image { color: #645753; }
 /* Spoiler text */
 [data-theme="chanclassic"] .spoiler { background: #000; color: #000; }
 [data-theme="chanclassic"] .spoiler:hover { color: #fff; }
@@ -5606,6 +5615,12 @@ html[data-theme="forest"] [aria-disabled="true"] {
   position: relative;
 }
 
+.site-footer-theme:not(:has(.user-preferences-panel)) { display: none; }
+
+@media (max-width: 900px), (hover: none) and (pointer: coarse) {
+  .site-header .user-preferences-panel { order: 3; }
+}
+
 .user-preferences-summary {
   list-style: none;
 }
@@ -5644,6 +5659,12 @@ html[data-theme="forest"] [aria-disabled="true"] {
   max-height: calc(100vh - 24px);
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.site-header .user-preferences-form {
+  top: calc(100% + 10px);
+  bottom: auto;
+  max-height: calc(100dvh - var(--header-offset, 58px) - 24px);
 }
 
 .user-preferences-noscript {
@@ -5795,6 +5816,12 @@ html[data-show-activity-badges="0"] .new-activity-badge {
     border-left: 0;
     border-radius: 18px 18px 0 0;
     box-shadow: 0 -10px 34px rgba(0,0,0,0.58);
+  }
+
+  .site-header #theme-picker-btn {
+    min-height: 40px;
+    padding: 6px 10px;
+    font-size: 0.85rem;
   }
 
   @supports (height: 100svh) {
@@ -6064,10 +6091,11 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   color: var(--green-bright);
   font-weight: bold;
   flex: 1;
+  overflow-wrap: anywhere;
 }
 
 .poll-status {
-  font-size: 0.72rem;
+  font-size: 0.82rem;
   padding: 1px 6px;
   border: 1px solid;
 }
@@ -6075,10 +6103,18 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 .poll-open   { border-color: var(--green-dim); color: var(--green-pale); }
 .poll-closed { border-color: var(--gray);      color: var(--gray-light); }
 
-.poll-vote-form {
+.poll-vote-form,
+.poll-vote-options {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.poll-vote-options {
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .poll-vote-option {
@@ -6097,7 +6133,20 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   background: rgba(0,200,64,0.05);
 }
 
-.poll-vote-option input[type="radio"] { accent-color: var(--green); }
+.poll-vote-option:has(input:checked) {
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, var(--bg-panel));
+}
+
+.poll-vote-option:has(input:focus-visible) {
+  outline: 2px solid var(--green-bright);
+  outline-offset: 1px;
+}
+
+.poll-vote-option input[type="radio"] {
+  accent-color: var(--green);
+  flex-shrink: 0;
+}
 
 .poll-vote-btn {
   align-self: flex-start;
@@ -6136,7 +6185,11 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   margin-bottom: 3px;
 }
 
-.poll-opt-text { color: var(--text); flex: 1; }
+.poll-opt-text {
+  color: var(--text);
+  flex: 1;
+  overflow-wrap: anywhere;
+}
 
 .poll-opt-count {
   color: var(--text-dim);
@@ -6262,6 +6315,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
 
 .poll-option-row input[type="text"] {
   flex: 1;
+  min-width: 0;
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--green-pale);
@@ -6300,6 +6354,7 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   cursor: pointer;
   padding: 2px 6px;
   font-family: var(--font);
+  flex-shrink: 0;
 }
 
 .poll-remove-btn:hover { border-color: var(--red); color: var(--red); }
@@ -6308,8 +6363,19 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   display: none;
 }
 
+.poll-option-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.poll-option-status {
+  color: var(--text-dim);
+  font-size: 0.82rem;
+}
+
 .poll-add-btn {
-  align-self: flex-start;
   background: transparent;
   border: 1px solid var(--green-dim);
   color: var(--green-pale);
@@ -6319,7 +6385,14 @@ html:not([data-theme]) .crosslink:hover { text-shadow: 0 0 6px rgba(255,179,0,0.
   cursor: pointer;
 }
 
-.poll-add-btn:hover { border-color: var(--border-glow); color: var(--green-bright); }
+.poll-add-btn:hover:not(:disabled) { border-color: var(--border-glow); color: var(--green-bright); }
+
+@media (max-width: 700px), (pointer: coarse) {
+  .poll-remove-btn {
+    min-inline-size: 38px;
+    min-block-size: 38px;
+  }
+}
 
 /* Audio combo */
 .audio-combo {
@@ -6897,7 +6970,7 @@ html:not([data-theme]) .thread-board-banner { text-shadow: 0 0 10px rgba(0,255,6
 
 html.no-js .thread-nav-refresh > button,
 html.no-js .thread-nav-refresh > label,
-html.no-js .poll-add-btn {
+html.no-js .poll-option-actions {
   display: none;
 }
 

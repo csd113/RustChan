@@ -313,6 +313,13 @@ pub fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
 ///
 /// # Errors
 /// Returns an error if the mode cannot be changed.
+#[cfg_attr(
+    not(unix),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "shared API changes permissions on Unix"
+    )
+)]
 pub fn restrict_private_dir_permissions(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -321,7 +328,7 @@ pub fn restrict_private_dir_permissions(path: &Path) -> anyhow::Result<()> {
     }
 
     #[cfg(not(unix))]
-    let _ = path;
+    let _: &Path = path;
 
     Ok(())
 }
@@ -330,6 +337,13 @@ pub fn restrict_private_dir_permissions(path: &Path) -> anyhow::Result<()> {
 ///
 /// # Errors
 /// Returns an error if the mode cannot be changed.
+#[cfg_attr(
+    not(unix),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "shared API changes permissions on Unix"
+    )
+)]
 pub fn restrict_private_file_permissions(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -338,7 +352,7 @@ pub fn restrict_private_file_permissions(path: &Path) -> anyhow::Result<()> {
     }
 
     #[cfg(not(unix))]
-    let _ = path;
+    let _: &Path = path;
 
     Ok(())
 }

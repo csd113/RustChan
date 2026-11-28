@@ -99,8 +99,7 @@ pub(super) fn detect_mime_type(data: &[u8]) -> Result<&'static str> {
     }
 
     Err(anyhow::anyhow!(super::UploadRejection::Disallowed(
-        "File type not allowed. Accepted: JPEG, PNG, GIF, WebP, HEIC, HEIF, BMP, TIFF, \
-         MP4, WebM, MP3, OGG, FLAC, WAV, M4A, AAC, PDF"
+        "File type not allowed. Choose a file type listed next to the upload field, then submit again."
             .into()
     )))
 }

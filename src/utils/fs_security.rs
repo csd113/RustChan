@@ -170,6 +170,7 @@ pub fn assert_regular_file_no_symlink(path: &Path) -> Result<()> {
     if !metadata.file_type().is_file() {
         anyhow::bail!("Runtime path is not a regular file.");
     }
+    #[cfg(unix)]
     reject_hardlinked_file_if_unix(&metadata)?;
     Ok(())
 }
@@ -197,13 +198,5 @@ fn reject_hardlinked_file_if_unix(metadata: &std::fs::Metadata) -> Result<()> {
     if metadata.nlink() != 1 {
         anyhow::bail!("Runtime file has multiple hard links.");
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-/// Keeps hard-link validation portable on platforms without link counts.
-fn reject_hardlinked_file_if_unix(_metadata: &std::fs::Metadata) -> Result<()> {
-    // Portable Rust has no cross-platform link-count API; keep non-Unix builds
-    // best-effort while preserving the symlink and canonical-root checks.
     Ok(())
 }

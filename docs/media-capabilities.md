@@ -23,6 +23,49 @@ If a valid file has no supported preview path, RustChan can keep the original
 and show a placeholder. Missing FFmpeg or codecs does not make every upload
 fail. Check startup capability warnings and the board's upload settings first.
 
+## Strict metadata-safe uploads (optional)
+
+In **Admin → Boards → uploads & post features**, enable **Strict metadata-safe
+uploads** for an individual board and save. It is off for new and upgraded
+boards. It applies immediately to new posts and replies, including alternate
+upload slots, with the same behavior on Windows, Unix and Tor. It uses the
+built-in Rust image pipeline, needs no external tool, and makes no network calls.
+
+| Uploaded format | Strict policy |
+| --- | --- |
+| JPEG, static PNG, BMP, static WebP | Decode and losslessly re-encode pixels into a fresh WebP, even if larger than the source. Bake supported orientation into the pixels. |
+| GIF, animated WebP | Rebuild every composited frame, preserving supported transparency, frame timing and repetition. Reject a failed later frame, unsupported loop count, or oriented WebP animation rather than flattening it. |
+| APNG, TIFF, HEIC/HEIF | Reject: the current pipeline cannot promise preservation of all animation, pages, or auxiliary/container presentation data. Re-export a still as PNG/JPEG/WebP, or animation as GIF/WebP. |
+| Video, all audio (including image-plus-audio), PDF, SVG, arbitrary files | Reject: these formats have no strict sanitizer. This overrides the board's other upload permissions, including any-file uploads, regardless of FFmpeg availability. |
+
+Only successfully encoded WebP images reach publication; EXIF, XMP, ICC,
+comments, other source ancillary blocks and trailing bytes are not copied. A
+codec, deadline or output-budget failure rejects the upload with a safe message;
+there is **no fallback to original bytes**. Filesystem failures remain private
+server errors. Temporary conversions are cleaned on failure, and successful
+outputs still have to fit the board's image size limit. Strict posts bypass
+historical deduplication because old cache entries have no sanitization proof;
+this costs additional processing and disk space for repeat uploads.
+
+The limits and rendering tradeoffs below still apply: WebP is 8-bit, source
+profiles are stripped without general ICC-to-sRGB color conversion, and some
+inputs may render differently. GIF delays must be representable in WebP. The
+existing native-codec memory and cooperative-timeout limits are unchanged.
+
+This is an **embedded metadata policy**, not an anonymity guarantee. It does not
+remove faces, text, watermarks, hidden pixel content or other identifying image
+content, nor change original displayed filenames, post text or network exposure.
+Review those separately before posting.
+
+Existing posts, files, queued work, banners, favicons and restored historical
+media are not rewritten or certified by this switch. Take a normal backup before
+upgrading: the recognized older database schema is migrated transactionally,
+with existing boards defaulting to off. Full backups and new board exports
+preserve the setting. Older board manifests lack it and restore with it off;
+review the setting after restoring an old backup. Historical originals in
+backups are not sanitized. Older binaries do not understand the new schema;
+roll back using your pre-upgrade backup rather than opening it with an old binary.
+
 ## If an upload reports a storage error
 
 An unwritable destination rejects the upload before the new post is committed.

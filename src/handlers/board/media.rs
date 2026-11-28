@@ -423,7 +423,7 @@ pub(in crate::server) async fn api_post_preview(
 
 // GET /{board}/post/{post_id}
 // Canonical redirect for `>>>/board/N` links.  Resolves the global post ID to
-// its containing thread and issues a 302 to /{board}/thread/{thread_id}#p{post_id}.
+// its containing thread and redirects to the window containing the post.
 //
 // Users clicking a cross-board quotelink land here on the first click; after
 // the first hover preview the JS upgrades the href in-place so subsequent
@@ -459,7 +459,8 @@ pub(in crate::server) async fn redirect_to_post(
     .await;
 
     if let Ok(Ok((Some(thread_id), _))) = result {
-        let url = format!("/{board_short_for_url}/thread/{thread_id}?post={post_id}#p{post_id}");
+        let url =
+            crate::utils::redirect::thread_post_url(&board_short_for_url, thread_id, post_id, None);
         Redirect::to(&url).into_response()
     } else if matches!(result, Ok(Ok((None, true)))) {
         Redirect::to(&unlock_redirect_url(

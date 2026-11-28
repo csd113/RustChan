@@ -37,6 +37,7 @@ fn options(root: &str, limit: usize) -> files::SaveUploadOptions<'_> {
         max_pdf_size: limit,
         ffmpeg_available: false,
         allow_any_files: false,
+        strict_metadata_uploads: false,
     }
 }
 
@@ -346,6 +347,166 @@ fn committed_upload_failure_is_not_reported_as_success() -> Result<()> {
     ensure!(
         !message.contains(root_text) && stage.exists(),
         "hide internal paths and retain staged recovery evidence"
+    );
+    Ok(())
+}
+
+/// Keep a small real board policy for upload bypass regressions.
+fn metadata_board(strict: bool) -> crate::models::Board {
+    crate::models::Board {
+        id: 1,
+        display_order: 1,
+        short_name: "test".into(),
+        name: "Test".into(),
+        description: String::new(),
+        nsfw: false,
+        max_threads: 150,
+        max_archived_threads: 150,
+        bump_limit: 500,
+        allow_images: true,
+        allow_video: true,
+        allow_audio: true,
+        allow_pdf: true,
+        allow_any_files: true,
+        strict_metadata_uploads: strict,
+        max_image_size: 1024 * 1024,
+        max_video_size: 1024 * 1024,
+        max_audio_size: 1024 * 1024,
+        max_pdf_size: 1024 * 1024,
+        allow_tripcodes: true,
+        allow_editing: true,
+        allow_self_delete: true,
+        edit_window_secs: 60,
+        allow_archive: true,
+        allow_video_embeds: true,
+        allow_captcha: false,
+        show_poster_ids: true,
+        collapse_greentext: false,
+        post_cooldown_secs: 0,
+        default_theme: String::new(),
+        banner_mode: crate::models::BoardBannerMode::Inherit,
+        access_mode: crate::models::BoardAccessMode::Public,
+        access_password_hash: String::new(),
+        created_at: 0,
+    }
+}
+
+/// A historical same-board cache hit must not publish unsanitized original data.
+#[test]
+fn strict_upload_skips_legacy_dedup_and_ordinary_policy_keeps_it() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_str = root.path().to_str().context("UTF-8 fixture")?;
+    std::fs::create_dir(root.path().join("test"))?;
+    let pixels = image::RgbImage::from_pixel(2, 1, image::Rgb([20, 40, 60]));
+    let source = root.path().join("input.webp");
+    pixels.save(&source)?;
+    let mut bytes = std::fs::read(&source)?;
+    bytes.extend_from_slice(b"private-trailing-data");
+    std::fs::write(root.path().join("test/legacy.webp"), &bytes)?;
+    for strict in [false, true] {
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        temp_file.write_all(&bytes)?;
+        let upload = crate::handlers::TempUpload {
+            temp_file,
+            sniff_bytes: bytes.clone(),
+            size_bytes: bytes.len(),
+        };
+        let mut lookups = 0;
+        let (file, _) = super::process_primary_upload(
+            Some((upload, "source.webp".into())),
+            &metadata_board(strict),
+            |_| {
+                lookups += 1;
+                Ok(Some(crate::db::CachedFile {
+                    file_path: "test/legacy.webp".into(),
+                    thumb_path: String::new(),
+                    mime_type: "image/webp".into(),
+                }))
+            },
+            root_str,
+            root_str,
+            16,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            1024 * 1024,
+            false,
+        )?;
+        let saved = file.context("missing stored file")?;
+        anyhow::ensure!(
+            saved.dedup_reused != strict && lookups == usize::from(!strict),
+            "strict upload reused an unproven historical cache entry"
+        );
+        if strict {
+            let stored = root.path().join(saved.file_path);
+            anyhow::ensure!(
+                image::open(&stored)?.into_rgb8() == pixels,
+                "strict posting changed image pixels"
+            );
+            anyhow::ensure!(
+                !std::fs::read(stored)?
+                    .windows(21)
+                    .any(|chunk| chunk == b"private-trailing-data"),
+                "original source metadata was published"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Audio cannot bypass the board policy through the image-plus-audio helper.
+#[test]
+fn strict_secondary_audio_rejection_and_resource_failure_are_actionable() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let root_str = root.path().to_str().context("UTF-8 fixture")?;
+    let bytes = wav_fixture();
+    let mut temp_file = tempfile::NamedTempFile::new()?;
+    temp_file.write_all(&bytes)?;
+    let audio = crate::handlers::TempUpload {
+        temp_file,
+        sniff_bytes: bytes.clone(),
+        size_bytes: bytes.len(),
+    };
+    let error = super::process_audio_combo(
+        Some((audio, "voice.wav".into())),
+        None,
+        &metadata_board(true),
+        root_str,
+        1024,
+    )
+    .err()
+    .context("secondary audio bypassed strict policy")?;
+    let (status, message) = board::handled_post_error_status(error)?;
+    anyhow::ensure!(
+        status == StatusCode::UNSUPPORTED_MEDIA_TYPE && message.contains("metadata-safe"),
+        "secondary policy rejection lost its explanation"
+    );
+    let image_source = tempfile::NamedTempFile::new()?;
+    image::RgbImage::from_pixel(2, 2, image::Rgb([20, 40, 60]))
+        .save_with_format(image_source.path(), image::ImageFormat::Png)?;
+    let resource_error = crate::media::MediaProcessor::new_with_ffmpeg(false)
+        .with_strict_metadata_uploads(true)
+        .process_upload_with_budget(
+            image_source.path(),
+            "image/png",
+            root.path(),
+            "limited",
+            root.path(),
+            16,
+            &crate::media::image_budget::ImageBudget::new(1),
+        )
+        .err()
+        .context("strict encoder ignored its output limit")?;
+    let (resource_status, resource_message) =
+        board::handled_post_error_status(classify_upload_error(resource_error))?;
+    anyhow::ensure!(
+        resource_status == StatusCode::UNPROCESSABLE_ENTITY
+            && !resource_message.contains("private"),
+        "codec limits must give safe retry advice"
+    );
+    anyhow::ensure!(
+        std::fs::read_dir(root.path())?.next().is_none(),
+        "rejected audio created public output"
     );
     Ok(())
 }

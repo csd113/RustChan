@@ -12,7 +12,6 @@ use axum::{
     response::{Html, IntoResponse as _, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
 use serde::Deserialize;
 
 // POST /admin/ban/add
@@ -46,8 +45,8 @@ pub(in crate::server) async fn add_ban(
         // Cap at 87_600 hours (10 years) to prevent overflow in h * 3600.
         // Permanent bans are represented by None (duration_hours absent or zero).
         .map(|h| {
-            Utc::now()
-                .timestamp()
+            jiff::Timestamp::now()
+                .as_second()
                 .saturating_add(h.min(87_600).saturating_mul(3600))
         });
 
@@ -169,8 +168,8 @@ pub(in crate::server) async fn admin_ban_and_delete(
         .unwrap_or_else(|| "Rule violation".to_owned());
 
     let expires_at = form.duration_hours.filter(|&h| h > 0).map(|h| {
-        Utc::now()
-            .timestamp()
+        jiff::Timestamp::now()
+            .as_second()
             .saturating_add(h.min(87_600).saturating_mul(3600))
     });
 

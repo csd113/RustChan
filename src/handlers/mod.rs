@@ -82,3 +82,7 @@ pub(crate) fn native_post_error_response(
     *response.body_mut() = Body::from(html);
     response
 }
+
+#[cfg(test)]
+#[path = "tests/page_csrf.rs"]
+pub(crate) mod csrf_test_support;

@@ -532,14 +532,14 @@ pub(in crate::server) async fn search(
         let csrf_clone = csrf.clone();
         move || -> Result<String> {
             let _search_permit = search_permit;
-            let conn = pool.get()?;
+            let mut conn = pool.get()?;
             let board = db::get_board_by_short(&conn, &board_short)?
                 .ok_or_else(|| AppError::NotFound(format!("Board /{board_short}/ not found")))?;
 
-            let total = db::count_search_results(&conn, board.id, &query_str)?;
+            let total = db::count_search_results(&mut conn, board.id, &query_str)?;
             let pagination = Pagination::new(page, SEARCH_PER_PAGE, total);
             let posts = db::search_posts(
-                &conn,
+                &mut conn,
                 board.id,
                 &query_str,
                 SEARCH_PER_PAGE,

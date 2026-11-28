@@ -28,6 +28,8 @@ pub(in crate::server::handlers::admin::backup) struct BoardRow {
     pub allow_pdf: bool,
     #[serde(default)]
     pub allow_any_files: bool,
+    #[serde(default)]
+    pub strict_metadata_uploads: bool,
     #[serde(default = "default_true")]
     pub allow_tripcodes: bool,
     #[serde(default = "default_edit_window_secs")]

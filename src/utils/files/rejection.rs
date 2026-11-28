@@ -13,6 +13,9 @@ pub(crate) enum UploadRejection {
     /// Content type is prohibited; the message is safe for clients.
     #[error("{0}")]
     Disallowed(String),
+    /// Strict metadata sanitization failed; decoder details remain private.
+    #[error("{0}")]
+    SanitizationFailed(String),
     /// Malformed image header with a dedicated, sanitized recovery message.
     #[error("{0}")]
     MalformedImageHeader(String),

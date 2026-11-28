@@ -211,7 +211,6 @@ pub fn write_placeholder(output_path: &Path, kind: PlaceholderKind) -> Result<()
 /// preserved), and saves as WebP. This path handles all supported images.
 pub(super) fn image_crate_thumbnail(
     input_path: &Path,
-    _mime: &str,
     output_path: &Path,
     max_dim: u32,
 ) -> Result<()> {

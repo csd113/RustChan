@@ -52,14 +52,25 @@ pub(in crate::server) async fn view_thread(
     req_headers: HeaderMap,
     peer: crate::middleware::SecureCookieContext,
 ) -> Result<Response> {
-    if params.before.is_some_and(|id| id <= 0) || params.post.is_some_and(|id| id <= 0) {
+    if [params.before, params.after, params.post]
+        .into_iter()
+        .flatten()
+        .any(|id| id <= 0)
+    {
         return Err(AppError::BadRequest(
             "Thread cursors must be positive post IDs.".into(),
         ));
     }
     // The largest SQLite ID is already in the latest window; it cannot have
     // an exclusive successor cursor. Preserve post focus at that boundary.
-    let before = params.post.map_or(params.before, |id| id.checked_add(1));
+    let cursor = if let Some(id) = params.post {
+        id.checked_add(1).map(db::ReplyWindowCursor::Before)
+    } else {
+        params
+            .before
+            .map(db::ReplyWindowCursor::Before)
+            .or_else(|| params.after.map(db::ReplyWindowCursor::After))
+    };
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     let user_preferences = crate::handlers::board::user_preferences_from_jar(&jar);
     let (jar, csrf) = ensure_csrf_for_request(jar, &req_headers, peer);
@@ -101,14 +112,14 @@ pub(in crate::server) async fn view_thread(
         let pool = state.db.clone();
         move || -> Result<ThreadViewLoadResult> {
             let conn = pool.get()?;
-            let page_data = render::load_thread_page_data_before(
+            let page_data = render::load_thread_page_data_window(
                 &conn,
                 board,
                 thread_id,
                 &identity_key,
                 &CONFIG.cookie_secret,
                 is_admin,
-                before,
+                cursor,
             )?;
             let effective_is_admin = page_data.is_admin;
             let thread_badges_enabled = db::get_thread_new_reply_badges_enabled(&conn);
@@ -217,7 +228,7 @@ pub(in crate::server) async fn view_thread(
         .unwrap_or("");
     let activity_markers_enabled =
         thread_badges_enabled || homepage_thread_badges_enabled || homepage_reply_badges_enabled;
-    if client_etag == etag && !activity_markers_enabled {
+    if client_etag == etag && !activity_markers_enabled && params.reported.is_none() {
         // StatusCode::NOT_MODIFIED and Body::empty() are always valid; this
         // builder call is infallible in practice.
         let mut resp = axum::http::Response::builder()
@@ -238,11 +249,12 @@ pub(in crate::server) async fn view_thread(
         return Ok((jar, resp).into_response());
     }
 
-    let success_message = match params.reported.as_deref() {
+    let success = match params.reported.as_deref() {
         Some("1") => Some("Report submitted. Thank you."),
         Some("duplicate") => Some("A matching report is already open. Thank you."),
         _ => None,
-    };
+    }
+    .map(|message| (message, params.post));
     // HTML assembly is CPU work on already-owned data; keep it off the async workers.
     let html = crate::middleware::data_access::spawn_blocking(move || {
         render::render_thread_page(
@@ -250,7 +262,7 @@ pub(in crate::server) async fn view_thread(
             &csrf,
             admin_csrf.as_deref(),
             None,
-            success_message,
+            success,
             None,
             None,
             current_theme.as_deref(),
@@ -534,6 +546,7 @@ pub(in crate::server) async fn post_reply(
 pub(in crate::server) struct ThreadPageQuery {
     pub reported: Option<String>,
     pub before: Option<i64>,
+    pub after: Option<i64>,
     pub post: Option<i64>,
 }
 
@@ -685,7 +698,7 @@ pub(in crate::server) async fn edit_post_get(
         ));
     }
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     if now > crate::handlers::board::self_action_expiry(context.post.created_at)? {
         return Err(AppError::Forbidden(
             "The 60-second edit window for this post has closed.".into(),
@@ -821,7 +834,7 @@ pub(in crate::server) async fn edit_post_post(
                 ));
             }
 
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             if now.saturating_sub(post.created_at) > crate::handlers::board::self_action_window_secs()
             {
                 return Err(AppError::Forbidden(
@@ -971,7 +984,7 @@ pub(in crate::server) async fn delete_post_get(
         ));
     }
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     if now > crate::handlers::board::self_action_expiry(context.post.created_at)? {
         return Err(AppError::Forbidden(
             "The 60-second self-delete window for this post has closed.".into(),
@@ -1240,8 +1253,7 @@ pub(in crate::server) async fn vote_handler(
     let identity_key = crate::handlers::board::identity_key(&client_ip, &jar);
     let ban_csrf_token = jar
         .get("csrf_token")
-        .map(|cookie| cookie.value().to_owned())
-        .unwrap_or_default();
+        .map_or_default(|cookie| cookie.value().to_owned());
     let redirect_url = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<String> {

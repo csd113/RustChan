@@ -52,8 +52,7 @@ pub(in crate::server) async fn file_report(
     let board_raw_closure = board_raw.clone();
     let csrf_cookie = jar
         .get("csrf_token")
-        .map(|cookie| cookie.value().to_owned())
-        .unwrap_or_default();
+        .map_or_default(|cookie| cookie.value().to_owned());
     let outcome = crate::middleware::data_access::spawn_blocking({
         let pool = state.db.clone();
         move || -> Result<Option<(i64, db::ReportSubmission)>> {
@@ -128,9 +127,11 @@ pub(in crate::server) async fn file_report(
         db::ReportSubmission::AlreadyFiled => "duplicate",
     };
     // Target and board were checked together under the write lock.
-    Ok(Redirect::to(&format!(
-        "/{board_raw}/thread/{db_thread_id}?reported={reported}#p{}",
-        form.post_id
+    Ok(Redirect::to(&crate::utils::redirect::thread_post_url(
+        &board_raw,
+        db_thread_id,
+        form.post_id,
+        Some(reported),
     ))
     .into_response())
 }

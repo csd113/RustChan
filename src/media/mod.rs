@@ -24,6 +24,8 @@ pub mod process;
 pub mod prune;
 /// Managed-media reference auditing and conservative orphan reconciliation.
 pub mod reconcile;
+/// Fail-closed, opt-in upload sanitization.
+pub(crate) mod strict;
 /// Image, video, audio, and PDF thumbnail generation.
 pub mod thumbnail;
 
@@ -88,6 +90,8 @@ pub struct ProcessedMedia {
 pub struct MediaProcessor {
     /// Whether the `ffmpeg` binary was detected on startup.
     pub ffmpeg_available: bool,
+    /// Fail closed unless this upload can be re-encoded without embedded metadata.
+    pub strict_metadata_uploads: bool,
 }
 
 impl MediaProcessor {
@@ -110,7 +114,16 @@ impl MediaProcessor {
     /// Create a processor with the video capability detected at startup.
     #[must_use]
     pub const fn new_with_ffmpeg(ffmpeg_available: bool) -> Self {
-        Self { ffmpeg_available }
+        Self {
+            ffmpeg_available,
+            strict_metadata_uploads: false,
+        }
+    }
+
+    /// Select the destination board's opt-in metadata policy.
+    pub(crate) const fn with_strict_metadata_uploads(mut self, strict: bool) -> Self {
+        self.strict_metadata_uploads = strict;
+        self
     }
 
     /// Process an uploaded file: convert to an optimal web format and generate
@@ -133,7 +146,8 @@ impl MediaProcessor {
     /// Returns an error only for unrecoverable I/O failures (disk full, no
     /// permissions).  Conversion failures are logged as warnings and the
     /// original file is kept instead — the function never propagates conversion
-    /// errors to the caller.
+    /// errors to the caller under the default policy. Strict metadata mode rejects
+    /// unsupported inputs or any sanitization failure without retaining originals.
     pub fn process_upload(
         self,
         input_path: &Path,
@@ -173,9 +187,12 @@ impl MediaProcessor {
             .map(|m| m.len())
             .context("failed to stat upload temp file")?;
 
-        let conv =
+        let conv = if self.strict_metadata_uploads {
+            strict::sanitize(input_path, mime, output_dir, file_stem, budget)?
+        } else {
             convert::convert_file_with_budget(input_path, mime, output_dir, file_stem, budget)
-                .context("conversion step failed")?;
+                .context("conversion step failed")?
+        };
 
         tracing::debug!(
             "media: {} → {} (converted={}, {}→{}B)",

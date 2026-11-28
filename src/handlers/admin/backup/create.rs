@@ -21,7 +21,6 @@ use axum::http::{header, HeaderMap};
 use axum::response::IntoResponse as _;
 use axum::response::{Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
-use chrono::Utc;
 use rusqlite::params;
 use serde::Deserialize;
 use std::io::Write;
@@ -258,7 +257,7 @@ pub(in crate::server) fn create_full_backup_to_server(
         format: storage::BACKUP_V4_FORMAT.to_owned(),
         archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
         backup_id,
-        created_at: Utc::now().timestamp(),
+        created_at: jiff::Timestamp::now().as_second(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         scope: storage::BackupScope::FullSite,
@@ -284,10 +283,12 @@ pub(in crate::server) fn create_full_backup_to_server(
         parts: Vec::new(),
         maintenance: None,
     };
+    // Split ZIP packaging removes the standalone snapshot after archiving it.
+    // Windows requires SQLite to release its handle first.
+    drop(export_conn);
     if storage_mode == BackupStorageMode::SplitZip {
         materialize_split_zip_parts(&root_dir, &mut manifest, split_zip_part_size)?;
     }
-    drop(export_conn);
 
     let backup_ref = finalize_saved_backup(&root_dir, manifest)?;
     incomplete.publish();
@@ -407,7 +408,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
     let repair_request = serde_json::json!({
         "operation": operation,
         "job_id": job_id,
-        "requested_at": Utc::now().timestamp(),
+        "requested_at": jiff::Timestamp::now().as_second(),
         "reason": reason,
         "backup_id": backup_id,
     });
@@ -513,7 +514,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         format: storage::BACKUP_V4_FORMAT.to_owned(),
         archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
         backup_id,
-        created_at: Utc::now().timestamp(),
+        created_at: jiff::Timestamp::now().as_second(),
         completed_at: None,
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         scope: storage::BackupScope::PreMaintenance,
@@ -540,7 +541,7 @@ pub(in crate::server::handlers::admin) fn create_pre_maintenance_backup_to_serve
         maintenance: Some(storage::MaintenanceMetadata {
             operation: Some(operation.to_owned()),
             job_id: Some(job_id),
-            requested_at: Some(Utc::now().timestamp()),
+            requested_at: Some(jiff::Timestamp::now().as_second()),
             risk_class: Some("db_mutating".to_owned()),
             includes_uploads: false,
             includes_file_inventory: false,
@@ -997,7 +998,7 @@ pub(in crate::server) async fn create_board_backup(
                 format: storage::BACKUP_V4_FORMAT.to_owned(),
                 archive_container: storage::ARCHIVE_CONTAINER.to_owned(),
                 backup_id,
-                created_at: Utc::now().timestamp(),
+                created_at: jiff::Timestamp::now().as_second(),
                 completed_at: None,
                 rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
                 scope: storage::BackupScope::Board,
@@ -1104,7 +1105,7 @@ pub(super) fn build_full_backup_manifest(
     )?;
     Ok(safety::FullBackupManifest {
         version: 3,
-        generated_at: Utc::now().timestamp(),
+        generated_at: jiff::Timestamp::now().as_second(),
         rustchan_version: env!("CARGO_PKG_VERSION").to_owned(),
         db_bytes,
         upload_file_count,
@@ -1135,7 +1136,7 @@ pub(super) fn build_board_backup_manifest(
                      allow_images, allow_video, allow_audio, allow_pdf, allow_any_files, allow_tripcodes,
                      edit_window_secs, allow_editing, allow_self_delete, allow_archive, allow_video_embeds,
                      allow_captcha, show_poster_ids, collapse_greentext, post_cooldown_secs,
-                     banner_mode, access_mode, access_password_hash, created_at
+                     banner_mode, access_mode, access_password_hash, created_at, strict_metadata_uploads
               FROM boards WHERE short_name = ?1",
             params![board_short],
             |row| {
@@ -1167,6 +1168,7 @@ pub(super) fn build_board_backup_manifest(
                     access_mode: row.get(24)?,
                     access_password_hash: row.get(25)?,
                     created_at: row.get(26)?,
+                    strict_metadata_uploads: row.get::<_, i64>(27)? != 0,
                 })
             },
         )
@@ -1834,7 +1836,7 @@ fn write_board_exports(
 }
 
 fn finalize_saved_backup(root_dir: &Path, mut manifest: storage::BackupManifest) -> Result<String> {
-    manifest.completed_at = Some(Utc::now().timestamp());
+    manifest.completed_at = Some(jiff::Timestamp::now().as_second());
 
     let mut metadata = storage::BackupMetadata {
         format: storage::BACKUP_V4_FORMAT.to_owned(),

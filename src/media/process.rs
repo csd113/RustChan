@@ -11,16 +11,6 @@ use std::time::{Duration, Instant};
 /// output in memory.
 pub(crate) const MEDIA_SUBPROCESS_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 
-/// Places a standard-library command in a fresh process group on Unix.
-pub(crate) fn configure_std_command(command: &mut Command) -> &mut Command {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        let _configured_command = command.process_group(0);
-    }
-    command
-}
-
 /// Runs a blocking subprocess with captured output and a hard deadline.
 pub(crate) fn run_std_command_with_timeout(
     command: &mut Command,
@@ -29,7 +19,11 @@ pub(crate) fn run_std_command_with_timeout(
     spawn_context: impl FnOnce() -> String,
     io_context: impl Fn() -> String,
 ) -> Result<Output> {
-    let _configured_command = configure_std_command(command);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let _configured_command = command.process_group(0);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -128,13 +122,25 @@ impl ProcessGroupGuard {
     }
 
     /// Sends a hard termination signal to the group at most once.
+    #[cfg_attr(
+        not(unix),
+        expect(
+            clippy::missing_const_for_fn,
+            reason = "shared cleanup method terminates Unix process groups at runtime"
+        )
+    )]
     pub(crate) fn terminate_remaining(&mut self) {
-        let Some(pid) = self.pid.take() else {
-            return;
-        };
-        if let Err(error) = terminate_process_group(pid) {
-            tracing::warn!(pid, error = %error, "failed to terminate media process group");
+        #[cfg(unix)]
+        {
+            let Some(pid) = self.pid.take() else {
+                return;
+            };
+            if let Err(error) = terminate_process_group(pid) {
+                tracing::warn!(pid, error = %error, "failed to terminate media process group");
+            }
         }
+        #[cfg(not(unix))]
+        let _: Option<u32> = self.pid.take();
     }
 }
 
@@ -185,11 +191,5 @@ fn terminate_process_group_using(pid: u32, kill_program: &std::path::Path) -> st
     }
     // A nonzero result normally means the group already exited between wait
     // and cleanup. Direct-child termination remains the portable fallback.
-    Ok(())
-}
-
-#[cfg(not(unix))]
-/// Provides a no-op process-group cleanup fallback on non-Unix platforms.
-fn terminate_process_group(_pid: u32) -> std::io::Result<()> {
     Ok(())
 }

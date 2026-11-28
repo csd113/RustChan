@@ -134,7 +134,7 @@ pub fn create_session(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn get_session(conn: &rusqlite::Connection, session_id: &str) -> Result<Option<AdminSession>> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut stmt = conn.prepare_cached(
         "SELECT id, admin_id, created_at, expires_at FROM admin_sessions
          WHERE id = ?1 AND expires_at > ?2",
@@ -167,7 +167,7 @@ pub fn delete_session(conn: &rusqlite::Connection, session_id: &str) -> Result<(
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn purge_expired_sessions(conn: &rusqlite::Connection) -> Result<usize> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let n = conn.execute(
         "DELETE FROM admin_sessions WHERE expires_at <= ?1",
         params![now],
@@ -188,7 +188,7 @@ pub fn purge_expired_sessions(conn: &rusqlite::Connection) -> Result<usize> {
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn is_banned(conn: &rusqlite::Connection, ip_hash: &str) -> Result<Option<String>> {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut stmt = conn.prepare_cached(
         "SELECT reason FROM bans WHERE ip_hash = ?1
          AND (expires_at IS NULL OR expires_at > ?2)
@@ -625,7 +625,7 @@ pub fn accept_ban_appeal(conn: &rusqlite::Connection, appeal_id: i64) -> Result<
 /// # Errors
 /// Returns an error if the database operation fails.
 pub fn has_recent_appeal(conn: &rusqlite::Connection, ip_hash: &str) -> Result<bool> {
-    let cutoff = chrono::Utc::now().timestamp().saturating_sub(86400);
+    let cutoff = jiff::Timestamp::now().as_second().saturating_sub(86400);
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM ban_appeals WHERE ip_hash=?1 AND created_at > ?2",
         params![ip_hash, cutoff],

@@ -220,6 +220,7 @@ fn revalidate_posting_policy(
                 board.allow_audio,
                 board.allow_pdf,
                 board.allow_any_files,
+                board.strict_metadata_uploads,
             ),
             (
                 board.max_image_size,
@@ -574,7 +575,7 @@ pub(super) fn submit_post(
                     ));
                 };
                 let secs = secs.clamp(60, 30 * 24 * 3600);
-                let expires_at = chrono::Utc::now().timestamp().saturating_add(secs);
+                let expires_at = jiff::Timestamp::now().as_second().saturating_add(secs);
                 Some(db::threads::PollInsert {
                     question: &q,
                     options: &valid_opts,

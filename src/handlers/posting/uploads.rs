@@ -25,6 +25,9 @@ pub(crate) fn classify_upload_error(error: anyhow::Error) -> AppError {
         Some(UploadRejection::Disallowed(message)) => {
             return AppError::InvalidMediaType(message.clone())
         }
+        Some(UploadRejection::SanitizationFailed(message)) => {
+            return AppError::BadRequest(message.clone())
+        }
         Some(UploadRejection::MalformedImageHeader(_) | UploadRejection::Malformed(_)) | None => {}
     }
     if error
@@ -151,6 +154,7 @@ pub(crate) fn process_primary_upload(
         max_pdf_size,
         ffmpeg_available,
         allow_any_files,
+        strict_metadata_uploads: board.strict_metadata_uploads,
     };
     let validated = crate::utils::files::storage::validate_upload_for_storage(
         upload.temp_file.path(),
@@ -173,7 +177,13 @@ pub(crate) fn process_primary_upload(
     // record_file_hash uses INSERT OR REPLACE, so the cache entry is
     // automatically refreshed to point at the newly saved files.
     let hash = sha256_file_hex(upload.temp_file.path())?;
-    if let Some(cached) = lookup(&hash)? {
+    // Historical cache entries have no sanitization provenance. Strict boards
+    // must re-encode even a same-board hit made before the policy was enabled.
+    if let Some(cached) = if board.strict_metadata_uploads {
+        None
+    } else {
+        lookup(&hash)?
+    } {
         let same_board_cache = cached_paths_belong_to_board(&cached, &board.short_name);
         let file_ok = std::path::Path::new(upload_dir)
             .join(&cached.file_path)
@@ -260,6 +270,11 @@ pub(crate) fn process_audio_combo(
         return Ok(None);
     };
 
+    if board.strict_metadata_uploads {
+        return Err(AppError::InvalidMediaType(
+            crate::media::strict::UNSUPPORTED_MESSAGE.into(),
+        ));
+    }
     if !board.allow_audio {
         return Err(AppError::BadRequest(
             "Audio uploads are disabled on this board.".into(),

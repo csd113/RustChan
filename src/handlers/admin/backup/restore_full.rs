@@ -30,7 +30,6 @@ use axum::http::HeaderMap;
 use axum::response::{Redirect, Response};
 use axum::{extract::FromRequest as _, response::IntoResponse as _};
 use axum_extra::extract::cookie::{Cookie, CookieJar};
-use chrono::Utc;
 use rusqlite::backup::Backup;
 use std::io::Seek;
 use std::path::{Path, PathBuf};
@@ -161,17 +160,15 @@ pub(super) fn create_live_restore_snapshot(
         .execute_batch(&format!("VACUUM INTO '{db_snapshot_str}'"))
         .map_err(|error| AppError::Internal(anyhow::anyhow!("Snapshot live DB: {error}")))?;
     restrict_restore_temp_file(db_snapshot)?;
-    std::fs::File::open(db_snapshot)?.sync_all()?;
+    super::recovery_files::sync_staged_file(db_snapshot)?;
     Ok(())
 }
 
 /// Validate expiry across Chrono's entire timestamp range before restore mutation.
 /// This permits calculating the full lifetime at issuance even if the clock moves.
 fn validate_restored_session_duration(duration: i64) -> Result<()> {
-    let _earliest_expiry =
-        restored_session_expiry(chrono::DateTime::<Utc>::MIN_UTC.timestamp(), duration)?;
-    let _latest_expiry =
-        restored_session_expiry(chrono::DateTime::<Utc>::MAX_UTC.timestamp(), duration)?;
+    let _earliest_expiry = restored_session_expiry(jiff::Timestamp::MIN.as_second(), duration)?;
+    let _latest_expiry = restored_session_expiry(jiff::Timestamp::MAX.as_second(), duration)?;
     Ok(())
 }
 
@@ -508,6 +505,7 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
                 "This backup does not contain a complete Tor hidden service identity.".into(),
             ));
         }
+        #[cfg(unix)]
         if let Some(staged_tor_hidden_service_keys_dir) =
             staged_tor_hidden_service_keys_dir.as_ref()
         {
@@ -649,7 +647,8 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     drop(std::fs::remove_file(&db_snapshot));
 
     let fresh_sid = new_session_id();
-    let expires_at = restored_session_expiry(Utc::now().timestamp(), CONFIG.session_duration)?;
+    let expires_at =
+        restored_session_expiry(jiff::Timestamp::now().as_second(), CONFIG.session_duration)?;
     let session_result = match db::create_session(live_conn, &fresh_sid, admin_id, expires_at) {
         Ok(()) => {
             tracing::info!(target: "admin", admin_id = admin_id, "{completion_log}");
@@ -670,36 +669,30 @@ pub(super) fn execute_full_restore<R: std::io::Read + Seek>(
     session_result
 }
 
+#[cfg(unix)]
 fn restrict_private_key_material_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
 
-        let metadata = std::fs::metadata(path).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
-        })?;
-        let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|error| {
-            AppError::Internal(anyhow::anyhow!(
-                "Set permissions on {}: {error}",
-                path.display()
-            ))
-        })?;
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!("Inspect {}: {error}", path.display()))
+    })?;
+    let mode = if metadata.is_dir() { 0o700 } else { 0o600 };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|error| {
+        AppError::Internal(anyhow::anyhow!(
+            "Set permissions on {}: {error}",
+            path.display()
+        ))
+    })?;
 
-        if metadata.is_dir() {
-            for entry in std::fs::read_dir(path).map_err(|error| {
-                AppError::Internal(anyhow::anyhow!("Read {}: {error}", path.display()))
-            })? {
-                let entry = entry.map_err(|error| {
-                    AppError::Internal(anyhow::anyhow!("Read dir entry: {error}"))
-                })?;
-                restrict_private_key_material_permissions(&entry.path())?;
-            }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path).map_err(|error| {
+            AppError::Internal(anyhow::anyhow!("Read {}: {error}", path.display()))
+        })? {
+            let entry = entry
+                .map_err(|error| AppError::Internal(anyhow::anyhow!("Read dir entry: {error}")))?;
+            restrict_private_key_material_permissions(&entry.path())?;
         }
     }
-
-    #[cfg(not(unix))]
-    let _ = path;
 
     Ok(())
 }

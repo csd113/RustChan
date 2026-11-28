@@ -31,7 +31,11 @@ pub(super) fn check_disk_space(dir: &Path, needed_bytes: usize) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "shared upload callers propagate preflight failures on Unix"
+)]
 /// Skips the Unix-specific free-space preflight on other platforms.
-pub(super) fn check_disk_space(_dir: &Path, _needed_bytes: usize) -> Result<()> {
+pub(super) const fn check_disk_space(_dir: &Path, _needed_bytes: usize) -> Result<()> {
     Ok(())
 }

@@ -15,7 +15,8 @@ before starting a large behavior or architecture change.
 ## Build and run
 
 Install Git, [Rust through rustup](https://rustup.rs), and your platform's native
-build tools. The supported minimum Rust version is **1.99.1**, also used in CI.
+build tools. The checkout, CI, and native release builds use **Rust 1.100.1**.
+The supported minimum remains **1.100.0**, which the Docker builder currently uses.
 Linux needs a C/C++ build toolchain; macOS needs Xcode Command Line Tools; Windows
 MSVC builds need the Visual Studio C++ build tools and Windows SDK.
 

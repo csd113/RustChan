@@ -44,7 +44,9 @@ const BASE_SCHEMA_SQL: &str = "
         access_mode         TEXT NOT NULL DEFAULT 'public'
                                 CHECK (access_mode IN ('public', 'view_password', 'post_password')),
         access_password_hash TEXT NOT NULL DEFAULT '',
-        created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+        created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+        strict_metadata_uploads INTEGER NOT NULL DEFAULT 0
+            CHECK (typeof(strict_metadata_uploads) = 'integer' AND strict_metadata_uploads IN (0, 1))
     );
 
     CREATE TABLE IF NOT EXISTS threads (
@@ -1174,20 +1176,35 @@ fn boards_table_is_legacy_repairable(expected: &TableShape, actual: &TableShape)
         && actual.autoincrement == expected.autoincrement
         && actual.without_rowid == expected.without_rowid
         && actual.strict == expected.strict
-        && (actual.check_constraints.is_empty()
-            || actual.check_constraints == expected.check_constraints)
+        && legacy_board_checks_match(expected, actual)
         && legacy_board_columns_match(expected, actual)
         && legacy_board_indexes_are_repairable(actual)
 }
 
+/// Accept only the known missing strict-policy constraint on older boards.
+fn legacy_board_checks_match(expected: &TableShape, actual: &TableShape) -> bool {
+    let mut legacy_checks = expected.check_constraints.clone();
+    if !actual.columns.contains_key("strict_metadata_uploads") {
+        let strict_check = normalize_schema_sql(
+            "(typeof(strict_metadata_uploads) = 'integer' AND strict_metadata_uploads IN (0, 1))",
+        );
+        let _removed = legacy_checks.remove(&strict_check);
+    }
+    actual.check_constraints.is_empty() || actual.check_constraints == legacy_checks
+}
+
 /// Compare every board column while accepting known historical defaults.
 fn legacy_board_columns_match(expected: &TableShape, actual: &TableShape) -> bool {
-    if actual.columns.len() != expected.columns.len() {
+    let missing_strict = usize::from(!actual.columns.contains_key("strict_metadata_uploads"));
+    if actual.columns.len().saturating_add(missing_strict) != expected.columns.len() {
         return false;
     }
 
     for (column, expected_shape) in &expected.columns {
         let Some(actual_shape) = actual.columns.get(column) else {
+            if column == "strict_metadata_uploads" {
+                continue;
+            }
             return false;
         };
         if !legacy_board_column_matches(column, expected_shape, actual_shape) {
@@ -1261,9 +1278,15 @@ fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> 
         baseline_schema_version()
     );
     let prior_sequence = autoincrement_sequence(conn, "boards")?;
+    let strict_value = if table_columns(conn, "boards")?.contains_key("strict_metadata_uploads") {
+        "strict_metadata_uploads"
+    } else {
+        "0"
+    };
     run_structural_schema_repair(
         conn,
-        r"
+        &format!(
+            r"
         CREATE TABLE boards_new (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             display_order   INTEGER NOT NULL DEFAULT 0,
@@ -1299,7 +1322,9 @@ fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> 
             access_mode         TEXT NOT NULL DEFAULT 'public'
                                     CHECK (access_mode IN ('public', 'view_password', 'post_password')),
             access_password_hash TEXT NOT NULL DEFAULT '',
-            created_at      INTEGER NOT NULL DEFAULT (unixepoch())
+            created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+            strict_metadata_uploads INTEGER NOT NULL DEFAULT 0
+                CHECK (typeof(strict_metadata_uploads) = 'integer' AND strict_metadata_uploads IN (0, 1))
         );
 
         INSERT INTO boards_new (
@@ -1310,7 +1335,7 @@ fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> 
             edit_window_secs, allow_editing, allow_self_delete, allow_archive,
             allow_video_embeds, allow_captcha, show_poster_ids,
             collapse_greentext, post_cooldown_secs, default_theme,
-            banner_mode, access_mode, access_password_hash, created_at
+            banner_mode, access_mode, access_password_hash, created_at, strict_metadata_uploads
         )
         SELECT
             id, display_order, short_name, name, description, nsfw, max_threads,
@@ -1321,12 +1346,13 @@ fn rebuild_boards_table_for_baseline(conn: &rusqlite::Connection) -> Result<()> 
             allow_video_embeds, allow_captcha, show_poster_ids,
             collapse_greentext, post_cooldown_secs, default_theme,
             banner_mode, access_mode,
-            access_password_hash, created_at
+            access_password_hash, created_at, {strict_value}
         FROM boards;
 
         DROP TABLE boards;
         ALTER TABLE boards_new RENAME TO boards;
-        ",
+        "
+        ),
         &failure_context,
         &success_log,
         |conn| {
@@ -2296,3 +2322,7 @@ fn check_constraints_from_tokens(tokens: &[String]) -> BTreeSet<String> {
 fn normalize_schema_sql(sql: &str) -> String {
     schema_sql_tokens(sql).join(" ")
 }
+
+#[cfg(test)]
+#[path = "tests/strict_metadata.rs"]
+mod strict_metadata_tests;

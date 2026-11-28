@@ -61,7 +61,7 @@ pub fn post_error_recovery_body(message: &str, prefill: Option<&PostFormState>) 
             sage = if state.sage { "yes" } else { "no" })
     });
     format!(
-        r#"<div class="page-box error-page"><h1>Post could not be completed</h1><p>{message}</p>
+        r#"<div class="page-box error-page"><h1 tabindex="-1" autofocus>Post could not be completed</h1><p>{message}</p>
 <p>Copy the saved draft below before leaving. Your browser’s Back button may restore the original form, but some browsers clear it. Open a fresh posting form and paste your saved text if needed. Choose attachments again; browsers cannot restore file selections on a new page.</p>
 <p>If the result is uncertain, check the thread or board for your post before submitting again.</p>{draft}<p><a href="/">return home</a></p></div>"#,
         message = escape_html(message)
@@ -99,6 +99,8 @@ const VIDEO_ACCEPT: &str = "video/mp4,video/webm,video/x-matroska,video/matroska
 /// MIME types and extensions accepted by the image input.
 const IMAGE_ACCEPT: &str =
     "image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,image/bmp,image/x-ms-bmp,image/tiff,.jpg,.jpeg,.png,.gif,.webp,.heic,.heif,.bmp,.tif,.tiff";
+/// Formats currently supported by the strict metadata sanitizer.
+const STRICT_IMAGE_ACCEPT: &str = "image/jpeg,image/png,image/gif,image/webp,image/bmp,image/x-ms-bmp,.jpg,.jpeg,.png,.gif,.webp,.bmp";
 /// Maximum number of characters in a poll option.
 const POLL_OPTION_MAX_LENGTH: usize = 200;
 /// Maximum number of options in a poll.
@@ -109,10 +111,8 @@ fn build_upload_form_policy(board: &Board) -> UploadFormPolicy {
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
 
     let uploads_enabled = board.allow_images
-        || board.allow_audio
-        || board.allow_video
-        || board.allow_pdf
-        || allow_any_files;
+        || (!board.strict_metadata_uploads
+            && (board.allow_audio || board.allow_video || board.allow_pdf || allow_any_files));
 
     UploadFormPolicy { uploads_enabled }
 }
@@ -195,6 +195,9 @@ fn single_upload_accept_and_hint(
     limits: UploadSizeLimitsMb,
 ) -> (String, String) {
     let (image_mb, video_mb, audio_mb, pdf_mb, generic_upload_mb) = limits;
+    if board.strict_metadata_uploads {
+        return (STRICT_IMAGE_ACCEPT.to_owned(), format!("Metadata-safe uploads required · jpg/static png/bmp/gif/webp · max {image_mb} MiB. Re-encoded as WebP; unsupported files and failed conversions are rejected. Does not remove identifying image content."));
+    }
     let mut accept_parts: Vec<&str> = Vec::new();
     let mut hint_parts: Vec<String> = Vec::new();
 
@@ -248,7 +251,8 @@ fn render_single_upload_row(board: &Board, audio_image_hint: &str) -> String {
     let limits = upload_size_limits_mb(board);
     let (image_mb, _, audio_mb, _, _) = limits;
     let allow_any_files = CONFIG.enable_any_file_uploads_feature && board.allow_any_files;
-    let audio_image_dual_mode = board.allow_audio
+    let audio_image_dual_mode = !board.strict_metadata_uploads
+        && board.allow_audio
         && board.allow_images
         && !board.allow_video
         && !board.allow_pdf
@@ -354,7 +358,10 @@ fn render_poll_creator(poll: Option<&PollFormState>) -> String {
               {poll_option_rows}
               <noscript><details><summary>More poll options</summary>{extra_poll_option_rows}</details></noscript>
             </div>
-            <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
+            <div class="poll-option-actions">
+              <button type="button" class="poll-add-btn" data-action="add-poll-option">+ Add Option</button>
+              <span class="poll-option-status" role="status" data-role="poll-option-status"></span>
+            </div>
             <div class="poll-creator-row poll-duration-row">
               <label>Duration
                 <input type="number" name="poll_duration_value" value="{duration_value}" min="1" max="720" class="poll-duration-input">
@@ -425,18 +432,19 @@ pub(super) fn new_thread_form(
     let subject_value = prefill.map_or("", |state| state.subject.as_str());
     let body_value = prefill.map_or("", |state| state.body.as_str());
 
+    // A disabled default button prevents implicit submission without JavaScript.
     format!(
         r#"<div class="post-form-container">
 <div class="post-form-title">[ new thread ]</div>
 <form class="post-form" method="POST" action="/{board}" enctype="multipart/form-data">
   <input type="hidden" name="_csrf" value="{csrf}">
   <input type="hidden" name="submission_token" value="{submission_token}">
+  <noscript><button type="submit" disabled hidden></button></noscript>
   <table>
     <tr><td><label for="thread-name">name</label></td>
         <td><label class="post-form-mobile-label" for="thread-name">Name</label><input type="text" id="thread-name" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td><label for="thread-subject">subject</label></td>
-        <td><label class="post-form-mobile-label" for="thread-subject">Subject</label><input type="text" id="thread-subject" name="subject" value="{subject_value}" maxlength="128">
-            <button type="submit">post thread</button></td></tr>
+        <td><label class="post-form-mobile-label" for="thread-subject">Subject</label><input type="text" id="thread-subject" name="subject" value="{subject_value}" maxlength="128"></td></tr>
     <tr><td><label for="thread-body">body</label></td>
         <td><label class="post-form-mobile-label" for="thread-body">Body</label><textarea id="thread-body" name="body" rows="5" maxlength="4096">{body_value}</textarea>
             <div class="markup-hint">
@@ -455,6 +463,7 @@ pub(super) fn new_thread_form(
     {upload_progress_row}
     {captcha_row}
     {poll_creator}
+    <tr><td></td><td><button type="submit">post thread</button></td></tr>
   </table>
 </form>
 </div>
@@ -531,8 +540,7 @@ pub(super) fn reply_form(
     <tr><td><label for="reply-name">name</label></td>
         <td><label class="post-form-mobile-label" for="reply-name">Name</label><input type="text" id="reply-name" name="name" value="{name_value}" placeholder="Anonymous" maxlength="64"></td></tr>
     <tr><td><label for="reply-body">body</label></td>
-        <td><label class="post-form-mobile-label" for="reply-body">Body</label><textarea id="reply-body" name="body" rows="4" maxlength="4096">{body_value}</textarea>
-            <button type="submit">post reply</button></td></tr>
+        <td><label class="post-form-mobile-label" for="reply-body">Body</label><textarea id="reply-body" name="body" rows="4" maxlength="4096">{body_value}</textarea></td></tr>
     {uploads_disabled_row}
     {upload_row}
     {attachment_recovery}
@@ -540,6 +548,7 @@ pub(super) fn reply_form(
     <tr><td>options</td>
         <td><span class="post-form-mobile-label">Options</span><label class="sage-label"><input type="checkbox" name="sage" value="1"{sage_checked}> sage <span class="sage-hint">(don&apos;t bump thread)</span></label></td></tr>
     {captcha_row}
+    <tr><td></td><td><button type="submit">post reply</button></td></tr>
   </table>
 </form>
 </div>"#,

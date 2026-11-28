@@ -382,8 +382,8 @@ pub(super) const fn terminal_character(character: char) -> bool {
 /// Format a Unix timestamp as UTC without assuming a host timezone.
 #[must_use]
 pub fn timestamp(seconds: i64) -> String {
-    chrono::DateTime::from_timestamp(seconds, 0).map_or_else(
+    jiff::Timestamp::from_second(seconds).ok().map_or_else(
         || "Unknown time".to_owned(),
-        |time| time.format("%m-%d %H:%M:%S UTC").to_string(),
+        |time| time.strftime("%m-%d %H:%M:%S UTC").to_string(),
     )
 }

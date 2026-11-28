@@ -599,9 +599,9 @@ fn next_scheduled_backup_label(full_backups: &[BackupInfo], interval_hours: u64)
 }
 
 fn fmt_epoch(timestamp: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0).map_or_else(
+    jiff::Timestamp::from_second(timestamp).ok().map_or_else(
         || "unknown".to_owned(),
-        |datetime| datetime.format("%Y-%m-%d %H:%M UTC").to_string(),
+        |datetime| datetime.strftime("%Y-%m-%d %H:%M UTC").to_string(),
     )
 }
 
@@ -905,7 +905,7 @@ fn build_backup_summary(full_backups: &[BackupInfo]) -> BackupSummary {
         };
     };
 
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let age_hours = latest
         .modified_epoch
         .map(|ts| now.saturating_sub(ts).max(0) / 3600);

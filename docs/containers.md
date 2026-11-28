@@ -162,8 +162,8 @@ containers on compatible Macs and Windows computers.
 
 The publishing workflow assigns a `sha-<full-commit-SHA>` tag to each published
 commit. Stable version tags produce version and major/minor image tags, such as
-`1.7.5` and `1.7`; main-branch builds and stable semantic-version tags also update
-`latest`. Pin a published SHA or image digest for repeatable deployment. A SHA
+`1.8.0` and `1.8` for a `v1.8.0` release. Main-branch builds and stable version
+tags also update `latest`. Pin a published SHA or image digest for repeatable deployment. A SHA
 name alone does not prevent registry owners from moving or deleting a tag.
 Not every working-branch commit produces an image.
 

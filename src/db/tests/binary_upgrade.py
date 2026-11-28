@@ -600,6 +600,12 @@ time.sleep(0.2)
         inspect_database(data / "chan.db", self.args.expected_version)
         expected_candidate_rows = self.completed_pending_job(original_rows, data, pending_job)
         self.check("pending_old_version_job_resumes_without_losing_its_identity_or_payload")
+        # The strict metadata migration appends one opt-in flag. Expect it to
+        # be disabled on every retained board and still compare all old values.
+        expected_candidate_rows["boards"] = collections.Counter({
+            json.dumps([*json.loads(encoded), 0], ensure_ascii=True, separators=(",", ":")): count
+            for encoded, count in original_rows["boards"].items()
+        })
         preserved(expected_candidate_rows, rows(data / "chan.db"))
         files_preserved(original_files, inventory(data))
         self.controller_preserved(data, controller_files)

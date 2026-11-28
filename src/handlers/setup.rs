@@ -130,6 +130,7 @@ fn parse_preset(value: &str) -> SetupPreset {
 pub(in crate::server) struct SetupWizardForm {
     #[serde(rename = "_csrf")]
     pub csrf: Option<String>,
+    pub edit_setup: Option<String>,
     pub preset: String,
     pub site_name: String,
     pub site_subtitle: Option<String>,
@@ -681,6 +682,19 @@ pub(in crate::server) async fn setup_review(
     let (setup_state, _is_admin) = load_setup_state(&state, admin_session_id(&jar)).await?;
     let current_theme = crate::handlers::board::current_theme_from_jar(&jar);
     validate_setup_csrf(&jar, &headers, secure_context, form.csrf.as_deref())?;
+    if form.edit_setup.as_deref() == Some("1") {
+        let (jar, csrf) = ensure_setup_csrf(jar, &headers, secure_context);
+        let body = setup_form_page(
+            &csrf,
+            setup_state,
+            &form,
+            &[],
+            request_transport_warning(&headers, secure_context).as_deref(),
+            state.ffmpeg_available,
+            current_theme.as_deref(),
+        );
+        return Ok((jar, Html(body)).into_response());
+    }
     let parsed = match parse_setup_form(&form, setup_state.admin_count) {
         Ok(parsed) => parsed,
         Err(errors) => {
@@ -1056,6 +1070,7 @@ impl SetupWizardForm {
         let defaults = preset_defaults(preset);
         Self {
             csrf: None,
+            edit_setup: None,
             preset: preset.as_str().to_owned(),
             site_name: defaults.site_name.to_owned(),
             site_subtitle: Some("select board to proceed".to_owned()),
@@ -1150,6 +1165,9 @@ fn setup_form_page(
             ),
         );
     }
+    if form.edit_setup.as_deref() == Some("1") {
+        alerts.push_str(r#"<div class="setup-alert" role="status">Your settings are still here. Re-enter any required passwords before reviewing again.</div>"#);
+    }
     if !errors.is_empty() {
         alerts.push_str(
             r#"<div class="setup-validation" role="alert" tabindex="-1"><h2>Check the highlighted setup details</h2><p>Nothing was saved. Correct the following items and review again.</p><ul>"#,
@@ -1160,16 +1178,18 @@ fn setup_form_page(
         alerts.push_str("</ul></div>");
     }
     let admin_fields = if state.admin_count == 0 {
-        r#"<section class="setup-section" aria-labelledby="setup-step-3">
+        format!(
+            r#"<section class="setup-section" aria-labelledby="setup-step-3">
 <div class="setup-section-head"><span class="setup-step">Step 3</span><h2 id="setup-step-3">Admin account</h2><p>Create the first administrator. The password is hashed before setup is committed.</p></div>
 <div class="setup-grid">
-<label><span>Username</span><input name="admin_username" value="admin" required autocomplete="username" aria-describedby="setup-admin-help"></label>
+<label><span>Username</span><input name="admin_username" value="{username}" required autocomplete="username" aria-describedby="setup-admin-help"></label>
 <label><span>Password</span><input type="password" name="admin_password" required autocomplete="new-password" minlength="12" aria-describedby="setup-admin-help"></label>
 <label><span>Confirm password</span><input type="password" name="admin_password_confirm" required autocomplete="new-password" minlength="12" aria-describedby="setup-admin-help"></label>
 </div>
 <p class="setup-field-help" id="setup-admin-help">Use 3–32 letters, numbers, underscores, or dashes for the username and at least 12 characters for the password.</p>
-</section>"#
-            .to_owned()
+</section>"#,
+            username = escape_html(form.admin_username.as_deref().unwrap_or("admin")),
+        )
     } else {
         r#"<section class="setup-section" aria-labelledby="setup-step-3"><div class="setup-section-head"><span class="setup-step">Step 3</span><h2 id="setup-step-3">Admin account</h2><p>Existing administrator credentials stay unchanged.</p></div><p class="admin-copy">Continue as the currently authenticated administrator; this wizard will not replace credentials.</p></section>"#.to_owned()
     };
@@ -1244,7 +1264,7 @@ fn setup_form_page(
 <div class="setup-section-head"><span class="setup-step">Step 7</span><h2 id="setup-step-7">Anti-spam and privacy</h2><p>Choose initial abuse controls and visitor-facing activity defaults.</p></div>
 <div class="setup-grid">
 <label class="setup-check"><input type="checkbox" name="allow_captcha" value="1"{allow_captcha}> Enable CAPTCHA on default board</label>
-<label><span>CAPTCHA type</span><select name="captcha_type"><option value="builtin">Built-in</option><option value="disabled">Disabled</option></select></label>
+<label><span>CAPTCHA type</span><select name="captcha_type"><option value="builtin">Built-in</option><option value="disabled"{captcha_disabled}>Disabled</option></select></label>
 <label><span>Posting cooldown (seconds)</span><input type="number" name="post_cooldown_secs" value="{post_cooldown_secs}" min="0" max="3600"></label>
 <label class="setup-check"><input type="checkbox" name="homepage_new_thread_badges_enabled" value="1"{homepage_new_thread_badges_enabled}> Homepage new-thread badges</label>
 <label class="setup-check"><input type="checkbox" name="homepage_new_reply_badges_enabled" value="1"{homepage_new_reply_badges_enabled}> Homepage new-reply badges</label>
@@ -1304,6 +1324,11 @@ fn setup_form_page(
         audio_limit_mib = escape_html(&form.audio_limit_mib),
         pdf_limit_mib = escape_html(&form.pdf_limit_mib),
         allow_captcha = checked(form.allow_captcha.as_deref()),
+        captcha_disabled = if form.captcha_type.as_deref() == Some("disabled") {
+            " selected"
+        } else {
+            ""
+        },
         post_cooldown_secs = escape_html(form.post_cooldown_secs.as_deref().unwrap_or("0")),
         homepage_new_thread_badges_enabled =
             checked(form.homepage_new_thread_badges_enabled.as_deref()),
@@ -1350,7 +1375,7 @@ fn setup_review_page(
         r#"<main class="setup-wizard">
 <div class="setup-head"><p class="setup-eyebrow">Final review</p><h1>Review setup</h1><p>Confirm these settings before RustChan writes configuration or setup state.</p></div>
 <section class="setup-section setup-review-card" aria-labelledby="setup-review-heading">
-<div class="setup-section-head"><span class="setup-step">Review</span><h2 id="setup-review-heading">Configuration summary</h2><p>Use “edit settings” to go back without making changes.</p></div>
+<div class="setup-section-head"><span class="setup-step">Review</span><h2 id="setup-review-heading">Configuration summary</h2><p>Use “edit settings” to keep this draft and make corrections. For your protection, you will need to re-enter any required passwords.</p></div>
 <dl class="setup-review-list">
 <dt>Preset</dt><dd>{preset}</dd>
 <dt>Site</dt><dd>{site}</dd>
@@ -1363,7 +1388,7 @@ fn setup_review_page(
 <form class="setup-review-actions" method="POST" action="/setup/finish">
 {hidden}
 <button type="submit">finish setup</button>
-<a class="button-secondary" href="/setup">edit settings</a>
+<button class="button-secondary" type="submit" name="edit_setup" value="1" formaction="/setup/review">edit settings</button>
 </form>
 </section>
 </main>"#,
@@ -1425,12 +1450,14 @@ fn preset_options(selected: &str) -> String {
         let description = match preset {
             SetupPreset::Public => "Public posting defaults with Tor available.",
             SetupPreset::Private => "Restricted board visibility and conservative access.",
-            SetupPreset::Local => "Loopback-focused defaults for local evaluation.",
+            SetupPreset::Local => {
+                "Board defaults for local evaluation. This does not change where RustChan listens."
+            }
         };
         templates::append_html(
             &mut out,
             format_args!(
-                r#"<div class="setup-preset"><label><input type="radio" name="preset" value="{value}"{checked}> <span>{label}</span></label><p>{description}</p><a href="/setup?preset={value}">load defaults</a></div>"#,
+                r#"<div class="setup-preset"><label><input type="radio" name="preset" value="{value}"{checked}> <span>{label}</span></label><p>{description}</p><a href="/setup?preset={value}" aria-label="Load {label} defaults">load defaults</a></div>"#,
                 value = preset.as_str(),
                 checked = if selected == preset.as_str() {
                     " checked"
