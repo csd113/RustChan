@@ -1,15 +1,18 @@
 name: Release
+run-name: Release ${{ github.event_name == 'workflow_dispatch' && 'v1.8.0 retry' || github.ref_name }}
 
 on:
   push:
     tags:
       - "v*"
+  # Retry the existing immutable v1.8.0 candidate using the corrected main workflow.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && 'refs/tags/v1.8.0' || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -24,9 +27,70 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
+    outputs:
+      tag: ${{ steps.candidate.outputs.tag }}
+      sha: ${{ steps.candidate.outputs.sha }}
+      tag_object: ${{ steps.candidate.outputs.tag_object }}
+
     steps:
-      - name: Checkout
+      - name: Resolve and verify release candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              [[ "$GITHUB_REF" == refs/tags/v* ]]
+              tag="$GITHUB_REF_NAME"
+              ;;
+            workflow_dispatch)
+              if [[ "$GITHUB_REPOSITORY" != csd113/RustChan ||
+                    "$GITHUB_REF" != refs/heads/main ||
+                    "$GITHUB_REF_PROTECTED" != true ]]; then
+                echo "The v1.8.0 retry must run from protected csd113/RustChan main" >&2
+                exit 1
+              fi
+              tag=v1.8.0
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "$tag" =~ ^v[0-9A-Za-z._-]+$ ]]
+          ref="refs/tags/$tag"
+          refs="$(git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$ref" "$ref^{}")"
+          tag_object="$(awk -v ref="$ref" '$2 == ref {print $1}' <<< "$refs")"
+          sha="$(awk -v ref="$ref^{}" '$2 == ref {print $1}' <<< "$refs")"
+          sha="${sha:-$tag_object}"
+          [[ "$tag_object" =~ ^[0-9a-f]{40}$ && "$sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            if [[ "$tag_object" != a7a8132c0551831e6e87fe016b054ae3cee2499c ||
+                  "$sha" != d890ad2609a06d276f1bc67b0544089f4d0d96c5 ]]; then
+              echo "The original v1.8.0 tag object or candidate commit no longer matches" >&2
+              exit 1
+            fi
+          elif [[ "$sha" != "$GITHUB_SHA" && "$tag_object" != "$GITHUB_SHA" ]]; then
+            echo "Release tag no longer matches the triggering tag push" >&2
+            exit 1
+          fi
+          printf 'tag=%s\nsha=%s\ntag_object=%s\n' "$tag" "$sha" "$tag_object" >> "$GITHUB_OUTPUT"
+          printf 'Workflow %s at %s will release %s at %s\n' "$GITHUB_WORKFLOW_REF" "$GITHUB_WORKFLOW_SHA" "$tag" "$sha"
+
+      - name: Checkout release candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.candidate.outputs.sha }}
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '1' }}
+          persist-credentials: false
+
+      - name: Verify pinned candidate checkout
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            git merge-base --is-ancestor "$CANDIDATE_SHA" "$GITHUB_SHA"
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
@@ -41,6 +105,8 @@ jobs:
 
       - name: Verify release tag matches package version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.candidate.outputs.tag }}
         run: |
           package_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c '
           import json
@@ -57,8 +123,8 @@ jobs:
           print(versions[0])
           ')"
           expected_tag="v${package_version}"
-          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
-            echo "Release tag ${GITHUB_REF_NAME} does not match package version ${expected_tag}" >&2
+          if [[ "${RELEASE_TAG}" != "${expected_tag}" ]]; then
+            echo "Release tag ${RELEASE_TAG} does not match package version ${expected_tag}" >&2
             exit 1
           fi
 
@@ -120,8 +186,11 @@ jobs:
             asset_suffix: windows-x86_64
 
     steps:
-      - name: Checkout
+      - name: Checkout release candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-validation.outputs.sha }}
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
@@ -159,7 +228,7 @@ jobs:
         env:
           ASSET_SUFFIX: ${{ matrix.asset_suffix }}
           BINARY_SUFFIX: ${{ matrix.binary_suffix }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.release-validation.outputs.tag }}
           RUSTCHAN_TARGET: ${{ matrix.target }}
           RUNNER_OS: ${{ runner.os }}
         run: |
@@ -223,26 +292,30 @@ jobs:
 
   upgrade-verification:
     name: Verify binary upgrades
-    needs: build
+    needs: [release-validation, build]
     uses: ./.github/workflows/upgrade.yml
     with:
       release_artifacts: true
+      candidate_sha: ${{ needs.release-validation.outputs.sha }}
 
   release:
     name: Prepare GitHub Release
     runs-on: ubuntu-24.04
-    needs: [build, upgrade-verification]
+    needs: [release-validation, build, upgrade-verification]
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
       - name: Checkout release changelog
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-validation.outputs.sha }}
+          persist-credentials: false
 
       - name: Extract release notes
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.release-validation.outputs.tag }}
         run: |
           python3 - <<'PY'
           import os
@@ -269,6 +342,8 @@ jobs:
 
       - name: Generate checksum manifest
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.release-validation.outputs.tag }}
         run: |
           set -euo pipefail
           cd release-assets
@@ -281,7 +356,7 @@ jobs:
             exit 1
           fi
           for suffix in "${expected[@]}"; do
-            test -f "rustchan-cli-${GITHUB_REF_NAME}-${suffix}.zip"
+            test -f "rustchan-cli-${RELEASE_TAG}-${suffix}.zip"
           done
 
           LC_ALL=C printf '%s\n' "${archives[@]}" \
@@ -300,7 +375,7 @@ jobs:
       - name: Refuse to modify a published release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.release-validation.outputs.tag }}
         run: |
           python3 - <<'PY'
           import json, os, urllib.error, urllib.parse, urllib.request
@@ -318,15 +393,31 @@ jobs:
                   raise SystemExit("Refusing to alter an already published release")
           PY
 
+      - name: Recheck existing tag and candidate before draft creation
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.release-validation.outputs.tag }}
+          CANDIDATE_SHA: ${{ needs.release-validation.outputs.sha }}
+          TAG_OBJECT: ${{ needs.release-validation.outputs.tag_object }}
+        run: |
+          set -euo pipefail
+          ref="refs/tags/$RELEASE_TAG"
+          refs="$(git ls-remote --exit-code --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$ref" "$ref^{}")"
+          tag_object="$(awk -v ref="$ref" '$2 == ref {print $1}' <<< "$refs")"
+          sha="$(awk -v ref="$ref^{}" '$2 == ref {print $1}' <<< "$refs")"
+          [[ "$tag_object" == "$TAG_OBJECT" && "${sha:-$tag_object}" == "$CANDIDATE_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE_SHA" ]]
+
       - name: Prepare draft GitHub Release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           draft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(needs.release-validation.outputs.tag, '-') }}
           make_latest: false
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ needs.release-validation.outputs.tag }}
+          name: ${{ needs.release-validation.outputs.tag }}
+          target_commitish: ${{ needs.release-validation.outputs.sha }}
           body_path: RELEASE_NOTES.md
           files: release-assets/*

@@ -8,6 +8,10 @@ on:
         description: Test the exact archives built by the calling release workflow
         type: boolean
         default: false
+      candidate_sha:
+        description: Exact candidate commit used to build the release archives
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -50,9 +54,17 @@ jobs:
             asset: windows-x86_64
             old_sha256: 2a4609a3684b7c822c72fef66d2c28ba5be79501233a7d4df43b90713ed4cd14
     steps:
+      - name: Require a pinned candidate for release archives
+        if: inputs.release_artifacts
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
       - name: Checkout candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.candidate_sha || github.sha }}
           persist-credentials: false
 
       - name: Install Rust toolchain
@@ -115,12 +127,16 @@ jobs:
           path: old171
           persist-credentials: false
 
+      - name: Install historical toolchain for the Intel Mac 1.7.1 baseline
+        if: matrix.old_sha256 == 'source'
+        run: rustup toolchain install 1.99.1 --profile minimal --target x86_64-apple-darwin --no-self-update
+
       - name: Build reproducible Intel Mac 1.7.1 source baseline
         if: matrix.old_sha256 == 'source'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
-          cargo build --locked --release --manifest-path old171/Cargo.toml --target x86_64-apple-darwin
+          cargo +1.99.1 build --locked --release --manifest-path old171/Cargo.toml --target x86_64-apple-darwin
           mkdir -p "$RUNNER_TEMP/old171"
           cp target/x86_64-apple-darwin/release/rustchan-cli "$RUNNER_TEMP/old171/rustchan-cli"
           git -C old171 rev-parse HEAD
